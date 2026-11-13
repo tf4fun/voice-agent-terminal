@@ -1,0 +1,32 @@
+# Local credentials and configuration
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.pem
+*.key
+
+# Runtime data and private recordings
+/data/
+/gateway/data/
+/recordings/
+/transcripts/
+*.db
+*.db-wal
+*.db-shm
+*.log
+
+# Build output
+/bin/
+/build/
+/gateway/bin/
+/firmware/build/
+/firmware/managed_components/
+/firmware/sdkconfig
+/firmware/sdkconfig.old
+
+# Local tooling
+.DS_Store
+.idea/
+.vscode/
+.agents/
