@@ -263,3 +263,36 @@ func TestAuthIDsPaginationAndReadLimits(t *testing.T) {
 	e.request(t, "GET", base+"/segments/"+segment+"/text?offset=1", nil, 400)
 	e.request(t, "GET", base+"/segments/"+segment+"/text?limit=10000", nil, 400)
 }
+
+func TestDraftsWorkWhileHermesIsUnconfigured(t *testing.T) {
+	st, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(func(string) string { return "" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.APIKey = "device-test"
+	cfg.ASRProvider = "fake"
+	svc := gateway.New(st, cfg, &hermes.Client{BaseURL: cfg.HermesURL}, &asr.Fake{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	e := &environment{service: svc, server: httptest.NewServer(New(svc))}
+	t.Cleanup(func() { e.server.Close(); svc.Close(); st.Close() })
+	session, segment := model.NewID(), model.NewID()
+	base := "/api/v1/sessions/" + session
+	e.request(t, "POST", "/api/v1/sessions", map[string]string{"id": session, "title": "本地草稿"}, 202)
+	e.request(t, "POST", base+"/segments", map[string]any{"id": segment, "revision": 1, "text": "先记录想法"}, 201)
+	voice := model.NewID()
+	e.request(t, "POST", base+"/segments", map[string]any{"id": voice, "revision": 2}, 201)
+	if err := svc.Capture(context.Background(), session, voice, 3, io.NopCloser(bytes.NewReader(make([]byte, 6400))), 16000); err != nil {
+		t.Fatal(err)
+	}
+	e.request(t, "POST", base+"/messages", map[string]any{"id": model.NewID(), "revision": 2}, 503)
+	var draft struct {
+		Items []model.Segment `json:"items"`
+	}
+	_ = json.Unmarshal(e.request(t, "GET", base+"/draft", nil, 200), &draft)
+	if len(draft.Items) != 2 || draft.Items[0].Preview != "先记录想法" || draft.Items[1].Preview != "测试转写" {
+		t.Fatalf("draft lost without upstream: %+v", draft)
+	}
+}

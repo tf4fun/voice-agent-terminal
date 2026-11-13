@@ -42,6 +42,13 @@ func (s *Store) Send(ctx context.Context, sessionID, id, modelName, scope string
 		if err := checkDraft(ctx, tx, sessionID, revision); err != nil {
 			return err
 		}
+		session, err := readSession(ctx, tx, sessionID)
+		if err != nil {
+			return err
+		}
+		if session.State != "ready" {
+			return ErrBusy
+		}
 		var active int
 		if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM messages WHERE session_id=? AND state IN ('queued','sending','waiting','receiving','attention','unconfirmed')", sessionID).Scan(&active); err != nil {
 			return err

@@ -55,6 +55,9 @@ Creation is persisted before contacting Hermes. A ready session returns 201;
 an unsettled creation returns 202 with `state: "creating"`. Background recovery
 retries the same upstream ID. Hermes 409 responses are reconciled against the
 existing API session. Session titles are device labels stored in Go.
+Draft creation and transcription remain available while a session is creating.
+Sending waits for the upstream session to become ready. This also supports local
+draft development with fake ASR and upstream credentials left empty.
 
 `GET /api/v1/sessions` lists the local session index. `GET` and `PATCH` on
 `/api/v1/sessions/{id}` read metadata and update the local title.

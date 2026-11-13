@@ -224,7 +224,7 @@ func (s *Store) FinishDelete(ctx context.Context, id string) error {
 
 func bumpDraft(ctx context.Context, tx *sql.Tx, sessionID string) (int64, error) {
 	var revision int64
-	err := tx.QueryRowContext(ctx, "UPDATE sessions SET draft_revision=draft_revision+1,updated_at=? WHERE id=? AND state='ready' RETURNING draft_revision", time.Now().UnixMilli(), sessionID).Scan(&revision)
+	err := tx.QueryRowContext(ctx, "UPDATE sessions SET draft_revision=draft_revision+1,updated_at=? WHERE id=? AND state IN ('ready','creating') RETURNING draft_revision", time.Now().UnixMilli(), sessionID).Scan(&revision)
 	return revision, missing(err)
 }
 
@@ -233,7 +233,7 @@ func checkDraft(ctx context.Context, tx *sql.Tx, sessionID string, revision int6
 	if err != nil {
 		return err
 	}
-	if session.State != "ready" {
+	if session.State != "ready" && session.State != "creating" {
 		return ErrBusy
 	}
 	if session.Revision != revision {

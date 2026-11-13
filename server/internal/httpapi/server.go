@@ -196,17 +196,16 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "invalid_session")
 		return
 	}
-	if !s.service.Hermes.Enabled() {
-		writeError(w, 503, "hermes_not_configured")
-		return
-	}
 	session, err := s.service.Store.BeginSession(r.Context(), body.ID, body.Title)
 	if err != nil {
 		storeError(w, err)
 		return
 	}
 	status := 201
-	if err := s.service.Reconcile(r.Context(), session); err != nil {
+	if !s.service.Hermes.Enabled() && session.State == "creating" {
+		status = 202
+		_ = s.service.Store.SessionError(r.Context(), session.ID, "hermes_not_configured")
+	} else if err := s.service.Reconcile(r.Context(), session); err != nil {
 		status = 202
 	}
 	session, err = s.service.Store.Session(r.Context(), body.ID)
