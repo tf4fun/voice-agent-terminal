@@ -24,9 +24,10 @@ against the selected Hermes version before depending on them.
 | Hermes | Conversation history, model context, session runtime and configured agent capabilities |
 | OpenAI | Transcription of the audio submitted by Go |
 
-Go's session index serves the device's view of Hermes sessions. Creation,
-renaming and deletion require coordinated state updates and recovery after an
-interrupted operation. History reads through Go use bounded text windows.
+Go's session index serves the device's view of Hermes sessions. Creation and
+deletion have persisted pending states for interrupted-operation recovery.
+Device titles are managed locally in Go. History reads through Go use bounded
+text windows.
 
 ## Draft composition
 
@@ -95,12 +96,13 @@ interaction remains an open product decision.
 
 The mDNS record names the Go service and advertises a protocol version. The
 gateway's capability response describes available chat, draft and transcription
-features. Fix the service type, routes, schemas, payload bounds and resume
-semantics together with the first protocol milestone.
+features. The implemented service type, routes, payload bounds and recovery
+semantics are recorded in the [server contract](server.md).
 
-Audio upload and text/event delivery need independent flow control. Candidate
-device transports include HTTP audio upload and SSE events. Select the transport
-using measured device memory and latency. OpenAI's realtime transport runs in Go.
+The server currently accepts HTTP PCM16 audio uploads and sends bounded SSE
+events. Audio upload and event delivery have independent flow control. Device
+transport selection still needs measured memory and latency. OpenAI's realtime
+transport runs in Go.
 
 ## References
 

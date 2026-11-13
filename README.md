@@ -9,10 +9,46 @@ OpenAI transcription, and Hermes Chat Completions.
 
 ## Project status
 
-This repository starts with the agreed product requirements and architecture.
-Gateway implementation, device firmware, and integration validation are upcoming
-milestones. The existing [voice-memo](https://github.com/tf4fun/voice-memo)
-project provides hardware and implementation references.
+The Go gateway implements mDNS, persistent sessions and editable drafts,
+OpenAI realtime transcription, Hermes Chat Completions, media filtering and
+message recovery. Offline adapter tests and a real-binary smoke test exercise
+the server workflow. Live provider validation needs local credentials.
+Device pages and physical interactions will be designed after the server.
+The existing [voice-memo](https://github.com/tf4fun/voice-memo) project provides
+hardware and reusable server foundations.
+
+## Run the server
+
+Use Go 1.27.3 or later.
+
+```sh
+cd server
+cp .env.example .env.local
+# Fill in OpenAI and Hermes settings in .env.local.
+go run ./cmd/voice-agent-server
+```
+
+The binary reads the environment file literally. Process variables take
+precedence. `/api/v1/health` reports local service health and `/api/v1/server`
+reports capabilities. Missing upstream keys leave the corresponding capability
+disabled while the local service remains inspectable.
+
+See [server configuration and API](docs/server.md) for request examples.
+
+## Validate and build
+
+```sh
+cd server
+go vet ./...
+go test -race ./...
+cd ..
+./tools/smoke-server.sh
+./tools/build-server.sh amd64
+./tools/build-server.sh arm64
+```
+
+GitHub Actions runs the server checks and builds static Linux AMD64 and ARM64
+binaries with SHA-256 checksums. Artifacts are attached to each successful run.
 
 ## Interaction
 
@@ -51,6 +87,7 @@ budgets, and final button mappings remain design and measurement work.
 
 - [Architecture and data ownership](docs/architecture.md)
 - [Milestones and acceptance](docs/roadmap.md)
+- [Server configuration and API](docs/server.md)
 - [Agent contribution instructions](AGENTS.md)
 
 ## References
@@ -61,3 +98,9 @@ budgets, and final button mappings remain design and measurement work.
 
 Provider availability, session continuation, retry behavior, microphone latency,
 and device memory usage require integration tests against the selected versions.
+
+## License and reuse
+
+This project follows the MIT license retained in [LICENSE](LICENSE).
+[NOTICE](NOTICE) records the server foundations adapted from voice-memo and
+its FoloToy/ai-passport lineage.

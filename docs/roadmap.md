@@ -4,8 +4,10 @@
 
 # Milestones
 
-All implementation milestones below are planned. Repository initialization
-establishes the requirements and acceptance criteria.
+M1–M4 have server implementations and offline acceptance tests. Live provider
+and LAN acceptance remain pending. M5 device pages and interactions are deferred
+until the server contract is reviewed. M6 includes the implemented server race,
+restart and binary smoke tests, with live-system acceptance still upcoming.
 
 | Milestone | Deliverable | Acceptance |
 | --- | --- | --- |
@@ -20,7 +22,7 @@ establishes the requirements and acceptance criteria.
 
 - Device audio encoding, transport, sample rate and buffer limits.
 - Draft text editing granularity and physical button mappings.
-- Device API routes, event sizes, text windows and session page size.
+- Validate the implemented API limits and session page size against the device.
 - Audio and reply-cache retention.
 - Presentation of pending approvals and unavailable media.
 - Provider permissions, latency and accuracy using the supplied credentials.

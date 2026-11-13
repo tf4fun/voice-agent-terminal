@@ -1,0 +1,6 @@
+Voice Agent Terminal reuses and adapts code from
+https://github.com/tf4fun/voice-memo and its FoloToy/ai-passport lineage.
+
+The mDNS publisher, SQLite lifecycle, bounded event fan-out, service startup and
+shutdown patterns, and Linux build script are derived from that MIT-licensed
+project. The original copyright and permission notice are retained in LICENSE.

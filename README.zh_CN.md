@@ -9,9 +9,43 @@ OpenAI 语音转写和 Hermes Chat Completions。
 
 ## 项目状态
 
-仓库初始内容为已确定的产品需求与架构。Go 服务、设备固件和集成验证
-将按里程碑推进。现有 [voice-memo](https://github.com/tf4fun/voice-memo)
-项目提供硬件与实现参考。
+Go 服务已实现 mDNS、持久化会话与可编辑草稿、OpenAI 实时转写、Hermes
+Chat Completions、媒体过滤和消息恢复。离线上游适配测试和真实二进制烟雾
+测试覆盖服务端流程，真实上游验证需要本地凭据。设备页面和实体交互将在服务端
+之后设计。现有 [voice-memo](https://github.com/tf4fun/voice-memo)
+项目提供硬件参考和可复用的服务端基础。
+
+## 启动服务
+
+使用 Go 1.27.3 或更新版本。
+
+```sh
+cd server
+cp .env.example .env.local
+# 在 .env.local 中填写 OpenAI 与 Hermes 配置。
+go run ./cmd/voice-agent-server
+```
+
+程序按字面值读取环境文件，进程环境变量优先。`/api/v1/health` 返回本地服务
+健康状态，`/api/v1/server` 返回能力声明。上游密钥缺失时，对应能力显示为禁用，
+本地服务仍可检查。
+
+请求示例见 [服务端配置与接口](docs/server.zh_CN.md)。
+
+## 验证与构建
+
+```sh
+cd server
+go vet ./...
+go test -race ./...
+cd ..
+./tools/smoke-server.sh
+./tools/build-server.sh amd64
+./tools/build-server.sh arm64
+```
+
+GitHub Actions 运行服务端检查，构建静态 Linux AMD64 和 ARM64 二进制，
+并生成 SHA-256 校验文件。成功工作流附带对应构建产物。
 
 ## 交互流程
 
@@ -46,6 +80,7 @@ ESP32-S3 与 PSRAM。音频传输、编码方式、内存预算和最终按键�
 
 - [架构与数据归属](docs/architecture.zh_CN.md)
 - [里程碑与验收](docs/roadmap.zh_CN.md)
+- [服务端配置与接口](docs/server.zh_CN.md)
 - [AI 协作说明](AGENTS.zh_CN.md)
 
 ## 参考资料
@@ -55,3 +90,8 @@ ESP32-S3 与 PSRAM。音频传输、编码方式、内存预算和最终按键�
 - [AI Passport 硬件与固件参考](https://github.com/FoloToy/ai-passport)
 
 模型权限、会话续接、重试行为、麦克风延迟和设备内存占用，都需要针对选定版本进行集成验证。
+
+## 许可与复用
+
+项目沿用 [LICENSE](LICENSE) 中保留的 MIT 许可。[NOTICE](NOTICE) 记录
+从 voice-memo 及其 FoloToy/ai-passport 来源适配的服务端基础。
