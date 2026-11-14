@@ -54,7 +54,9 @@ cd ..
 
 GitHub Actions runs the server checks and builds static Linux AMD64 and ARM64
 binaries with SHA-256 checksums. A separate ESP-IDF 5.5.3 job builds and verifies
-the ESP32-C3 firmware. Artifacts are attached to successful runs.
+the ESP32-C3 firmware. Artifacts are attached to successful runs. Pushing a
+`v*` tag runs both builds and publishes the full firmware image, both server
+binaries and a combined `SHA256SUMS` as GitHub release assets.
 
 ## Interaction
 
