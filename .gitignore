@@ -9,6 +9,7 @@
 # Runtime data and private recordings
 /data/
 /gateway/data/
+/server/data/
 /recordings/
 /transcripts/
 *.db

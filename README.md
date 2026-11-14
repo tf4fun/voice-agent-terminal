@@ -9,21 +9,64 @@ OpenAI transcription, and Hermes Chat Completions.
 
 ## Project status
 
-This repository starts with the agreed product requirements and architecture.
-Gateway implementation, device firmware, and integration validation are upcoming
-milestones. The existing [voice-memo](https://github.com/tf4fun/voice-memo)
-project provides hardware and implementation references.
+The Go gateway implements mDNS, persistent sessions and editable drafts,
+OpenAI realtime transcription, Hermes Chat Completions, media filtering and
+message recovery. Offline adapter tests and a real-binary smoke test exercise
+the server workflow. Real OpenAI transcription and two-turn Hermes chat passed
+on 2026-11-13 against Hermes 0.23.1. The initial AI Passport firmware implements
+sessions, recording, editable drafts and replies. Device tests passed discovery,
+recording, appended transcription, sending, reply display and settings navigation.
+Interaction refinement, workload memory measurements and fault recovery remain open.
+The existing [voice-memo](https://github.com/tf4fun/voice-memo) project provides
+hardware and reusable server foundations.
+
+## Run the server
+
+Use Go 1.27.3 or later.
+
+```sh
+cd server
+cp .env.example .env.local
+# Fill in OpenAI and Hermes settings in .env.local.
+go run ./cmd/voice-agent-server
+```
+
+The binary reads the environment file literally. Process variables take
+precedence. `/api/v1/health` reports local service health and `/api/v1/server`
+reports capabilities. Missing upstream keys leave the corresponding capability
+disabled while the local service remains inspectable.
+
+Open the server root in a browser to list sessions, preview conversations and
+delete unwanted sessions with Hermes synchronization.
+See [server configuration and API](docs/server.md) for request examples.
+
+## Validate and build
+
+```sh
+cd server
+go vet ./...
+go test -race ./...
+cd ..
+./tools/smoke-server.sh
+./tools/build-server.sh amd64
+./tools/build-server.sh arm64
+```
+
+GitHub Actions runs the server checks and builds static Linux AMD64 and ARM64
+binaries with SHA-256 checksums. A separate ESP-IDF 5.5.3 job builds and verifies
+the ESP32-C3 firmware. Artifacts are attached to successful runs.
 
 ## Interaction
 
 1. Record a thought and view streaming transcription in a draft segment.
-2. Review the draft, record additional segments, and delete unwanted segments.
-3. Explicitly send the visible draft as one text message in the selected session.
-4. Read the streamed reply and continue the conversation.
+2. Review the transcript in the conversation. Hold OK again to re-record it.
+3. Short-press OK to send the reviewed text directly in the selected session.
+4. Watch the waiting animation, then read the completed reply from its beginning.
 
-Each recording creates an independently editable draft segment. Sending commits
-the reviewed draft revision as an immutable message snapshot. Transcription
-completion updates the editable draft; the user's send action triggers Hermes.
+The device keeps one pending message. A successful re-recording replaces its
+earlier text. Sending commits the reviewed draft revision as an immutable message
+snapshot. The gateway also retains its general segment editing API. Transcription
+completion updates the draft. The user's send action triggers Hermes.
 
 ## Architecture
 
@@ -44,13 +87,16 @@ flowchart LR
 - The device uses bounded audio and text buffers. Media filtering happens in Go.
 
 AI Passport, with ESP32-C3 and no PSRAM, is the initial validation device.
-Future hardware may use ESP32-S3 with PSRAM. Audio transport, encoding, memory
-budgets, and final button mappings remain design and measurement work.
+Future hardware may use ESP32-S3 with PSRAM. The first firmware uses online PCM16
+streaming with bounded buffers. Button mappings and device acceptance are
+described in the firmware guide.
 
 ## Documentation
 
+- [Firmware, controls and validation](docs/firmware.md)
 - [Architecture and data ownership](docs/architecture.md)
 - [Milestones and acceptance](docs/roadmap.md)
+- [Server configuration and API](docs/server.md)
 - [Agent contribution instructions](AGENTS.md)
 
 ## References
@@ -61,3 +107,9 @@ budgets, and final button mappings remain design and measurement work.
 
 Provider availability, session continuation, retry behavior, microphone latency,
 and device memory usage require integration tests against the selected versions.
+
+## License and reuse
+
+This project follows the MIT license retained in [LICENSE](LICENSE).
+[NOTICE](NOTICE) records the server foundations adapted from voice-memo and
+its FoloToy/ai-passport lineage.

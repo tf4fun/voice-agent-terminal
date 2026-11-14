@@ -1,0 +1,66 @@
+{
+  "family": "Noto Sans SC",
+  "release": "Sans2.004",
+  "copyright": "Copyright 2014-2021 Adobe (http://www.adobe.com/).",
+  "license": "OFL-1.1",
+  "license_file": "OFL.txt",
+  "upstream": "https://github.com/notofonts/noto-cjk/tree/Sans2.004",
+  "converter_version": "1.5.2",
+  "converter_upstream": "https://github.com/lvgl/lv_font_conv",
+  "charset_sha256": "099be24337a8a911e9c08009b7a8c5e59e04cb979b09d5983806dcc5b91aa7ae",
+  "requested_codepoints": 7041,
+  "emitted_codepoints": 7040,
+  "omitted_unassigned_codepoints": [
+    "U+FF00"
+  ],
+  "sources": {
+    "NotoSansSC-Bold.otf": {
+      "url": "https://raw.githubusercontent.com/notofonts/noto-cjk/Sans2.004/Sans/SubsetOTF/SC/NotoSansSC-Bold.otf",
+      "sha256": "c6cb5a93abaa9edc8ee7463b7ebb7f42d618d40e6ed2f7a5371c97b0b64767c0"
+    },
+    "NotoSansSC-Regular.otf": {
+      "url": "https://raw.githubusercontent.com/notofonts/noto-cjk/Sans2.004/Sans/SubsetOTF/SC/NotoSansSC-Regular.otf",
+      "sha256": "faa6c9df652116dde789d351359f3d7e5d2285a2b2a1f04a2d7244df706d5ea9"
+    }
+  },
+  "outputs": {
+    "memo_font_16.c": {
+      "source": "NotoSansSC-Bold.otf",
+      "size": 16,
+      "bpp": 4,
+      "line_height": 31,
+      "payload_sha256": "37d871d8095c74e7d197871628dc3c6a6fa92f4ca6081a90746f47ba047dc8f8",
+      "charset": "charset.txt",
+      "charset_sha256": "099be24337a8a911e9c08009b7a8c5e59e04cb979b09d5983806dcc5b91aa7ae",
+      "emitted_codepoints": 7040,
+      "omitted_codepoints": [
+        "U+FF00"
+      ]
+    },
+    "memo_font_20.c": {
+      "source": "NotoSansSC-Regular.otf",
+      "size": 20,
+      "bpp": 4,
+      "line_height": 38,
+      "payload_sha256": "1a90cd7dcb94ecca5eb4de407c484749d48452c79444edf827c56e26ac26c766",
+      "charset": "charset-ui.txt",
+      "charset_sha256": "ed173d32829749706fb1e41cacc25bd11aa6756a8ca80e0cfcc074ce3b32ec45",
+      "emitted_codepoints": 4032,
+      "omitted_codepoints": [
+        "U+FF00"
+      ]
+    },
+    "memo_font_meta_16.c": {
+      "source": "NotoSansSC-Regular.otf",
+      "size": 16,
+      "bpp": 4,
+      "charset": "charset-meta.txt",
+      "charset_sha256": "01dbc9a42e2c64d4ecbeb1925bebffadb1c1174a3f6695a3897853cb1135e7b7",
+      "line_height": 20,
+      "payload_sha256": "c6c6880d2d3b0962ed977a91eb8c01f7359d245ffb116ca94aa2d2a91e8ab638",
+      "emitted_codepoints": 95,
+      "omitted_codepoints": []
+    }
+  },
+  "coverage": "16 px chat includes both GB2312 Chinese levels and common Chinese/typographic punctuation; 20 px UI includes the same punctuation; metadata uses ASCII."
+}

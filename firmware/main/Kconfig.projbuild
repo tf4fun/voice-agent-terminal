@@ -1,0 +1,9 @@
+menu "Voice Agent Terminal"
+    config AGENT_API_KEY
+        string "Go gateway device bearer token"
+        default ""
+        help
+            Match VOICE_API_KEY on the Go gateway when device authentication is enabled.
+            Provider credentials remain on the Go gateway.
+endmenu
+

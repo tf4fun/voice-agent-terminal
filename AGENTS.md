@@ -28,5 +28,5 @@ Read [README](README.md), [architecture](docs/architecture.md), and the relevant
 - Obtain device-flash approval for the specific build. Create commits and push
   when authorized by the user or the active workflow.
 
-Initial repository contents are specifications. Record measured results when
-implementations and integrations become available.
+Keep implementation status and measured results aligned with the roadmap.
+Live provider and device acceptance need their own evidence.

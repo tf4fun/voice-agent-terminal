@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>会话管理 · Voice Agent</title>
+  <link rel="stylesheet" href="/ui/app.css">
+  <script src="/ui/app.js" defer></script>
+</head>
+<body>
+  <div class="app-shell">
+    <header class="page-header">
+      <div><p class="brand">VOICE AGENT</p><h1>会话管理</h1></div>
+      <div class="header-actions">
+        <span id="connection" class="connection" role="status">正在连接</span>
+        <button id="refresh" type="button">刷新</button>
+        <button id="sign-out" class="quiet" type="button" hidden>退出连接</button>
+      </div>
+    </header>
+    <p id="notice" class="notice" role="status" aria-live="polite" hidden></p>
+    <section id="authentication" class="auth-panel" aria-labelledby="auth-title" hidden>
+      <h2 id="auth-title">连接中转服务</h2>
+      <form id="auth-form">
+        <label for="api-key">访问密钥</label>
+        <input id="api-key" type="password" autocomplete="off" required spellcheck="false">
+        <p class="muted">请输入中转服务配置的访问密钥。</p>
+        <button class="primary" type="submit">连接</button>
+      </form>
+    </section>
+    <main id="workspace" class="workspace">
+      <section class="panel list-panel" aria-label="会话列表">
+        <div class="panel-heading"><h2>会话</h2><span id="list-status" class="muted" role="status"></span></div>
+        <div id="sessions" class="session-list" aria-label="选择会话"></div>
+        <div id="list-empty" class="empty-state" hidden><p>还没有会话</p><p class="muted">设备新建的会话会显示在这里。</p></div>
+        <footer class="pagination">
+          <button id="previous-page" type="button" disabled>上一页</button>
+          <span id="page-number" class="muted">第 1 页</span>
+          <button id="next-page" type="button" disabled>下一页</button>
+        </footer>
+      </section>
+      <section class="panel detail-panel" aria-label="会话详情">
+        <div id="detail-empty" class="detail-empty"><p>选择一个会话</p><p class="muted">查看对话内容，或删除不需要的会话。</p></div>
+        <div id="detail" class="detail" hidden>
+          <header class="detail-header">
+            <button id="back-to-list" class="back" type="button">返回列表</button>
+            <div class="detail-title"><h2 id="session-title"></h2><p id="session-meta" class="muted"></p></div>
+            <button id="delete-session" class="danger" type="button">删除会话</button>
+          </header>
+          <div class="conversation-navigation">
+            <button id="older-messages" type="button" disabled>更早的对话</button>
+            <span id="conversation-status" class="muted" role="status"></span>
+            <button id="newer-messages" type="button" disabled>更新的对话</button>
+          </div>
+          <div id="conversation" class="conversation" aria-live="polite"></div>
+        </div>
+      </section>
+    </main>
+    <dialog id="delete-dialog" aria-labelledby="delete-title">
+      <h2 id="delete-title">删除这个会话？</h2>
+      <p id="delete-name" class="delete-name"></p>
+      <p class="muted">会删除中转服务中的对话和草稿，并同步删除 Hermes 中对应的会话。</p>
+      <div class="dialog-actions">
+        <button id="cancel-delete" type="button" autofocus>取消</button>
+        <button id="confirm-delete" class="primary" type="button">确认删除</button>
+      </div>
+    </dialog>
+  </div>
+</body>
+</html>

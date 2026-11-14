@@ -19,20 +19,51 @@ against the selected Hermes version before depending on them.
 
 | Owner | Data and responsibilities |
 | --- | --- |
-| Device | Selected session, visible draft revision, current text window, bounded audio transport buffers, interaction state |
-| Go | Device-to-Hermes session mapping, paginated session index, persistent drafts and segment order, message snapshots and retry identities, bounded device event delivery, filtered reply cache |
+| Device | Selected session, reviewed draft revision, one complete user input and one complete Hermes reply in RAM, local reading position, bounded audio transport buffers and interaction state |
+| Go | Device-to-Hermes session mapping, paginated session index, persistent drafts and segment order, complete message snapshots and retry identities, bounded SSE delivery and filtered reply storage |
 | Hermes | Conversation history, model context, session runtime and configured agent capabilities |
 | OpenAI | Transcription of the audio submitted by Go |
 
-Go's session index serves the device's view of Hermes sessions. Creation,
-renaming and deletion require coordinated state updates and recovery after an
-interrupted operation. History reads through Go use bounded text windows.
+Go's session index serves the device's view of Hermes sessions. Creation and
+deletion have persisted pending states for interrupted-operation recovery.
+Go forwards created and renamed titles to Hermes while retaining the device index.
+The device holds the selected complete input and reply in RAM. Historical
+navigation selects another complete exchange through message IDs and neighboring
+exchange IDs. Complete text responses preserve stored UTF-8 and revision identity.
+
+## Message reading and waiting
+
+A message remains one object throughout loading, streaming and reading. The
+selected message is presented in one locally scrollable card. Up/down input
+moves the reading position inside its cached complete body. History navigation
+loads another complete user/assistant exchange when requested. RAM allocation
+follows the selected text's actual size, and leaving the conversation releases
+its cache. Session-list pagination remains independent of message reading.
+
+Hermes replies arrive at the device cache through SSE. The card displays its
+status graphic and animation throughout generation. Completion reveals the
+whole reply at its beginning. Up/down input controls the local reading position.
+The compact header combines the page title, time and battery. The role and
+status share the card's first row. The user can view their own input while
+waiting. An interrupted or failed reply
+reveals any retained text together with its outcome status.
+
+Firmware `9b06632b` passed authorized flashing, startup/discovery and one
+recording/reply workload. The user confirmed improved SSE appending and correct
+Chinese quotation marks. Firmware `077092ec` subsequently passed user acceptance
+of the compact header/status layout, card spacing, completion waiting, top-of-reply
+opening and manual scrolling. Long-message stress and reconnect recovery require
+separate device checks. Measurements and results describe their recorded builds.
 
 ## Draft composition
 
 Each recording creates a segment ID with an ordered position and a generation.
 Streaming recognition updates that segment while the draft remains editable.
-The user can append recordings and delete selected segments.
+The gateway API supports appending recordings and deleting selected segments.
+The current device interaction reviews a pending message in the conversation,
+sends it with Short OK, and re-records it with Long OK. Replacement capture keeps
+earlier text until a nonempty final transcript atomically retires it. Complete
+draft reads use the same joining rules and revision as send snapshots.
 
 Edits and transcription updates advance the draft revision. A deleted segment
 is retired, and late updates are checked against its ID, generation and lifetime.
@@ -44,6 +75,12 @@ This revision check preserves the user's visible text across late recognition
 updates. Explicit send is the sole trigger for submitting draft text to Hermes.
 A message's text is fixed after submission. Draft and send failure recovery
 retain the user's input and its operation identity.
+
+Capture results are staged before the device automatically confirms replacement.
+Cancellation, restart recovery and expiry retire uncommitted staged text while
+preserving the prior draft. Commit and abort reconcile through a transaction and
+persisted commit revision. Text reads isolate late responses by request generation,
+and discovery rotates endpoints after a rejected candidate.
 
 ## Audio and transcription
 
@@ -59,7 +96,11 @@ checked on 2026-11-13 demonstrates mono PCM16 at 24 kHz and explicit audio-turn
 commit. Confirm account access, accepted formats and latency using real audio.
 Match upstream events by item identity and segment generation.
 
-The device audio codec, sample rate, transport and offline behavior remain open.
+The device streams mono PCM16 at 16 kHz over chunked HTTP and requires a
+connected gateway. An 8 KiB audio buffer bounds capture buffering. Bounded live
+transcription previews serve recording, and committed input is read as complete
+text for review. Hardware acceptance of the new complete-message revision
+remains NOT RUN.
 Benchmark capture and networking together on AI Passport, including total free
 heap, largest free block, stack high-water marks and bounded-backpressure behavior.
 The current voice-memo recording/upload lifecycle is an implementation reference.
@@ -78,13 +119,22 @@ device state after a broken connection. Reconnection reconciles the same message
 with cached output or upstream state. Active execution, retry evidence and reply
 delivery have separate lifetimes.
 
+For device recovery, establish the session SSE subscription before reading the
+complete message snapshot. The initial `resync` event triggers metadata and full
+body reads. Returned UTF-8 byte lengths establish the delta baseline. Matching
+`chat.delta` offsets append to the same reply, already represented offsets are
+deduplicated, and gaps or `chat.reset` trigger a fresh complete snapshot.
+Revision and state headers belong to the same stored body read. Disconnect
+recovery reloads that complete message and reconciles subsequent SSE events.
+
 ## Bounded content delivery
 
 Go incrementally parses upstream SSE and JSON with explicit limits on events,
 fields, pending prefixes and reply-cache growth. Media markers and base64 blocks
 may span fragments. Filtering must preserve following text and valid UTF-8.
-Represent omitted media with a small resource description. Deliver long text
-through bounded events and versioned read windows.
+Represent omitted media with a small resource description. Deliver complete
+message bodies and bounded incremental events. Transport event limits and RAM
+allocation checks preserve the logical identity and complete stored message.
 
 Approval events, reasoning and progress have explicit presentation policies.
 The initial device feature set centers on text chat. Pending approvals retain
@@ -95,12 +145,14 @@ interaction remains an open product decision.
 
 The mDNS record names the Go service and advertises a protocol version. The
 gateway's capability response describes available chat, draft and transcription
-features. Fix the service type, routes, schemas, payload bounds and resume
-semantics together with the first protocol milestone.
+features. The implemented service type, routes, payload bounds and recovery
+semantics are recorded in the [server contract](server.md).
 
-Audio upload and text/event delivery need independent flow control. Candidate
-device transports include HTTP audio upload and SSE events. Select the transport
-using measured device memory and latency. OpenAI's realtime transport runs in Go.
+The server accepts HTTP PCM16 audio uploads and sends bounded SSE events. Audio
+upload and reply delivery have independent flow control. The device reads whole
+message snapshots and appends reply events into its selected RAM cache. Metadata
+polling supports discovery and recording state. Device memory and latency for
+this revision need hardware measurements. OpenAI's realtime transport runs in Go.
 
 ## References
 
