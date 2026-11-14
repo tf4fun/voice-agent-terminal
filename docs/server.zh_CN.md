@@ -190,7 +190,8 @@ UTF-8 字节边界及最多 256 字节文字。正在生成且暂为空的回复
 `POST /messages/{message}/retry` 在失败或结果未确认后重试同一逻辑消息，
 要求后续消息尚未推进会话。恢复采用相同的 Chat Completions 请求身份，
 设置 `stream: false` 获取完整回复，再原子替换此前的部分回复。
-上游地址或凭据变化时，保留原身份范围并阻止向新身份提交。
+上游地址或凭据变化时，不会自动向新身份提交，消息标记为 `unconfirmed`，错误码为
+`hermes_identity_changed`。用户明确重试即确认重新提交，消息随之改用当前身份范围。
 此恢复面向 Hermes 的 canonical 持久接收模式，真实使用前需要验证部署模式
 的幂等语义。Legacy 模式的流式重试保证有所差异。
 
@@ -214,7 +215,7 @@ UTF-8 窗口、流式 PCM、模拟 OpenAI WebSocket、Hermes HTTP/SSE 和媒体�
 
 `tools/build-server.sh amd64` 与 `arm64` 在 `build/server/linux-<arch>/`
 生成 CGO-free Linux 二进制及 SHA256SUMS。GitHub Actions 执行检查并上传
-两种架构产物。真实上游凭据、局域网 mDNS、麦克风识别准确性与延迟、设备 RAM
+两种架构产物，推送 `v*` 标签时还会发布为 Release 附件。真实上游凭据、局域网 mDNS、麦克风识别准确性与延迟、设备 RAM
 仍需集成验收。
 
 ## 2026-11-13 管理页验证

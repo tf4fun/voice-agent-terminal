@@ -428,3 +428,38 @@ func TestCaptureRegistrationRejectsRetiredGeneration(t *testing.T) {
 		t.Fatal("newer registration did not replace older capture")
 	}
 }
+
+func TestRetryRescopesMessageAfterHermesIdentityChange(t *testing.T) {
+	ctx := context.Background()
+	transport := lifecycleTransport(func(r *http.Request) (*http.Response, error) {
+		return lifecycleResponse(500, `{}`), nil
+	})
+	service, session := lifecycleFixture(t, transport)
+	if err := service.Store.SetSessionReady(ctx, session.ID); err != nil {
+		t.Fatal(err)
+	}
+	revision, err := service.Store.AddSegment(ctx, session.ID, model.NewID(), "旧身份消息", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := model.NewID()
+	if _, err := service.Store.Send(ctx, session.ID, id, "hermes-agent", "retired-scope", revision); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := service.Store.Claim(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.complete(ctx, claimed)
+	stranded, err := service.Store.Message(ctx, session.ID, id)
+	if err != nil || stranded.State != "unconfirmed" || stranded.Error != "hermes_identity_changed" {
+		t.Fatalf("identity change: %+v %v", stranded, err)
+	}
+	if err := service.Store.Retry(ctx, session.ID, id, service.Hermes.Scope()); err != nil {
+		t.Fatal(err)
+	}
+	requeued, err := service.Store.Claim(ctx)
+	if err != nil || requeued.ID != id || requeued.UpstreamScope != service.Hermes.Scope() {
+		t.Fatalf("retry kept the retired scope: %+v %v", requeued, err)
+	}
+}

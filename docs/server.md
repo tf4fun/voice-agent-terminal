@@ -237,7 +237,9 @@ reply window, with `part=input` for the submitted snapshot.
 or unconfirmed outcome, provided later messages have not advanced the session.
 Recovery uses the same Chat Completions request identity with `stream: false`
 to obtain a complete reply. It atomically replaces the earlier partial reply.
-A changed endpoint or credential prevents submission under a new identity scope.
+A changed endpoint or credential blocks automatic submission under the new identity
+and marks the message `unconfirmed` with `hermes_identity_changed`. An explicit
+retry confirms resubmission and moves the message to the current identity scope.
 This recovery targets Hermes' canonical durable-admission mode; verify the
 deployed mode's idempotency behavior before live use. Legacy streaming retries
 have different guarantees.
@@ -268,7 +270,8 @@ exercises editing and sending, and verifies persistence after a restart.
 
 `tools/build-server.sh amd64` and `arm64` produce CGO-free Linux binaries under
 `build/server/linux-<arch>/`, with SHA256SUMS. GitHub Actions runs the checks
-and uploads both architecture artifacts. Real provider credentials, LAN mDNS,
+and uploads both architecture artifacts. A `v*` tag also publishes them as
+release assets. Real provider credentials, LAN mDNS,
 microphone accuracy/latency and device RAM remain integration acceptance work.
 
 ## Management validation on 2026-11-13

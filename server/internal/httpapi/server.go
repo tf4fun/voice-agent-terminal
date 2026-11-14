@@ -655,7 +655,7 @@ func (s *Server) retry(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 503, "hermes_not_configured")
 		return
 	}
-	if err := s.service.Store.Retry(r.Context(), r.PathValue("session"), r.PathValue("message")); err != nil {
+	if err := s.service.Store.Retry(r.Context(), r.PathValue("session"), r.PathValue("message"), s.service.Hermes.Scope()); err != nil {
 		storeError(w, err)
 		return
 	}
