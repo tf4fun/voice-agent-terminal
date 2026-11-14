@@ -336,6 +336,62 @@ static void test_sse_append_and_recovery_offsets(void)
     CHECK(!watch_current(&context));
 }
 
+static bool ends_with_truncated_notice(const char *text)
+{
+    const size_t length=strlen(text),notice_length=strlen(AGENT_TRUNCATED_NOTICE);
+    return length>=notice_length&&strcmp(text+length-notice_length,AGENT_TRUNCATED_NOTICE)==0;
+}
+static void test_oversized_content_is_bounded(void)
+{
+    setup();
+    const size_t limit=AGENT_CONTENT_MAX_BYTES;
+    // The cut lands inside a three-byte character, which must be dropped whole.
+    const size_t reply_total=limit-1+3+100,input_total=limit+4000;
+    char *input=malloc(input_total+1),*reply=malloc(reply_total+1);assert(input&&reply);
+    memset(input,'A',input_total);input[input_total]=0;
+    memset(reply,'B',limit-1);memcpy(reply+limit-1,"你",3);memset(reply+limit+2,'C',100);reply[reply_total]=0;
+    char response[256];
+    snprintf(response,sizeof(response),
+        "{\"message\":{\"id\":\"%s\",\"state\":\"completed\",\"revision\":8,\"input_bytes\":%zu,\"reply_bytes\":%zu},"
+        "\"before\":\"\",\"after\":\"\"}",message_id,input_total,reply_total);
+    whole_input=input;whole_reply=reply;injected_response=response;
+    s_view.text_kind=AGENT_TEXT_REPLY;s_view.chat_loading=true;
+    agent_view_t view=s_view;
+    CHECK(poll_turn(&view));
+    CHECK(strlen(s_reply_text)==limit-1&&s_reply_truncated&&s_reply_total==reply_total);
+    CHECK(strlen(s_input_text)==limit&&s_input_truncated&&s_input_total==input_total);
+    CHECK(s_view.message.reply_bytes==reply_total);
+    char *snapshot=agent_client_text_copy(s_view.selection,s_view.text_generation);
+    CHECK(snapshot&&strncmp(snapshot,reply,limit-1)==0&&ends_with_truncated_notice(snapshot));free(snapshot);
+    agent_client_message_select(true);
+    snapshot=agent_client_text_copy(s_view.selection,s_view.text_generation);
+    CHECK(snapshot&&ends_with_truncated_notice(snapshot));free(snapshot);
+    // An unchanged truncated reply is not downloaded again on the next poll.
+    agent_client_message_select(false);
+    whole_reply="refetched";view=s_view;
+    CHECK(poll_turn(&view));
+    CHECK(strlen(s_reply_text)==limit-1&&s_reply_truncated);
+    free(input);free(reply);
+
+    // Streaming stops growing the cache at the bound but keeps tracking offsets.
+    setup();s_view.text_kind=AGENT_TEXT_REPLY;
+    strcpy(s_cached_message,message_id);strcpy(s_view.message.id,message_id);
+    s_view.turn.present=true;
+    char *start=malloc(limit-1);assert(start);
+    memset(start,'C',limit-2);start[limit-2]=0;
+    CHECK(append_reply(message_id,0,start));free(start);
+    CHECK(!s_reply_truncated&&s_reply_capacity<=limit+1);
+    CHECK(append_reply(message_id,limit-2,"你好"));
+    CHECK(strlen(s_reply_text)==limit-2&&s_reply_truncated&&s_reply_total==limit+4);
+    CHECK(s_reply_capacity<=limit+1&&s_view.message.reply_bytes==limit+4);
+    CHECK(append_reply(message_id,limit+4,"z"));
+    CHECK(s_reply_total==limit+5&&strlen(s_reply_text)==limit-2);
+    CHECK(append_reply(message_id,limit,"好z"));
+    CHECK(s_reply_total==limit+5);
+    CHECK(!append_reply(message_id,limit+10,"gap"));
+    CHECK(utf8_complete_prefix("你",1)==0&&utf8_complete_prefix("你",3)==3&&utf8_complete_prefix("a你",2)==1);
+}
+
 static bool count_event(const char *json,void *context)
 {
     (void)json;(*(unsigned *)context)++;return true;
@@ -485,6 +541,7 @@ int main(void)
     assert(agent_client_init()==ESP_OK);
     test_whole_pair_and_history();
     test_sse_append_and_recovery_offsets();
+    test_oversized_content_is_bounded();
     test_sse_fragment_bounds();
     test_send_rejects_inflight_draft_response();
     test_cached_draft_review_and_reopen();

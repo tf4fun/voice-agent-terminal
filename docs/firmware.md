@@ -24,7 +24,9 @@ staged first, then the device automatically confirms its atomic replacement of
 earlier pending segments. Cancellation while recording or finalizing preserves
 the earlier text. Once saving starts, Long Down leaves the page while saving
 continues. Failed re-recording preserves earlier text. Existing multi-segment drafts can be read
-as one complete joined input. Sessions and settings share a
+as one complete joined input. Each cached input, draft or reply is bounded to
+16 KiB. Longer content keeps a UTF-8 prefix, leaves the rest unread on the server,
+and ends with a notice that only the beginning is shown. Sessions and settings share a
 registered top-level page cycle. Long Up advances and wraps that cycle. Additional
 top-level pages use the same registry. Long Down sleeps at the top level and exits
 one level from detail screens. Manual sleep first pauses networking and waits for

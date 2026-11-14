@@ -50,24 +50,43 @@ static char s_pending_message[37];
 static uint32_t s_pending_revision;
 static int s_draft_total;
 static agent_view_t s_read_view;
+// Whole-content caches must fit the ESP32-C3 heap (about a 64 KiB largest block)
+// together with the UI snapshot copy. Longer content keeps only a UTF-8 prefix.
+#ifndef AGENT_CONTENT_MAX_BYTES
+#define AGENT_CONTENT_MAX_BYTES 16384
+#endif
+#define AGENT_TRUNCATED_NOTICE "\n\n……（内容过长，设备仅显示开头部分）"
 static char *s_input_text, *s_reply_text;
 static size_t s_reply_capacity;
+// Server byte counts; they exceed the cached prefix length when truncated.
+static size_t s_input_total, s_reply_total;
+static bool s_input_truncated, s_reply_truncated;
 static char s_cached_message[37];
 static uint32_t s_cached_draft_revision;
 static bool s_input_loaded, s_reply_loaded;
 static agent_sse_t s_events;
 
 typedef struct {
-    uint32_t revision;
+    uint32_t revision, total;
     char state[16];
+    bool truncated;
 } content_headers_t;
+
+static void reset_reply_cache(void)
+{
+    free(s_reply_text);
+    s_reply_text = NULL;
+    s_reply_capacity = s_reply_total = 0;
+    s_reply_truncated = false;
+}
 
 static void clear_message_cache(void)
 {
     free(s_input_text);
-    free(s_reply_text);
-    s_input_text = s_reply_text = NULL;
-    s_reply_capacity = 0;
+    s_input_text = NULL;
+    s_input_total = 0;
+    s_input_truncated = false;
+    reset_reply_cache();
     s_cached_message[0] = '\0';
     s_cached_draft_revision = 0;
     s_input_loaded = s_reply_loaded = false;
@@ -380,7 +399,24 @@ static bool poll_text(agent_view_t *view)
     return true;
 }
 
-// Return complete UTF-8 content with one exact allocation and no JSON text copy.
+// Longest prefix of text[0, length) that does not split a UTF-8 sequence.
+static size_t utf8_complete_prefix(const char *text, size_t length)
+{
+    size_t start = length;
+    unsigned continuation = 0;
+    while (start > 0 && continuation < 4 && ((unsigned char)text[start - 1] & 0xC0) == 0x80) {
+        start--;
+        continuation++;
+    }
+    if (start == 0) return 0;
+    const unsigned char lead = (unsigned char)text[start - 1];
+    const size_t need = lead < 0x80 ? 1 : (lead & 0xE0) == 0xC0 ? 2 : (lead & 0xF0) == 0xE0 ? 3 :
+        (lead & 0xF8) == 0xF0 ? 4 : 1;
+    return length - (start - 1) >= need ? length : start - 1;
+}
+
+// Return UTF-8 content with one bounded allocation and no JSON text copy. Content
+// beyond AGENT_CONTENT_MAX_BYTES is left unread; headers report the full length.
 static int read_content(const char *path, char **text, content_headers_t *headers)
 {
     *text = NULL;
@@ -392,23 +428,27 @@ static int read_content(const char *path, char **text, content_headers_t *header
         const int64_t length = esp_http_client_fetch_headers(client);
         status = esp_http_client_get_status_code(client);
         if (status == 200 && length >= 0 && length < UINT32_MAX) {
-            char *body = malloc((size_t)length + 1);
+            const bool truncated = length > AGENT_CONTENT_MAX_BYTES;
+            const size_t wanted = truncated ? AGENT_CONTENT_MAX_BYTES : (size_t)length;
+            char *body = malloc(wanted + 1);
             if (body == NULL) {
                 notice("内存不足，请退出会话");
                 status = 0;
             } else {
                 size_t used = 0;
-                while (used < (size_t)length) {
-                    const size_t remaining = (size_t)length - used;
-                    const int capacity = remaining > INT_MAX ? INT_MAX : (int)remaining;
-                    const int received = esp_http_client_read(client, body + used, capacity);
+                while (used < wanted) {
+                    const int received = esp_http_client_read(client, body + used, (int)(wanted - used));
                     if (received <= 0) break;
                     used += (size_t)received;
                 }
+                const bool complete = used == wanted && memchr(body, '\0', used) == NULL &&
+                    (truncated || esp_http_client_is_complete_data_received(client));
+                if (complete && truncated) used = utf8_complete_prefix(body, used);
                 body[used] = '\0';
-                if (used == (size_t)length && memchr(body, '\0', used) == NULL &&
-                    memo_text_is_valid_utf8(body) && esp_http_client_is_complete_data_received(client)) {
+                if (complete && memo_text_is_valid_utf8(body)) {
                     *text = body;
+                    headers->total = (uint32_t)length;
+                    headers->truncated = truncated;
                 } else {
                     free(body);
                     status = 0;
@@ -426,13 +466,18 @@ char *agent_client_text_copy(uint32_t selection, uint32_t generation)
     lock();
     const char *source = s_view.text_kind == AGENT_TEXT_REPLY ?
         (s_reply_text == NULL ? "" : s_reply_text) : s_input_text;
-    if (s_view.text_kind == AGENT_TEXT_SEGMENT) source = s_view.text.text;
+    bool truncated = s_view.text_kind == AGENT_TEXT_REPLY ? s_reply_truncated : s_input_truncated;
+    if (s_view.text_kind == AGENT_TEXT_SEGMENT) { source = s_view.text.text; truncated = false; }
     char *copy = NULL;
     if (selection == s_view.selection && generation == s_view.text_generation && source != NULL) {
         const size_t length = strlen(source);
-        copy = malloc(length + 1);
-        if (copy != NULL) memcpy(copy, source, length + 1);
-        else {
+        const size_t suffix = truncated ? sizeof(AGENT_TRUNCATED_NOTICE) - 1 : 0;
+        copy = malloc(length + suffix + 1);
+        if (copy != NULL) {
+            memcpy(copy, source, length);
+            memcpy(copy + length, AGENT_TRUNCATED_NOTICE, suffix);
+            copy[length + suffix] = '\0';
+        } else {
             agent_copy_text(s_view.notice, sizeof(s_view.notice), "内存不足，请退出会话");
             changed();
         }
@@ -451,9 +496,9 @@ static bool poll_full_draft(agent_view_t *view)
         if (still_selected(view) && s_view.text_request == view->text_request &&
             s_view.text_kind == AGENT_TEXT_DRAFT &&
             (s_view.text_loading || s_view.text.revision != s_cached_draft_revision ||
-             s_view.text.total != strlen(s_input_text) || s_view.chat_loading)) {
+             s_view.text.total != s_input_total || s_view.chat_loading)) {
             s_view.text.revision = s_cached_draft_revision;
-            s_view.text.total = (uint32_t)strlen(s_input_text);
+            s_view.text.total = (uint32_t)s_input_total;
             s_view.text_loading = s_view.chat_loading = s_view.chat_sending = false;
             s_view.chat_ready = true;
             s_view.text_generation++;
@@ -475,11 +520,13 @@ static bool poll_full_draft(agent_view_t *view)
         free(s_input_text);
         s_input_text = text;
         text = NULL;
+        s_input_total = headers.total;
+        s_input_truncated = headers.truncated;
         s_input_loaded = true;
         s_cached_message[0] = '\0';
         s_cached_draft_revision = headers.revision;
         s_view.draft_revision = s_view.text.revision = headers.revision;
-        s_view.text.total = (uint32_t)strlen(s_input_text);
+        s_view.text.total = headers.total;
         s_view.text_loading = s_view.chat_loading = s_view.chat_sending = false;
         s_view.chat_ready = true;
         s_view.text_generation++;
@@ -521,7 +568,7 @@ static bool poll_turn(agent_view_t *view)
     }
     const bool need_input = !s_input_loaded;
     const bool need_reply = !s_reply_loaded || turn.message.revision != s_view.message.revision ||
-        turn.message.reply_bytes != (s_reply_text == NULL ? 0 : strlen(s_reply_text));
+        turn.message.reply_bytes != s_reply_total;
     unlock();
     char *input = NULL, *reply = NULL;
     content_headers_t input_headers = {0}, reply_headers = {0};
@@ -534,17 +581,26 @@ static bool poll_turn(agent_view_t *view)
         if (read_content(path, &reply, &reply_headers) != 200 || reply == NULL) goto failed;
         if (reply_headers.revision != 0) turn.message.revision = reply_headers.revision;
         if (reply_headers.state[0] != '\0') agent_copy_text(turn.message.state, sizeof(turn.message.state), reply_headers.state);
-        turn.message.reply_bytes = (uint32_t)strlen(reply);
+        turn.message.reply_bytes = reply_headers.total;
     }
     lock();
     if (still_selected(view) && s_view.chat_request == view->chat_request &&
         s_view.capture == AGENT_IDLE && s_view.text_kind != AGENT_TEXT_DRAFT &&
         strcmp(s_cached_message, turn.message.id) == 0) {
-        if (input != NULL) { free(s_input_text); s_input_text = input; input = NULL; s_input_loaded = true; }
+        if (input != NULL) {
+            free(s_input_text);
+            s_input_text = input;
+            input = NULL;
+            s_input_total = input_headers.total;
+            s_input_truncated = input_headers.truncated;
+            s_input_loaded = true;
+        }
         if (reply != NULL) {
-            free(s_reply_text);
+            reset_reply_cache();
             s_reply_text = reply;
             s_reply_capacity = strlen(reply) + 1;
+            s_reply_total = reply_headers.total;
+            s_reply_truncated = reply_headers.truncated;
             reply = NULL;
             s_reply_loaded = true;
         }
@@ -590,17 +646,33 @@ static bool append_reply(const char *id, size_t offset, const char *delta)
     if (!memo_text_is_valid_utf8(delta)) return false;
     lock();
     if (strcmp(id, s_cached_message) != 0) { unlock(); return true; }
-    const size_t current = s_reply_text == NULL ? 0 : strlen(s_reply_text);
+    const size_t current = s_reply_total;
     if (offset > current) { unlock(); return false; }
+    if (incoming > SIZE_MAX - offset - 1) { unlock(); return false; }
+    if (s_reply_truncated) {
+        // Only a prefix is cached; follow the server length without keeping the tail.
+        if (offset + incoming > current) {
+            s_reply_total = offset + incoming;
+            s_view.message.reply_bytes = (uint32_t)s_reply_total;
+            agent_copy_text(s_view.message.state, sizeof(s_view.message.state), "receiving");
+            s_view.turn.message = s_view.message;
+            changed();
+        }
+        unlock();
+        return true;
+    }
     const size_t overlap = current - offset < incoming ? current - offset : incoming;
     if (overlap != 0 && memcmp(s_reply_text + offset, delta, overlap) != 0) { unlock(); return false; }
     const size_t extra = incoming - overlap;
     if (extra == 0) { unlock(); return true; }
-    if (extra > SIZE_MAX - current - 1) { unlock(); return false; }
-    const size_t needed = current + extra + 1;
+    size_t kept = extra;
+    const bool truncating = current + extra > AGENT_CONTENT_MAX_BYTES;
+    if (truncating) kept = utf8_complete_prefix(delta + overlap, AGENT_CONTENT_MAX_BYTES - current);
+    const size_t needed = current + kept + 1;
     if (needed > s_reply_capacity) {
         size_t capacity = s_reply_capacity + s_reply_capacity / 2;
         if (capacity < needed) capacity = needed;
+        if (capacity > AGENT_CONTENT_MAX_BYTES + 1) capacity = AGENT_CONTENT_MAX_BYTES + 1;
         char *next = realloc(s_reply_text, capacity);
         if (next == NULL) {
             agent_copy_text(s_view.notice, sizeof(s_view.notice), "内存不足，请退出会话");
@@ -611,10 +683,12 @@ static bool append_reply(const char *id, size_t offset, const char *delta)
         s_reply_text = next;
         s_reply_capacity = capacity;
     }
-    memcpy(s_reply_text + current, delta + overlap, extra);
-    s_reply_text[current + extra] = '\0';
+    memcpy(s_reply_text + current, delta + overlap, kept);
+    s_reply_text[current + kept] = '\0';
+    s_reply_total = current + extra;
+    s_reply_truncated = truncating;
     s_reply_loaded = true;
-    s_view.message.reply_bytes = (uint32_t)(current + extra);
+    s_view.message.reply_bytes = (uint32_t)s_reply_total;
     agent_copy_text(s_view.message.state, sizeof(s_view.message.state), "receiving");
     s_view.turn.message = s_view.message;
     if (s_view.text_kind == AGENT_TEXT_REPLY) s_view.text_generation++;
@@ -1156,9 +1230,7 @@ static void execute(const command_t *command)
             s_view.turn = (agent_turn_t){.message = message, .present = true};
             agent_copy_text(s_cached_message, sizeof(s_cached_message), message.id);
             s_cached_draft_revision = 0;
-            free(s_reply_text);
-            s_reply_text = NULL;
-            s_reply_capacity = 0;
+            reset_reply_cache();
             s_reply_loaded = true;
             s_view.text_generation++;
             agent_copy_text(s_view.text_id, sizeof(s_view.text_id), message.id);
