@@ -55,17 +55,17 @@ func (s *Store) initialize() error {
 	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		return err
 	}
-	if version > 1 {
-		return fmt.Errorf("database schema %d is newer than this server", version)
+	if version != 0 && version != 2 {
+		return fmt.Errorf("unsupported database schema %d, expected 2", version)
 	}
-	if version == 1 {
+	if version == 2 {
 		return nil
 	}
 	return s.transaction(context.Background(), func(tx *sql.Tx) error {
 		if _, err := tx.Exec(schema); err != nil {
 			return err
 		}
-		_, err := tx.Exec("PRAGMA user_version=1")
+		_, err := tx.Exec("PRAGMA user_version=2")
 		return err
 	})
 }

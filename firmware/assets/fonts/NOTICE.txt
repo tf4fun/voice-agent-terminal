@@ -1,0 +1,23 @@
+Noto Sans SC, Regular and Bold, Version 2.004
+Copyright 2014-2021 Adobe (http://www.adobe.com/).
+
+Source: https://github.com/notofonts/noto-cjk/tree/Sans2.004
+Source font names: NotoSansSC-Regular.otf, NotoSansSC-Bold.otf
+Derived application font names: memo_font_20, memo_font_16, memo_font_meta_16
+
+The source and derived font software are licensed under the SIL Open Font
+License 1.1. The complete license is in OFL.txt. This font license is separate
+from the surrounding application code license. Retain this notice and OFL.txt
+when redistributing these font assets.
+
+Original font hashes, converter version, character inventory and generated
+payload identities are recorded in manifest.json. Reproduction is implemented
+by tools/generate_memo_fonts.py in the repository root.
+
+The 16 px Bold chat inventory includes all 6,763 GB2312 Chinese characters,
+including level-two characters such as U+6E25, and common Chinese/typographic
+punctuation including curly quotes, en/em dashes and ellipsis. The 20 px Regular
+UI subset includes these punctuation glyphs and falls
+back to the chat font. The 16 px Regular metadata subset covers printable ASCII
+for dates and battery percentages. Each output has a separate inventory and
+payload hash in manifest.json. Font bitmaps and tables are const Flash resources.

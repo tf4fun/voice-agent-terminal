@@ -40,7 +40,7 @@ func TestDraftSnapshotAndLateRecognition(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	generation, err := st.BeginCapture(ctx, session, second, revision)
+	generation, err := st.BeginCaptureMode(ctx, session, second, revision, CaptureAppend)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +74,7 @@ func TestDraftSnapshotAndLateRecognition(t *testing.T) {
 	if _, err := st.Send(ctx, session, messageID, "hermes-agent", "scope", revision+1); !errors.Is(err, ErrConflict) {
 		t.Fatal(err)
 	}
-	current, parts, err := st.Draft(ctx, session, 4, 0)
+	current, parts, _, err := st.Draft(ctx, session, 4, 0)
 	if err != nil || len(parts) != 0 {
 		t.Fatalf("draft after send: %+v %v", parts, err)
 	}
@@ -167,11 +167,11 @@ func TestEditingRetiresRecognitionGenerationAndLimitsDraft(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	generation, err := st.BeginCapture(ctx, session, segment, revision)
+	generation, err := st.BeginCaptureMode(ctx, session, segment, revision, CaptureAppend)
 	if err != nil {
 		t.Fatal(err)
 	}
-	current, _, _ := st.Draft(ctx, session, 4, 0)
+	current, _, _, _ := st.Draft(ctx, session, 4, 0)
 	revision, err = st.EditSegment(ctx, session, segment, "手动编辑", current.Revision, false)
 	if err != nil {
 		t.Fatal(err)
@@ -181,5 +181,83 @@ func TestEditingRetiresRecognitionGenerationAndLimitsDraft(t *testing.T) {
 	}
 	if _, err := st.AddSegment(ctx, session, model.NewID(), strings.Repeat("a", model.MaxDraftBytes), revision); !errors.Is(err, ErrLimit) {
 		t.Fatal(err)
+	}
+}
+
+func TestRerecordReplacesOnlyAfterSuccessfulFinalText(t *testing.T) {
+	ctx := context.Background()
+	st, session := fixture(t)
+	old, next := model.NewID(), model.NewID()
+	revision, err := st.AddSegment(ctx, session, old, "原稿", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	revision, err = st.AddSegment(ctx, session, next, "", revision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	generation, err := st.BeginCaptureMode(ctx, session, next, revision, CaptureReplace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	revision, err = st.UpdateTranscript(ctx, session, next, generation, "临时", "capturing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Send(ctx, session, model.NewID(), "model", "scope", revision); !errors.Is(err, ErrBusy) {
+		t.Fatalf("send while recording: %v", err)
+	}
+	text, _, err := st.DraftText(ctx, session)
+	if err != nil || text != "原稿" {
+		t.Fatalf("old text lost during capture: %q %v", text, err)
+	}
+	revision, err = st.UpdateTranscript(ctx, session, next, generation, "重说的新稿", "ready")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text, observedRevision, err := st.DraftText(ctx, session)
+	if err != nil || text != "重说的新稿" || observedRevision != revision {
+		t.Fatalf("replacement: %q %d %v", text, observedRevision, err)
+	}
+	if _, err := st.Segment(ctx, session, old); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("old segment remains: %v", err)
+	}
+	if _, err := st.UpdateTranscript(ctx, session, next, generation, "迟到", "ready"); !errors.Is(err, ErrStale) {
+		t.Fatalf("late final: %v", err)
+	}
+	message, err := st.Send(ctx, session, model.NewID(), "model", "scope", revision)
+	if err != nil || message.Input != "重说的新稿" {
+		t.Fatalf("send snapshot: %q %v", message.Input, err)
+	}
+}
+
+func TestFailedOrEmptyRerecordPreservesOriginalDraft(t *testing.T) {
+	for _, emptyFinal := range []bool{false, true} {
+		t.Run(map[bool]string{false: "failed", true: "empty"}[emptyFinal], func(t *testing.T) {
+			ctx := context.Background()
+			st, session := fixture(t)
+			old, next := model.NewID(), model.NewID()
+			revision, _ := st.AddSegment(ctx, session, old, "保留原稿", 1)
+			revision, _ = st.AddSegment(ctx, session, next, "", revision)
+			generation, err := st.BeginCaptureMode(ctx, session, next, revision, CaptureReplace)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if emptyFinal {
+				if _, err := st.UpdateTranscript(ctx, session, next, generation, "  ", "ready"); !errors.Is(err, ErrConflict) {
+					t.Fatalf("empty replacement: %v", err)
+				}
+			}
+			if _, err := st.UpdateTranscript(ctx, session, next, generation, "失败的临时内容", "failed"); err != nil {
+				t.Fatal(err)
+			}
+			text, _, err := st.DraftText(ctx, session)
+			if err != nil || text != "保留原稿" {
+				t.Fatalf("rollback: %q %v", text, err)
+			}
+			if _, err := st.Segment(ctx, session, next); !errors.Is(err, ErrNotFound) {
+				t.Fatalf("failed replacement retained: %v", err)
+			}
+		})
 	}
 }

@@ -4,3 +4,11 @@ https://github.com/tf4fun/voice-memo and its FoloToy/ai-passport lineage.
 The mDNS publisher, SQLite lifecycle, bounded event fan-out, service startup and
 shutdown patterns, and Linux build script are derived from that MIT-licensed
 project. The original copyright and permission notice are retained in LICENSE.
+
+The AI Passport board support, terminal UI helpers, Chinese font integration,
+settings, Wi-Fi/BLUFI lifecycle and button/idle policies are adapted from the
+same voice-memo project. Font licenses and provenance accompany firmware/assets/fonts.
+
+firmware/tests/vendor/cjson contains cJSON source from the ESP-IDF v5.5.3
+components/json/cJSON checkout for host protocol tests. Its MIT copyright and
+license are retained alongside the sources. Firmware uses ESP-IDF's cJSON component.

@@ -31,6 +31,12 @@ type Config struct {
 	MaxAudioBytes  int64
 }
 
+// CaptureTimeout bounds audio duration. Setup, upload drain and final recognition
+// share one additional, bounded minute in the HTTP request budget.
+func (c Config) CaptureRequestTimeout() time.Duration {
+	return c.CaptureTimeout + time.Minute
+}
+
 func Load(getenv func(string) string) (Config, error) {
 	value := func(key, fallback string) string {
 		if text := strings.TrimSpace(getenv(key)); text != "" {

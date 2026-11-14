@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -42,6 +41,9 @@ func (s *Store) Send(ctx context.Context, sessionID, id, modelName, scope string
 		if err := checkDraft(ctx, tx, sessionID, revision); err != nil {
 			return err
 		}
+		if err := checkNoReplacement(ctx, tx, sessionID, ""); err != nil {
+			return err
+		}
 		session, err := readSession(ctx, tx, sessionID)
 		if err != nil {
 			return err
@@ -56,27 +58,17 @@ func (s *Store) Send(ctx context.Context, sessionID, id, modelName, scope string
 		if active > 0 {
 			return ErrBusy
 		}
-		rows, err := tx.QueryContext(ctx, "SELECT text FROM segments WHERE session_id=? AND message_id IS NULL AND state!='deleted' ORDER BY position", sessionID)
+		var capturing int
+		if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM segments WHERE session_id=? AND message_id IS NULL AND state IN ('capturing','staged')", sessionID).Scan(&capturing); err != nil {
+			return err
+		}
+		if capturing > 0 {
+			return ErrBusy
+		}
+		input, err := readDraftText(ctx, tx, sessionID)
 		if err != nil {
 			return err
 		}
-		var parts []string
-		for rows.Next() {
-			var text string
-			if err := rows.Scan(&text); err != nil {
-				rows.Close()
-				return err
-			}
-			if strings.TrimSpace(text) != "" {
-				parts = append(parts, text)
-			}
-		}
-		err = rows.Err()
-		rows.Close()
-		if err != nil {
-			return err
-		}
-		input := strings.Join(parts, "\n\n")
 		if input == "" {
 			return ErrConflict
 		}
@@ -133,6 +125,13 @@ func (s *Store) AppendReply(ctx context.Context, id, text string) (int, error) {
 
 func (s *Store) Retry(ctx context.Context, sessionID, id string) error {
 	return s.transaction(ctx, func(tx *sql.Tx) error {
+		session, err := readSession(ctx, tx, sessionID)
+		if err != nil {
+			return err
+		}
+		if session.State != "ready" {
+			return ErrBusy
+		}
 		message, err := scanMessage(tx.QueryRowContext(ctx, "SELECT "+messageColumns+" FROM messages WHERE id=? AND session_id=?", id, sessionID))
 		if err != nil {
 			return err

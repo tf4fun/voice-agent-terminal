@@ -14,7 +14,10 @@ CREATE TABLE segments (
     generation INTEGER NOT NULL DEFAULT 1,
     state TEXT NOT NULL,
     text TEXT NOT NULL DEFAULT '',
-    message_id TEXT
+    message_id TEXT,
+    capture_mode INTEGER NOT NULL DEFAULT 0,
+    commit_revision INTEGER NOT NULL DEFAULT 0,
+    staged_at INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX draft_segments ON segments(session_id, position);
 CREATE TABLE messages (

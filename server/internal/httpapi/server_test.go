@@ -284,7 +284,7 @@ func TestDraftsWorkWhileHermesIsUnconfigured(t *testing.T) {
 	e.request(t, "POST", base+"/segments", map[string]any{"id": segment, "revision": 1, "text": "先记录想法"}, 201)
 	voice := model.NewID()
 	e.request(t, "POST", base+"/segments", map[string]any{"id": voice, "revision": 2}, 201)
-	if err := svc.Capture(context.Background(), session, voice, 3, io.NopCloser(bytes.NewReader(make([]byte, 6400))), 16000); err != nil {
+	if err := svc.Capture(context.Background(), session, voice, 3, io.NopCloser(bytes.NewReader(make([]byte, 6400))), 16000, false, false); err != nil {
 		t.Fatal(err)
 	}
 	e.request(t, "POST", base+"/messages", map[string]any{"id": model.NewID(), "revision": 2}, 503)

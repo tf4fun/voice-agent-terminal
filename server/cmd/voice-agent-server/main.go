@@ -58,6 +58,11 @@ func run(arguments []string) error {
 		}
 		cfg.Addr = *address
 	}
+	listener, err := net.Listen("tcp", cfg.Addr)
+	if err != nil {
+		return err
+	}
+	defer listener.Close()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	st, err := store.Open(cfg.DataDir)
 	if err != nil {
@@ -75,11 +80,6 @@ func run(arguments []string) error {
 	service := gateway.New(st, cfg, client, transcriber, logger)
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
-	listener, err := net.Listen("tcp", cfg.Addr)
-	if err != nil {
-		return err
-	}
-	defer listener.Close()
 	service.Start(ctx)
 	defer service.Close()
 	var publisher *discovery.Publisher

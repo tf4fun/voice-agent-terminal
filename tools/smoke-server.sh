@@ -100,7 +100,7 @@ def stop(child):
         child.stderr.close()
 
 try:
-    assert subprocess.check_output([binary, "version"], text=True).strip() == "0.1.0"
+    assert subprocess.check_output([binary, "version"], text=True).strip() == "0.2.0"
     process = start()
     session, first, second, message = [str(uuid.uuid4()) for _ in range(4)]
     path = f"/api/v1/sessions/{session}"

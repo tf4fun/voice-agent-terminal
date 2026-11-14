@@ -24,14 +24,17 @@ type Session struct {
 }
 
 type Segment struct {
-	ID         string `json:"id"`
-	SessionID  string `json:"session_id"`
-	Position   int64  `json:"position"`
-	Generation int64  `json:"generation"`
-	State      string `json:"state"`
-	Text       string `json:"-"`
-	Bytes      int    `json:"bytes"`
-	Preview    string `json:"preview"`
+	ID             string `json:"id"`
+	SessionID      string `json:"session_id"`
+	Position       int64  `json:"position"`
+	Generation     int64  `json:"generation"`
+	State          string `json:"state"`
+	Text           string `json:"-"`
+	MessageID      string `json:"-"`
+	CaptureMode    int    `json:"-"`
+	CommitRevision int64  `json:"-"`
+	Bytes          int    `json:"bytes"`
+	Preview        string `json:"preview"`
 }
 
 type Message struct {

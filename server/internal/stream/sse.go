@@ -15,7 +15,7 @@ var ErrEventTooLarge = errors.New("upstream_event_too_large")
 func ReadSSE(input io.Reader, emit func(string, []byte) error) error {
 	reader := bufio.NewReaderSize(input, 4096)
 	var data bytes.Buffer
-	var filter MediaFilter
+	filter := NewJSONMediaFilter()
 	eventName := ""
 	lineKind := ""
 	prefix := ""
@@ -36,16 +36,17 @@ func ReadSSE(input io.Reader, emit func(string, []byte) error) error {
 		}
 		if lineKind == "" && prefix == "" && lineEnd && len(fragment) == 0 {
 			if data.Len() > 0 {
-				if data.Len()+len(filter.pending) > 256<<10 {
+				tail := filter.Flush()
+				if data.Len()+len(tail) > 256<<10 {
 					return ErrEventTooLarge
 				}
-				data.Write(filter.Flush())
+				data.Write(tail)
 				if err := emit(eventName, data.Bytes()); err != nil {
 					return err
 				}
 			}
 			data.Reset()
-			filter = MediaFilter{}
+			filter = NewJSONMediaFilter()
 			eventName = ""
 		} else {
 			position := 0

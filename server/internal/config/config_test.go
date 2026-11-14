@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestConfigurationWithoutCredentialsIsInspectable(t *testing.T) {
@@ -37,5 +38,15 @@ func TestEnvironmentValuesAreLiteralAndProcessWins(t *testing.T) {
 	}
 	if os.Getenv("VOICE_ADDR") != "127.0.0.1:9999" || os.Getenv("VOICE_TEST_LITERAL") != "$(never-run) `literal`" {
 		t.Fatal("environment precedence or literal values changed")
+	}
+}
+
+func TestCaptureRequestBudgetPreservesAudioLimit(t *testing.T) {
+	cfg, err := Load(func(string) string { return "" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CaptureTimeout != 5*time.Minute || cfg.CaptureRequestTimeout() != 6*time.Minute {
+		t.Fatalf("audio=%v request=%v", cfg.CaptureTimeout, cfg.CaptureRequestTimeout())
 	}
 }

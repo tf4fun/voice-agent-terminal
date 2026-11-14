@@ -32,6 +32,7 @@ type Update struct {
 type UpstreamError struct {
 	Status    int
 	Code      string
+	Reason    string
 	Uncertain bool
 }
 
@@ -81,18 +82,45 @@ func (c *Client) sessionRequest(ctx context.Context, method, path string, payloa
 		return 0, &UpstreamError{Code: "hermes_unavailable", Uncertain: true}
 	}
 	defer response.Body.Close()
-	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 64<<10))
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return response.StatusCode, &UpstreamError{Status: response.StatusCode, Code: "hermes_session_error"}
+		var body struct {
+			Error struct {
+				Code string `json:"code"`
+			} `json:"error"`
+		}
+		_ = json.NewDecoder(io.LimitReader(response.Body, 64<<10)).Decode(&body)
+		return response.StatusCode, &UpstreamError{
+			Status: response.StatusCode, Code: "hermes_session_error", Reason: body.Error.Code,
+		}
 	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 64<<10))
 	return response.StatusCode, nil
 }
 
-func (c *Client) CreateSession(ctx context.Context, id string) error {
-	status, err := c.sessionRequest(ctx, "POST", "/api/sessions", map[string]string{"id": id, "source": "api_server"})
+func (c *Client) CreateSession(ctx context.Context, id string, titles ...string) error {
+	payload := map[string]string{"id": id, "source": "api_server"}
+	if len(titles) > 0 && titles[0] != "" {
+		payload["title"] = titles[0]
+	}
+	status, err := c.sessionRequest(ctx, "POST", "/api/sessions", payload)
+	var upstream *UpstreamError
+	if status == http.StatusBadRequest && payload["title"] != "" &&
+		errors.As(err, &upstream) && upstream.Reason == "invalid_title" {
+		// Hermes requires unique titles. Keep the device title in the gateway index.
+		delete(payload, "title")
+		status, err = c.sessionRequest(ctx, "POST", "/api/sessions", payload)
+	}
 	if status == http.StatusConflict {
 		_, err = c.ownedSession(ctx, id)
 	}
+	return err
+}
+
+func (c *Client) RenameSession(ctx context.Context, id, title string) error {
+	if _, err := c.ownedSession(ctx, id); err != nil {
+		return err
+	}
+	_, err := c.sessionRequest(ctx, "PATCH", "/api/sessions/"+url.PathEscape(id), map[string]string{"title": title})
 	return err
 }
 
@@ -231,7 +259,7 @@ func (c *Client) Chat(ctx context.Context, message model.Message, emit func(Upda
 }
 
 func recoverReply(input io.Reader, emit func(Update) error) (string, error) {
-	var filter stream.MediaFilter
+	filter := stream.NewJSONMediaFilter()
 	var body bytes.Buffer
 	buffer := make([]byte, 4096)
 	for {
