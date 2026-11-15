@@ -428,4 +428,3 @@ func (Fake) Speak(ctx context.Context, text string, emit func([]byte) error) err
 	}
 	return nil
 }
-
