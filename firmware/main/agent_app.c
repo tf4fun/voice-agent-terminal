@@ -102,9 +102,7 @@ static int64_t s_voice_review_at; // Last review key; review ends after 15 s wit
 static const char *s_ticker_source;
 // The sentence being spoken, shown one line at a time at about the speech rate.
 enum { SPEAK_RUNE_US = 260000 }; // ~3.8 characters per second, measured on the reader voice.
-static char s_speak_text[AGENT_SPEECH_SENTENCE_BYTES];
-static uint16_t s_speak_index;
-static int64_t s_speak_at;
+static uint32_t s_speak_serial; // Speech stream the spoken line belongs to.
 static int s_speak_line;
 static int s_ticker_line = -1;
 static int64_t s_ticker_next;
@@ -168,7 +166,7 @@ static void delete_screen(void)
     s_voice_panel = s_voice_panel_count = s_voice_panel_scroll = s_voice_panel_body = s_voice_hints = NULL;
     s_ticker_source = NULL;
     s_ticker_line = -1;
-    s_speak_text[0] = '\0';
+    s_speak_line = -1;
     s_voice_review = -1; // Line offsets belong to the reply being left.
     s_voice_mode = s_voice_hint_set = -1;
     s_voice_small = s_voice_arc_spinning = s_voice_spin_spinning = false;
@@ -898,17 +896,12 @@ static int ticker_line(int64_t now)
 }
 
 // Keeps a copy of the newest reply and its sentence ranges for the strip.
-static void voice_reply_cache(bool streaming)
+static void voice_reply_cache(void)
 {
-    static int64_t copied;
     char key[sizeof(s_voice_reply_key)];
     snprintf(key, sizeof(key), "%lu/%lu/%s/%lu/%lu", (unsigned long)s_view.selection, (unsigned long)s_view.text_generation,
              s_view.message.id, (unsigned long)s_view.message.revision, (unsigned long)s_view.message.reply_bytes);
     if (strcmp(key, s_voice_reply_key) == 0) return;
-    // A growing reply is copied at most twice a second to spare the heap.
-    const int64_t now = esp_timer_get_time();
-    if (streaming && s_voice_reply != NULL && now - copied < 500000) return;
-    copied = now;
     char *reply = agent_client_part_copy(s_view.selection, false);
     if (reply == NULL) return; // Not loaded yet; keep the last copy.
     memo_font_filter_text(reply, false);
@@ -928,10 +921,11 @@ static void render_voice(void)
     agent_speech_copy(&s_speech);
     const bool speaking = s_speech.active && s_speech.audible && strcmp(s_speech.message_id, s_view.message.id) == 0;
     const agent_voice_mode_t mode = agent_voice_mode((int)s_view.capture, voice_has_draft(), s_view.turn.present,
-                                                     s_view.message.state, speaking, s_view.message.reply_bytes > 0);
-    // Only the states whose strip shows reply sentences need the reply text.
-    if (s_view.turn.present && (mode == AGENT_VOICE_IDLE || mode == AGENT_VOICE_FAILED || mode == AGENT_VOICE_REPLYING))
-        voice_reply_cache(mode == AGENT_VOICE_REPLYING);
+                                                     s_view.message.state, speaking, false);
+    // The reply text arrives whole once Hermes has finished (thinking until
+    // then); the resting and spoken strips both read it.
+    if (s_view.turn.present && (mode == AGENT_VOICE_IDLE || mode == AGENT_VOICE_FAILED || mode == AGENT_VOICE_SPEAKING))
+        voice_reply_cache();
     if ((int)mode != s_voice_mode) {
         agent_trace(TRACE_VOICE, (uint16_t)mode, 0, NULL);
         if (mode != AGENT_VOICE_IDLE && mode != AGENT_VOICE_FAILED) s_voice_review = -1;
@@ -1051,32 +1045,34 @@ static void render_voice(void)
         if (strip) agent_copy_text(line, sizeof(line), s_voice_question);
         strip_tone = UI_DIM;
     } else if (mode == AGENT_VOICE_SPEAKING) {
-        // Like the resting ticker, a long sentence shows one whole line at a
-        // time; lines advance at the estimated speech rate.
-        if (s_speech.index != s_speak_index || strcmp(s_speech.sentence, s_speak_text) != 0) {
-            if (s_speak_text[0] != '\0') line_slide(1); // The next sentence rises in.
-            agent_copy_text(s_speak_text, sizeof(s_speak_text), s_speech.sentence);
-            memo_font_filter_text(s_speak_text, false);
-            s_speak_index = s_speech.index;
-            s_speak_at = now;
-            s_speak_line = 0;
+        // The reply's lines advance with the audio played so far, at the
+        // measured speech rate; before the text is loaded, its start shows.
+        if (s_speech.serial != s_speak_serial) { s_speak_serial = s_speech.serial; s_speak_line = -1; }
+        if (s_voice_display != NULL && s_voice_line_count > 0) {
+            const int64_t played = (int64_t)s_speech.played_ms * 1000;
+            int64_t spoken = 0;
+            int index = 0;
+            for (; index < s_voice_line_count - 1; index++) {
+                int64_t runes = 0;
+                for (size_t at = s_voice_lines[index]; at < s_voice_lines[index + 1]; at++)
+                    if (((unsigned char)s_voice_display[at] & 0xC0) != 0x80 && s_voice_display[at] != '\n') runes++;
+                if ((spoken + runes) * SPEAK_RUNE_US > played) break;
+                spoken += runes;
+            }
+            if (index != s_speak_line) {
+                if (s_speak_line >= 0) line_slide(1); // The next line rises in.
+                s_speak_line = index;
+            }
+            size_t start = s_voice_lines[index], end = s_voice_lines[index + 1];
+            while (end > start && (s_voice_display[end - 1] == '\n' || s_voice_display[end - 1] == ' ')) end--;
+            const size_t size = end - start < sizeof(line) - 1 ? end - start : sizeof(line) - 1;
+            memcpy(line, s_voice_display + start, size);
+            line[size] = '\0';
+        } else {
+            agent_copy_text(line, sizeof(line), s_speech.sentence);
+            memo_font_filter_text(line, false);
+            line[wrap_end(line, 0)] = '\0';
         }
-        size_t start = 0, end = wrap_end(s_speak_text, 0), spoken = 0;
-        int index = 0;
-        for (;;) {
-            size_t runes = 0;
-            for (size_t at = start; at < end; at++) if (((unsigned char)s_speak_text[at] & 0xC0) != 0x80) runes++;
-            if (s_speak_text[end] == '\0' || (int64_t)(spoken + runes) * SPEAK_RUNE_US > now - s_speak_at) break;
-            spoken += runes;
-            start = end;
-            while (s_speak_text[start] == ' ' || s_speak_text[start] == '\n') start++;
-            end = wrap_end(s_speak_text, start);
-            index++;
-        }
-        if (index != s_speak_line) { s_speak_line = index; line_slide(1); }
-        const size_t size = end - start < sizeof(line) - 1 ? end - start : sizeof(line) - 1;
-        memcpy(line, s_speak_text + start, size);
-        line[size] = '\0';
         strip = line[0] != '\0';
         border = UI_ACCENT;
     } else if ((mode == AGENT_VOICE_IDLE || mode == AGENT_VOICE_FAILED) && s_view.turn.present &&
@@ -1091,11 +1087,6 @@ static void render_voice(void)
         line[size] = '\0';
         strip = true;
         strip_tone = s_voice_review >= 0 ? UI_FG : UI_DIM;
-    } else if (mode == AGENT_VOICE_REPLYING && s_voice_sentences > 0) {
-        const int index = s_voice_sentences - 1;
-        sentence_text(s_voice_reply, s_voice_starts[index], s_voice_ends[index], line, sizeof(line));
-        strip = line[0] != '\0';
-        strip_tone = UI_DIM;
     }
     reveal(s_voice_strip, strip);
     if (strip) {

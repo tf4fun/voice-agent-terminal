@@ -22,7 +22,7 @@ import (
 // Output format delivered to callers and devices.
 const (
 	SampleRate = 16000
-	MaxText    = 2000 // Bytes per sentence request.
+	MaxText    = 8000 // Bytes per request: a whole reply is spoken at once.
 )
 
 var ErrUpstream = errors.New("speech_upstream_error")
@@ -45,7 +45,8 @@ var (
 	pongWait      = 50 * time.Second
 	sessionMaxAge = 50 * time.Minute
 	openTimeout   = 15 * time.Second
-	speakTimeout  = 60 * time.Second
+	speakTimeout  = 10 * time.Minute // A whole reply, read aloud.
+	speakIdle     = 20 * time.Second // Upstream silence that fails a request.
 )
 
 type OpenAI struct {
@@ -262,11 +263,17 @@ func (o *OpenAI) speak(ctx context.Context, s *session, text string, emit func([
 		return ErrUpstream
 	}
 	resampler := audio.NewDownsampler()
+	idle := time.NewTimer(speakIdle)
+	defer idle.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case <-idle.C:
+			o.warn("speech response stalled")
+			return ErrUpstream
 		case e, ok := <-s.events:
+			idle.Reset(speakIdle)
 			if !ok {
 				return ErrUpstream
 			}

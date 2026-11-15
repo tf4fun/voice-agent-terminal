@@ -18,6 +18,7 @@ typedef struct {
     char message_id[37];
     uint8_t level;   // 0..100 loudness of the audio being played.
     uint32_t serial; // Changes whenever a stream starts or stops.
+    uint32_t played_ms; // Audio sent to the speaker for the current stream.
 } agent_speech_view_t;
 
 esp_err_t agent_speech_init(void);

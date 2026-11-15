@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"io"
 	"net/http"
+	"strconv"
 	"testing"
 	"unicode/utf8"
 
@@ -56,7 +57,7 @@ func TestReplySpeechStreamsSentencesAndAudio(t *testing.T) {
 	e.request(t, "POST", base+"/messages", map[string]any{"id": message, "revision": 2}, 202)
 	e.request(t, "GET", path, nil, 503) // No synthesizer configured.
 	e.service.TTS = tts.Fake{}
-	// Opened while the reply may still be streaming; synthesis follows it.
+	// Opened while the reply may still be streaming; speech starts once it is complete.
 	frames := readSpeech(t, e, path)
 	sentences, audio := 0, 0
 	spoken := ""
@@ -88,14 +89,13 @@ func TestReplySpeechStreamsSentencesAndAudio(t *testing.T) {
 	if again := readSpeech(t, e, path); len(again) != len(frames) {
 		t.Fatalf("replay has %d frames, first had %d", len(again), len(frames))
 	}
-	// Resuming from the second sentence skips the first one's frames.
-	if sentences > 1 {
-		resumed := readSpeech(t, e, path+"?from=1")
-		if resumed[0].kind != gateway.FrameSentence || binary.LittleEndian.Uint16(resumed[0].payload) != 1 {
-			t.Fatalf("resume started with kind %d", resumed[0].kind)
-		}
+	// Resuming at a byte offset continues there: past the sentence frame,
+	// the next bytes are the first audio frame.
+	resumed := readSpeech(t, e, path+"?offset="+strconv.Itoa(3+len(frames[0].payload)))
+	if resumed[0].kind != gateway.FrameAudio || len(resumed) != len(frames)-1 {
+		t.Fatalf("resume started with kind %d, %d frames", resumed[0].kind, len(resumed))
 	}
-	e.request(t, "GET", path+"?from=x", nil, 400)
+	e.request(t, "GET", path+"?offset=x", nil, 400)
 	e.request(t, "GET", base+"/messages/"+model.NewID()+"/speech", nil, 404)
 }
 

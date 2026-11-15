@@ -16,10 +16,11 @@ the status line and the strip shows the last ten characters of the live
 transcript. After release the strip spins while the transcript settles (no key
 acts in that moment), then expands into the draft panel. Sending collapses it
 to one line with the question while Hermes thinks: a comet arc orbits the orb,
-the bars rise in turn and the status counts the seconds waited. While a reply
-is spoken the strip shows the sentence being read one whole line at a time,
-advancing at about 3.8 characters per second, the measured rate of the reader
-voice; when
+the bars rise in turn and the status counts the seconds waited; this lasts
+until Hermes has finished, since the device fetches the reply whole. While a
+reply is spoken the strip shows its lines one at a time, advancing with the
+audio played at about 3.8 characters per second, the measured rate of the
+reader voice; when
 it ends the strip becomes a vertical ticker over the reply: Markdown marks are
 dropped, every sentence starts a line, a sentence wider than the strip
 continues on further lines, and closing punctuation never starts one. Each
@@ -27,8 +28,9 @@ line stays 220 ms per character (1.8–5 s) and the next slides up in 0.25 s;
 after the last line it rests 3 s and starts over. Up/down hold and move lines,
 the status shows the position, and 15 s without a key resumes the ticker. Notices replace the status line
 instead of overlaying other elements. The text card is the previous
-conversation page; it now streams the reply as it arrives and shows
-"正在朗读" while speech plays. Two marks under the header tell the views apart.
+conversation page; it shows the reply once it is complete and shows
+"正在朗读" while speech plays. While Hermes writes, the device checks only the
+turn's state once a second (no SSE) and then downloads the complete reply. Two marks under the header tell the views apart.
 
 When the gateway reports `speech`, the device reads aloud each new newest
 exchange of the open session, whether it was sent from the device or from the
@@ -39,14 +41,18 @@ capture format and publishes the current sentence and loudness for the orb.
 Recording stops speech before the microphone starts; long Down stops it in
 either view; leaving the session stops it. The I2S DMA ring holds only 90 ms,
 so playback is split: the stream reader passes audio straight from the HTTP
-reads into an 8 KiB buffer (about 256 ms) and a writer task at the capture
-task's priority feeds the codec after 200 ms of prebuffer, refilling 100 ms
-after running dry; the stream reader runs above the UI tasks, and each
-underrun is logged and counted in the speech trace event. The buffer and the
-writer are reserved once at boot:
-allocating them per reply fragmented the heap (after one spoken reply the
-largest free block fell from 59 KiB to 35 KiB while the minimum free heap
-reached 26.7 KiB).
+reads into a 16 KiB buffer (about 512 ms) shared with recording
+(`agent_pcm_pool.c`; the two never run together, since recording ends
+playback), and a writer task at the capture task's priority feeds the codec
+after 400 ms of prebuffer, refilling 200 ms after running dry, with short fades
+around each dry spell so it does not click. A dropped connection resumes at the
+exact stream byte it stopped at (`?offset=`, up to three times, keepalives not
+counted), with the frame parser carried over. The speech trace event records
+underruns, the longest network gap and resumes; Wi-Fi modem sleep is held off
+while speech plays, and disconnect reasons are traced. The buffer and the
+writer are reserved once at boot: allocating them per reply fragmented the heap
+(after one spoken reply the largest free block fell from 59 KiB to 35 KiB while
+the minimum free heap reached 26.7 KiB).
 
 The resting ticker draws one still line and animates only the 0.25 s slide
 between lines, so it costs almost nothing to render. The orb sits 8 px below the mode marks so the thinking arc

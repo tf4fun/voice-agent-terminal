@@ -45,6 +45,24 @@ static inline void agent_speech_parser_reset(agent_speech_parser_t *parser)
     parser->invalid = false;
 }
 
+// Stream offset for resuming: the gateway's cached stream has no keepalives
+// (they are added per connection between frames), so they are not counted.
+static inline void agent_speech_track(size_t *offset, size_t used, const agent_speech_event_t *event)
+{
+    *offset += used;
+    if (event->kind == AGENT_SPEECH_KEEPALIVE) *offset -= 3;
+}
+
+// Before reconnecting at *offset: a frame header cut short is asked for again
+// from its first byte, while a frame body simply continues.
+static inline void agent_speech_resume(agent_speech_parser_t *parser, size_t *offset)
+{
+    if (parser->header_used > 0 && parser->header_used < 3) {
+        *offset -= parser->header_used;
+        parser->header_used = 0;
+    }
+}
+
 // Consumes bytes and reports at most one event: an audio slice, or a
 // completed non-audio frame. Returns the bytes consumed.
 static inline size_t agent_speech_parse(agent_speech_parser_t *parser, const uint8_t *data, size_t size,

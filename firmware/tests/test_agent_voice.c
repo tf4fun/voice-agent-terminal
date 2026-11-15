@@ -82,11 +82,48 @@ static void test_frames(void)
     assert(parser.invalid);
 }
 
+// A connection dropped at any byte, with keepalives between frames on the
+// wire, resumes from the cached stream and yields the same audio and text.
+static void test_resume(void)
+{
+    const uint8_t cached[] = {1, 4, 0, 0, 0, 'h', 'i', 2, 5, 0, 1, 2, 3, 4, 5, 2, 3, 0, 6, 7, 8, 3, 1, 0, 0};
+    for (size_t cut = 1; cut < sizeof(cached); cut++) {
+        agent_speech_parser_t parser;
+        agent_speech_parser_reset(&parser);
+        uint8_t audio[16];
+        size_t audio_used = 0, offset = 0;
+        int sentences = 0, ends = 0;
+        // First connection: a keepalive before the stream, then `cut` stream bytes.
+        uint8_t wire[64] = {4, 0, 0};
+        memcpy(wire + 3, cached, cut);
+        const uint8_t *data = wire;
+        size_t size = 3 + cut;
+        for (int connection = 0; connection < 2; connection++) {
+            for (size_t at = 0; at < size;) {
+                agent_speech_event_t event;
+                const size_t used = agent_speech_parse(&parser, data + at, size - at, &event);
+                at += used;
+                agent_speech_track(&offset, used, &event);
+                assert(!parser.invalid);
+                if (event.kind == AGENT_SPEECH_AUDIO) { memcpy(audio + audio_used, event.data, event.size); audio_used += event.size; }
+                if (event.kind == AGENT_SPEECH_SENTENCE) { sentences++; assert(event.size == 4 && event.data[3] == 'i'); }
+                if (event.kind == AGENT_SPEECH_END) ends++;
+            }
+            agent_speech_resume(&parser, &offset);
+            data = cached + offset;
+            size = sizeof(cached) - offset;
+        }
+        assert(sentences == 1 && ends == 1 && audio_used == 8);
+        for (int i = 0; i < 8; i++) assert(audio[i] == i + 1);
+    }
+}
+
 int main(void)
 {
     test_modes();
     test_sentences();
     test_frames();
+    test_resume();
     puts("voice page logic and speech frames: PASS");
     return 0;
 }

@@ -40,8 +40,9 @@ loads another complete user/assistant exchange when requested. RAM allocation
 follows the selected text's actual size, and leaving the conversation releases
 its cache. Session-list pagination remains independent of message reading.
 
-Hermes replies arrive at the device cache through SSE. The card displays its
-status graphic and animation throughout generation. Completion reveals the
+While Hermes writes a reply the device polls only the turn's state, then
+fetches the complete reply into its cache (the web page streams it through
+SSE). The card displays its status graphic and animation throughout generation. Completion reveals the
 whole reply at its beginning. Up/down input controls the local reading position.
 The compact header combines the page title, time and battery. The role and
 status share the card's first row. The user can view their own input while
@@ -119,7 +120,7 @@ device state after a broken connection. Reconnection reconciles the same message
 with cached output or upstream state. Active execution, retry evidence and reply
 delivery have separate lifetimes.
 
-For device recovery, establish the session SSE subscription before reading the
+For SSE clients (the web page) recovery, establish the session SSE subscription before reading the
 complete message snapshot. The initial `resync` event triggers metadata and full
 body reads. Returned UTF-8 byte lengths establish the delta baseline. Matching
 `chat.delta` offsets append to the same reply, already represented offsets are

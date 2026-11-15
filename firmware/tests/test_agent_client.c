@@ -328,32 +328,6 @@ static void test_whole_pair_and_history(void)
     free(input);free(reply);
 }
 
-static void test_sse_append_and_recovery_offsets(void)
-{
-    setup();s_view.text_kind=AGENT_TEXT_REPLY;
-    strcpy(s_cached_message,message_id);strcpy(s_view.message.id,message_id);
-    s_view.turn.present=true;
-    CHECK(append_reply(message_id,0,"你好"));
-    CHECK(append_reply(message_id,0,"你好"));
-    CHECK(strcmp(s_reply_text,"你好")==0);
-    CHECK(append_reply(message_id,3,"好，世界"));
-    CHECK(strcmp(s_reply_text,"你好，世界")==0);
-    CHECK(!append_reply(message_id,99,"gap"));
-    CHECK(!append_reply(message_id,0,"different"));
-    CHECK(strcmp(s_reply_text,"你好，世界")==0);
-    CHECK(append_reply(selected_message_id,0,"other message"));
-    watch_context_t context={.selection=s_view.selection,.request=s_view.chat_request};
-    strcpy(context.session,session_id);
-    const char *event="event: chat.delta\ndata: {\"type\":\"chat.delta\",\"message_id\":\"00000000-0000-4000-8000-000000000002\",\"offset\":15,\"text\":\"！\"}\n\n";
-    agent_sse_t stream={0};
-    for(size_t i=0;i<strlen(event);i++)CHECK(agent_sse_feed(&stream,event+i,1,stream_event,&context));
-    CHECK(strcmp(s_reply_text,"你好，世界！")==0);
-    agent_client_message_select(true);
-    CHECK(watch_current(&context));
-    s_view.chat_request++;
-    CHECK(!watch_current(&context));
-}
-
 static bool ends_with_truncated_notice(const char *text)
 {
     const size_t length=strlen(text),notice_length=strlen(AGENT_TRUNCATED_NOTICE);
@@ -391,37 +365,7 @@ static void test_oversized_content_is_bounded(void)
     CHECK(strlen(s_reply_text)==limit-1&&s_reply_truncated);
     free(input);free(reply);
 
-    // Streaming stops growing the cache at the bound but keeps tracking offsets.
-    setup();s_view.text_kind=AGENT_TEXT_REPLY;
-    strcpy(s_cached_message,message_id);strcpy(s_view.message.id,message_id);
-    s_view.turn.present=true;
-    char *start=malloc(limit-1);assert(start);
-    memset(start,'C',limit-2);start[limit-2]=0;
-    CHECK(append_reply(message_id,0,start));free(start);
-    CHECK(!s_reply_truncated&&s_reply_capacity<=limit+1);
-    CHECK(append_reply(message_id,limit-2,"你好"));
-    CHECK(strlen(s_reply_text)==limit-2&&s_reply_truncated&&s_reply_total==limit+4);
-    CHECK(s_reply_capacity<=limit+1&&s_view.message.reply_bytes==limit+4);
-    CHECK(append_reply(message_id,limit+4,"z"));
-    CHECK(s_reply_total==limit+5&&strlen(s_reply_text)==limit-2);
-    CHECK(append_reply(message_id,limit,"好z"));
-    CHECK(s_reply_total==limit+5);
-    CHECK(!append_reply(message_id,limit+10,"gap"));
     CHECK(utf8_complete_prefix("你",1)==0&&utf8_complete_prefix("你",3)==3&&utf8_complete_prefix("a你",2)==1);
-}
-
-static bool count_event(const char *json,void *context)
-{
-    (void)json;(*(unsigned *)context)++;return true;
-}
-static void test_sse_fragment_bounds(void)
-{
-    agent_sse_t stream={0};unsigned count=0;
-    CHECK(agent_sse_feed(&stream,": heartbeat\r\ndata: {}\r\n\r\n",strlen(": heartbeat\r\ndata: {}\r\n\r\n"),count_event,&count));
-    CHECK(count==1);
-    memset(&stream,0,sizeof(stream));
-    char oversized[AGENT_SSE_LINE_BYTES+1];memset(oversized,'x',sizeof(oversized));
-    CHECK(!agent_sse_feed(&stream,oversized,sizeof(oversized),count_event,&count));
 }
 
 static void send_during_draft_response(void)
@@ -475,17 +419,25 @@ static void test_empty_draft_returns_to_whole_turn(void)
     CHECK(s_view.text_kind==AGENT_TEXT_REPLY&&!s_view.text_loading&&s_view.chat_loading&&s_resync);
 }
 
-static void test_reply_stream_uses_http_reader(void)
+static void test_active_reply_is_fetched_once_complete(void)
 {
-    setup();s_view.text_kind=AGENT_TEXT_REPLY;
-    strcpy(s_cached_message,message_id);strcpy(s_view.message.id,message_id);
-    strcpy(s_view.message.state,"waiting");s_view.turn.present=true;
-    injected_response="event: chat.delta\ndata: {\"type\":\"chat.delta\",\"message_id\":\"00000000-0000-4000-8000-000000000002\",\"text\":\"streamed reply\"}\n\n";
+    setup();s_view.text_kind=AGENT_TEXT_REPLY;s_view.chat_loading=true;
+    char response[256];
+    snprintf(response,sizeof(response),"{\"message\":{\"id\":\"%s\",\"state\":\"receiving\",\"revision\":3,"
+        "\"input_bytes\":2,\"reply_bytes\":5},\"before\":\"\",\"after\":\"\"}",message_id);
+    whole_input="hi";whole_reply="hello";injected_response=response;
     agent_view_t view=s_view;
-    CHECK(!watch_reply(&view));
-    CHECK(stream_timeout_ms>0&&stream_timeout_ms<=40);
-    CHECK(s_reply_text&&strcmp(s_reply_text,"streamed reply")==0);
-    CHECK(strcmp(s_view.message.state,"receiving")==0);
+    // While Hermes writes, only the state is tracked; no partial text is downloaded.
+    CHECK(poll_turn(&view));
+    CHECK(!s_reply_loaded&&strcmp(s_view.message.state,"receiving")==0);
+    view=s_view;
+    CHECK(poll_reply_state(&view));
+    CHECK(!s_reply_loaded);
+    snprintf(response,sizeof(response),"{\"message\":{\"id\":\"%s\",\"state\":\"completed\",\"revision\":4,"
+        "\"input_bytes\":2,\"reply_bytes\":5},\"before\":\"\",\"after\":\"\"}",message_id);
+    view=s_view;
+    CHECK(poll_reply_state(&view));
+    CHECK(s_reply_loaded&&strcmp(s_reply_text,"hello")==0&&strcmp(s_view.message.state,"completed")==0);
 }
 
 static void test_raw_content_integrity(void)
@@ -642,14 +594,12 @@ int main(void)
 {
     assert(agent_client_init()==ESP_OK);
     test_whole_pair_and_history();
-    test_sse_append_and_recovery_offsets();
     test_oversized_content_is_bounded();
-    test_sse_fragment_bounds();
     test_send_rejects_inflight_draft_response();
     test_cached_draft_review_and_reopen();
     test_raw_content_integrity();
     test_empty_draft_returns_to_whole_turn();
-    test_reply_stream_uses_http_reader();
+    test_active_reply_is_fetched_once_complete();
     test_retry_accepts_server_message();
     for(enum capture_case item=CAPTURE_NORMAL;item<=CAPTURE_SHORT;item++)test_capture(item);
     test_failure_report_upload();

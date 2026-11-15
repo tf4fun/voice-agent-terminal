@@ -47,6 +47,7 @@ static SemaphoreHandle_t s_writer_done;
 static StaticSemaphore_t s_writer_done_control;
 static atomic_bool s_ended, s_stop;
 static atomic_uint s_underruns; // Times the speaker ran dry mid-stream (diagnostics).
+static atomic_uint s_played;    // PCM bytes sent to the speaker for this stream.
 static _Atomic int64_t s_heard_us; // Last time stream bytes arrived.
 static atomic_uint s_longest_gap_ms; // Longest wait for stream bytes in this reply.
 static uint8_t s_chunk[1024];
@@ -149,6 +150,7 @@ static void writer_task(void *arg)
             }
             publish_level(loudness(s_chunk, even));
             if (even > 0 && bsp_audio_write(s_chunk, even) != ESP_OK) break;
+            atomic_fetch_add(&s_played, (unsigned)even);
             carry = total - even;
             if (carry) s_chunk[0] = s_chunk[even];
         }
@@ -157,13 +159,13 @@ static void writer_task(void *arg)
     }
 }
 
-static esp_http_client_handle_t open_stream(const char *session, const char *message, uint16_t from)
+static esp_http_client_handle_t open_stream(const char *session, const char *message, size_t offset)
 {
     memo_endpoint_t endpoint;
     if (!memo_net_has_ip() || !memo_discovery_endpoint(&endpoint)) return NULL;
     char url[280];
-    const int length = snprintf(url, sizeof(url), "http://%s:%u/api/v1/sessions/%s/messages/%s/speech?from=%u",
-                                endpoint.host, endpoint.port, session, message, (unsigned)from);
+    const int length = snprintf(url, sizeof(url), "http://%s:%u/api/v1/sessions/%s/messages/%s/speech?offset=%u",
+                                endpoint.host, endpoint.port, session, message, (unsigned)offset);
     if (length < 0 || length >= (int)sizeof(url)) return NULL;
     // Keepalive frames arrive every 5 s while the reply is still being thought about.
     const esp_http_client_config_t config = {
@@ -199,34 +201,17 @@ static bool network_back(unsigned request)
 
 enum { STREAM_DONE, STREAM_STOPPED, STREAM_BROKEN };
 
-// Reads one connection into the playback buffer; reports how it ended.
-static int read_stream_body(esp_http_client_handle_t client, unsigned request, uint16_t *index, uint8_t *status,
-                            size_t *audio);
-
-// A connection can drop in the middle of a PCM16 sample. The resumed stream
-// starts on a whole sample, so a stray half sample would shift every later
-// sample by one byte and turn the rest of the reply into noise; pad it.
-static int read_stream(esp_http_client_handle_t client, unsigned request, uint16_t *index, uint8_t *status)
-{
-    size_t audio = 0;
-    const int outcome = read_stream_body(client, request, index, status, &audio);
-    if (audio & 1) {
-        const uint8_t pad = 0;
-        while (atomic_load(&s_request) == request && xStreamBufferSend(s_pcm, &pad, 1, pdMS_TO_TICKS(50)) == 0) {}
-        ESP_LOGW(TAG, "speech stream ended mid-sample; padded");
-    }
-    return outcome;
-}
-
-static int read_stream_body(esp_http_client_handle_t client, unsigned request, uint16_t *index, uint8_t *status,
-                            size_t *audio)
+// Reads one connection into the playback buffer and reports how it ended.
+// *stream_offset counts the stream bytes taken in, keepalives excluded, so a dropped
+// connection resumes exactly there; the parser carries over between them.
+static int read_stream(esp_http_client_handle_t client, unsigned request, size_t *stream_offset, uint16_t *index,
+                       uint8_t *status)
 {
     uint8_t buffer[512];
     // IDF reads try to fill the buffer; a short timeout keeps stop requests
     // responsive. Keepalives every 5 s mean 15 s of silence is a dead stream.
     esp_http_client_set_timeout_ms(client, 100);
     int64_t heard = esp_timer_get_time();
-    agent_speech_parser_reset(&s_parser);
     while (atomic_load(&s_request) == request) {
         const int got = esp_http_client_read(client, (char *)buffer, sizeof(buffer));
         if (got == -ESP_ERR_HTTP_EAGAIN) {
@@ -242,14 +227,16 @@ static int read_stream_body(esp_http_client_handle_t client, unsigned request, u
         size_t offset = 0;
         while (offset < (size_t)got && atomic_load(&s_request) == request) {
             agent_speech_event_t event;
-            offset += agent_speech_parse(&s_parser, buffer + offset, (size_t)got - offset, &event);
+            const size_t used = agent_speech_parse(&s_parser, buffer + offset, (size_t)got - offset, &event);
+            offset += used;
+            agent_speech_track(stream_offset, used, &event);
             if (s_parser.invalid) return STREAM_BROKEN;
             if (event.kind == AGENT_SPEECH_AUDIO) {
                 // Queue for the writer; wait in short slices so a stop stays prompt.
                 size_t sent = 0;
                 while (sent < event.size && atomic_load(&s_request) == request)
                     sent += xStreamBufferSend(s_pcm, event.data + sent, event.size - sent, pdMS_TO_TICKS(50));
-                *audio += sent;
+
             } else if (event.kind == AGENT_SPEECH_SENTENCE && event.size >= 2) {
                 *index = (uint16_t)(event.data[0] | (event.data[1] << 8));
                 char sentence[AGENT_SPEECH_SENTENCE_BYTES];
@@ -270,7 +257,7 @@ static int read_stream_body(esp_http_client_handle_t client, unsigned request, u
 }
 
 // Plays one reply until it ends, fails or a newer request supersedes it. A
-// dropped connection resumes from the sentence being spoken (up to 3 times).
+// dropped connection resumes at the exact byte it stopped at (up to 3 times).
 static void play(unsigned request, const char *session, const char *message)
 {
     publish(true, false, 0, "", message);
@@ -278,27 +265,31 @@ static void play(unsigned request, const char *session, const char *message)
     uint8_t status = 1;
     uint16_t index = 0;
     int outcome = STREAM_BROKEN, resumes = 0;
+    size_t offset = 0;
+    agent_speech_parser_reset(&s_parser);
     // Recording owns the shared buffer while it runs; a reply never plays over it.
     s_pcm = agent_pcm_pool_take(AGENT_PCM_PLAYBACK);
     if (s_pcm == NULL) status = 2;
     else if (bsp_audio_set_format(16000, 16, 1) == ESP_OK) {
         atomic_store(&s_underruns, 0);
+        atomic_store(&s_played, 0);
         atomic_store(&s_longest_gap_ms, 0);
         atomic_store(&s_heard_us, esp_timer_get_time());
         atomic_store(&s_ended, false);
         atomic_store(&s_stop, false);
         xTaskNotifyGive(s_writer);
         for (;;) {
-            esp_http_client_handle_t client = open_stream(session, message, index);
+            agent_speech_resume(&s_parser, &offset);
+            esp_http_client_handle_t client = open_stream(session, message, offset);
             if (client != NULL) {
-                outcome = read_stream(client, request, &index, &status);
+                outcome = read_stream(client, request, &offset, &index, &status);
                 esp_http_client_close(client);
                 esp_http_client_cleanup(client);
             }
             if (atomic_load(&s_request) != request) { outcome = STREAM_STOPPED; break; }
             if (outcome == STREAM_DONE || resumes >= 3 || !network_back(request)) break;
             resumes++;
-            ESP_LOGW(TAG, "speech stream dropped; resuming at sentence %u", (unsigned)index);
+            ESP_LOGW(TAG, "speech stream dropped; resuming at byte %u", (unsigned)offset);
         }
         if (outcome == STREAM_STOPPED) status = 2;
         // Let the queued audio finish unless playback was stopped.
@@ -385,4 +376,5 @@ void agent_speech_copy(agent_speech_view_t *out)
     lock();
     *out = s_view;
     unlock();
+    out->played_ms = atomic_load(&s_played) / 32; // 16 kHz PCM16 mono
 }

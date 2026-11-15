@@ -4,12 +4,15 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/tf4fun/voice-agent-terminal/server/internal/events"
+	"github.com/tf4fun/voice-agent-terminal/server/internal/model"
 	"github.com/tf4fun/voice-agent-terminal/server/internal/speech"
 	"github.com/tf4fun/voice-agent-terminal/server/internal/store"
+	"github.com/tf4fun/voice-agent-terminal/server/internal/tts"
 )
 
 // Speech stream framing, shared with the device: one byte kind, a
@@ -30,11 +33,10 @@ const (
 	speechMaxStreams = 8
 	speechKeep       = 10 * time.Minute // Finished streams stay replayable.
 	speechIdleCancel = 10 * time.Second // Synthesis stops this long after the last listener leaves.
-	// The stream opens only once this much audio is ready, across sentences,
-	// so a short first sentence does not drain the device's half-second
-	// buffer while the next one is still being synthesized. Waiting for reply
-	// text or reaching the end releases it early.
-	speechLeadBytes = 64000 // 2 s of 16 kHz PCM16
+	// The stream opens only once this much audio is ready, so the device starts
+	// with a lead; synthesis then runs faster than playback and stays ahead.
+	speechLeadBytes = 32000 // 1 s of 16 kHz PCM16
+	speechHeadBytes = 240   // Reply start carried by the sentence frame (device limit 256).
 )
 
 var ErrSpeechUnavailable = errors.New("speech_unavailable")
@@ -82,6 +84,19 @@ func (st *speechStream) end(status byte) {
 	st.changed = make(chan struct{})
 }
 
+// audioMillis is the length of the audio appended so far.
+func (st *speechStream) audioMillis() int {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	total := 0
+	for _, f := range st.frames {
+		if f[0] == FrameAudio {
+			total += len(f) - 3
+		}
+	}
+	return total / 32
+}
+
 func frame(kind byte, payload []byte) []byte {
 	out := make([]byte, 3, 3+len(payload))
 	out[0] = kind
@@ -89,33 +104,30 @@ func frame(kind byte, payload []byte) []byte {
 	return append(out, payload...)
 }
 
-// SpeechReader returns frames of one stream in order. A reader resuming
-// after a dropped connection skips everything before sentence `from`.
+// SpeechReader returns the bytes of one stream in order. A reader resuming
+// after a dropped connection starts `skip` bytes in, possibly mid-frame: the
+// first chunk it returns may be the tail of a frame, then whole frames follow.
 type SpeechReader struct {
-	stream   *speechStream
-	next     int
-	from     int
-	skipping bool
-	closer   func()
-	once     sync.Once
+	stream *speechStream
+	next   int
+	skip   int
+	closer func()
+	once   sync.Once
 }
 
-// Next blocks until a frame is available; ok is false after the end frame.
+// Next blocks until bytes are available; ok is false after the end frame.
 func (r *SpeechReader) Next(ctx context.Context) ([]byte, bool, error) {
 	for {
 		r.stream.mu.Lock()
 		if r.next < len(r.stream.frames) {
 			f := r.stream.frames[r.next]
 			r.next++
-			if r.skipping {
-				if f[0] != FrameSentence || int(binary.LittleEndian.Uint16(f[3:])) < r.from {
-					if f[0] != FrameEnd {
-						r.stream.mu.Unlock()
-						continue
-					}
-				}
-				r.skipping = false
+			if r.skip >= len(f) {
+				r.skip -= len(f)
+				r.stream.mu.Unlock()
+				continue
 			}
+			f, r.skip = f[r.skip:], 0
 			r.stream.mu.Unlock()
 			return f, true, nil
 		}
@@ -140,7 +152,7 @@ type speechStreams struct {
 }
 
 // OpenSpeech starts or joins the synthesis of a reply.
-func (s *Service) OpenSpeech(ctx context.Context, sessionID, messageID string, from int) (*SpeechReader, error) {
+func (s *Service) OpenSpeech(ctx context.Context, sessionID, messageID string, offset int) (*SpeechReader, error) {
 	if s.TTS == nil || !s.TTS.Enabled() {
 		return nil, ErrSpeechUnavailable
 	}
@@ -181,7 +193,7 @@ func (s *Service) OpenSpeech(ctx context.Context, sessionID, messageID string, f
 		stream.idle = nil
 	}
 	stream.mu.Unlock()
-	reader := &SpeechReader{stream: stream, from: from, skipping: from > 0}
+	reader := &SpeechReader{stream: stream, skip: offset}
 	reader.closer = func() {
 		stream.mu.Lock()
 		defer stream.mu.Unlock()
@@ -229,118 +241,122 @@ func activeReply(state string) bool {
 	return false
 }
 
-// synthesize follows the stored reply as it grows and speaks each complete
-// sentence in order.
+// synthesize waits for the stored reply to finish, then speaks all of it in
+// one request into the stream cache, which any number of listeners read and
+// resume from at any byte.
 func (s *Service) synthesize(ctx context.Context, stream *speechStream, sessionID, messageID string) {
 	defer stream.cancel()
 	wake := s.watchMessage(ctx, messageID)
-	offset, index := 0, 0
 	started := time.Now()
-	var held [][]byte // Frames waiting for the lead.
-	heldBytes, holding := 0, true
-	release := func() bool {
-		for _, f := range held {
-			if !stream.append(f) {
-				return false
-			}
-		}
-		held, holding = nil, false
-		return true
-	}
-	emit := func(f []byte) bool {
-		if !holding {
-			return stream.append(f)
-		}
-		held = append(held, f)
-		if f[0] == FrameAudio {
-			heldBytes += len(f) - 3
-		}
-		return heldBytes < speechLeadBytes || release()
-	}
+	var message model.Message
 	for {
+		var err error
+		message, err = s.Store.Message(ctx, sessionID, messageID)
 		if ctx.Err() != nil {
 			stream.end(SpeechCancelled)
 			return
 		}
-		message, err := s.Store.Message(ctx, sessionID, messageID)
 		if err != nil {
 			stream.end(SpeechFailed)
 			return
 		}
-		final := !activeReply(message.State)
-		sentence, next, ok := speech.Next(message.Reply, offset, final)
-		if !ok {
-			// Nothing more to synthesize yet: holding back would only add delay.
-			if !release() {
-				return
-			}
-			if final {
-				stream.end(SpeechDone)
-				s.Log.Info("speech finished", "message_id", messageID, "sentences", index, "elapsed_ms", time.Since(started).Milliseconds())
-				return
-			}
-			select {
-			case <-ctx.Done():
-			case <-wake:
-			case <-time.After(500 * time.Millisecond):
-			}
-			continue
+		if !activeReply(message.State) {
+			break
 		}
-		offset = next
-		payload := binary.LittleEndian.AppendUint16(nil, uint16(index))
-		text := sentence
-		if len(text) > 1024 {
-			text = text[:1024]
+		select {
+		case <-ctx.Done():
+		case <-wake:
+		case <-time.After(500 * time.Millisecond):
 		}
-		if !emit(frame(FrameSentence, append(payload, text...))) {
-			return
+	}
+	// Markdown, code blocks and links are cleaned line by line, then the
+	// whole reply goes upstream as one text.
+	text := strings.Join(speech.Sentences(message.Reply), "\n")
+	if text == "" {
+		stream.end(SpeechDone)
+		return
+	}
+	if len(text) > tts.MaxText {
+		text = strings.ToValidUTF8(text[:tts.MaxText], "")
+	}
+	// The sentence frame tells the device that speech starts; it shows the
+	// reply text it fetched itself, so only the start is sent.
+	head := text
+	if len(head) > speechHeadBytes {
+		head = strings.ToValidUTF8(head[:speechHeadBytes], "")
+	}
+	if !stream.append(frame(FrameSentence, append([]byte{0, 0}, head...))) {
+		return
+	}
+	// Audio is held until the device can start with a lead; synthesis runs
+	// faster than playback and stays ahead after that.
+	var held []byte
+	holding := true
+	pending := make([]byte, 0, speechFrameAudio)
+	flush := func() bool {
+		if len(pending) == 0 {
+			return true
 		}
-		pending := make([]byte, 0, speechFrameAudio)
-		flush := func() bool {
-			if len(pending) == 0 {
+		f := frame(FrameAudio, pending)
+		pending = make([]byte, 0, speechFrameAudio)
+		if holding {
+			held = append(held, f...)
+			if len(held) < speechLeadBytes {
 				return true
 			}
-			f := frame(FrameAudio, pending)
-			pending = make([]byte, 0, speechFrameAudio)
-			return emit(f)
+			return release(stream, &held, &holding)
 		}
-		limited := false
-		err = s.TTS.Speak(ctx, sentence, func(pcm []byte) error {
-			for len(pcm) > 0 {
-				take := min(len(pcm), speechFrameAudio-len(pending))
-				pending = append(pending, pcm[:take]...)
-				pcm = pcm[take:]
-				if len(pending) == speechFrameAudio && !flush() {
-					return context.Canceled
-				}
-			}
-			stream.mu.Lock()
-			limited = stream.bytes > speechMaxBytes
-			stream.mu.Unlock()
-			if limited {
-				return errSpeechLimit
-			}
-			return nil
-		})
-		if err == nil && !flush() {
-			return
-		}
-		switch {
-		case limited:
-			release()
-			stream.end(SpeechLimit)
-			return
-		case err != nil && ctx.Err() != nil:
-			stream.end(SpeechCancelled)
-			return
-		case err != nil:
-			s.Log.Warn("speech synthesis failed", "message_id", messageID, "sentence", index, "error", err.Error())
-			release() // Speak what was synthesized before the failure.
-			stream.end(SpeechFailed)
-			return
-		}
-		index++
+		return stream.append(f)
 	}
+	limited := false
+	err := s.TTS.Speak(ctx, text, func(pcm []byte) error {
+		for len(pcm) > 0 {
+			take := min(len(pcm), speechFrameAudio-len(pending))
+			pending = append(pending, pcm[:take]...)
+			pcm = pcm[take:]
+			if len(pending) == speechFrameAudio && !flush() {
+				return context.Canceled
+			}
+		}
+		stream.mu.Lock()
+		limited = stream.bytes > speechMaxBytes
+		stream.mu.Unlock()
+		if limited {
+			return errSpeechLimit
+		}
+		return nil
+	})
+	if (err == nil && !flush()) || !release(stream, &held, &holding) {
+		return
+	}
+	switch {
+	case limited:
+		stream.end(SpeechLimit)
+	case err != nil && ctx.Err() != nil:
+		stream.end(SpeechCancelled)
+	case err != nil:
+		s.Log.Warn("speech synthesis failed", "message_id", messageID, "error", err.Error())
+		stream.end(SpeechFailed)
+	default:
+		stream.end(SpeechDone)
+		s.Log.Info("speech finished", "message_id", messageID, "text_bytes", len(text),
+			"audio_ms", stream.audioMillis(), "elapsed_ms", time.Since(started).Milliseconds())
+	}
+}
+
+// release appends the frames held for the lead, kept as one byte run.
+func release(stream *speechStream, held *[]byte, holding *bool) bool {
+	*holding = false
+	run := *held
+	*held = nil
+	for len(run) > 0 {
+		size := 3 + int(binary.LittleEndian.Uint16(run[1:]))
+		if !stream.append(run[:size:size]) {
+			return false
+		}
+		run = run[size:]
+	}
+	return true
 }
 
 var errSpeechLimit = errors.New("speech_limit")

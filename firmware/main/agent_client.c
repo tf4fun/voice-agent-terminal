@@ -7,7 +7,6 @@
 #include <strings.h>
 #include <errno.h>
 #include <limits.h>
-#include "agent_sse.h"
 #include "agent_trace.h"
 #include "memo_text.h"
 #include "agent_capture.h"
@@ -67,7 +66,6 @@ static bool s_input_truncated, s_reply_truncated;
 static char s_cached_message[37];
 static uint32_t s_cached_draft_revision;
 static bool s_input_loaded, s_reply_loaded;
-static agent_sse_t s_events;
 
 typedef struct {
     uint32_t revision, total;
@@ -280,8 +278,7 @@ static void discover_server(void)
             cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, "replace_recording")) &&
             cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, "staged_recording")) &&
             cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, "replacement_reservation")) &&
-            cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, "whole_messages")) &&
-            cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, "reply_sse"))) {
+            cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, "whole_messages"))) {
             lock();
             s_view.speech = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, "speech"));
             s_view.draft_clear = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, "draft_clear"));
@@ -611,8 +608,10 @@ static bool poll_turn(agent_view_t *view)
         agent_copy_text(s_cached_message, sizeof(s_cached_message), turn.message.id);
     }
     const bool need_input = !s_input_loaded;
-    const bool need_reply = !s_reply_loaded || turn.message.revision != s_view.message.revision ||
-        turn.message.reply_bytes != s_reply_total;
+    // The reply is fetched whole once Hermes has finished writing it.
+    const bool need_reply = !agent_message_active(turn.message.state) &&
+        (!s_reply_loaded || turn.message.revision != s_view.message.revision ||
+         turn.message.reply_bytes != s_reply_total);
     unlock();
     char *input = NULL, *reply = NULL;
     content_headers_t input_headers = {0}, reply_headers = {0};
@@ -669,108 +668,29 @@ failed:
     return false;
 }
 
-typedef struct {
-    char session[37];
-    uint32_t selection, request;
-} watch_context_t;
-
-static bool watch_current(const watch_context_t *watch)
+// While a reply is being written, only its small turn metadata is checked;
+// once it settles (or another message takes over) the whole turn is loaded.
+static bool poll_reply_state(agent_view_t *view)
 {
+    char path[192];
+    if (view->turn_anchor[0] == '\0')
+        snprintf(path, sizeof(path), "/sessions/%s/turn", view->session_id);
+    else
+        snprintf(path, sizeof(path), "/sessions/%s/turn?message=%s", view->session_id, view->turn_anchor);
+    agent_turn_t turn;
+    const int status = request(HTTP_METHOD_GET, path, NULL, s_sync_body, sizeof(s_sync_body));
+    if (status != 200 || !agent_parse_turn(s_sync_body, &turn)) return false;
     lock();
-    const bool current = !s_paused && memo_net_has_ip() && s_view.capture == AGENT_IDLE &&
-        s_view.text_kind != AGENT_TEXT_DRAFT && s_view.selection == watch->selection &&
-        s_view.chat_request == watch->request && strcmp(s_view.session_id, watch->session) == 0;
+    const bool same = turn.present && still_selected(view) && strcmp(turn.message.id, s_view.message.id) == 0;
+    const bool active = same && agent_message_active(turn.message.state);
+    if (active && (strcmp(turn.message.state, s_view.message.state) != 0 ||
+                   turn.message.reply_bytes != s_view.message.reply_bytes)) {
+        s_view.message = turn.message;
+        s_view.turn.message = turn.message;
+        changed();
+    }
     unlock();
-    return current;
-}
-
-static bool append_reply(const char *id, size_t offset, const char *delta)
-{
-    const size_t incoming = strlen(delta);
-    if (!memo_text_is_valid_utf8(delta)) return false;
-    lock();
-    if (strcmp(id, s_cached_message) != 0) { unlock(); return true; }
-    const size_t current = s_reply_total;
-    if (offset > current) { unlock(); return false; }
-    if (incoming > SIZE_MAX - offset - 1) { unlock(); return false; }
-    if (s_reply_truncated) {
-        // Only a prefix is cached; follow the server length without keeping the tail.
-        if (offset + incoming > current) {
-            s_reply_total = offset + incoming;
-            s_view.message.reply_bytes = (uint32_t)s_reply_total;
-            agent_copy_text(s_view.message.state, sizeof(s_view.message.state), "receiving");
-            s_view.turn.message = s_view.message;
-            changed();
-        }
-        unlock();
-        return true;
-    }
-    const size_t overlap = current - offset < incoming ? current - offset : incoming;
-    if (overlap != 0 && memcmp(s_reply_text + offset, delta, overlap) != 0) { unlock(); return false; }
-    const size_t extra = incoming - overlap;
-    if (extra == 0) { unlock(); return true; }
-    size_t kept = extra;
-    const bool truncating = current + extra > AGENT_CONTENT_MAX_BYTES;
-    if (truncating) kept = utf8_complete_prefix(delta + overlap, AGENT_CONTENT_MAX_BYTES - current);
-    const size_t needed = current + kept + 1;
-    if (needed > s_reply_capacity) {
-        size_t capacity = s_reply_capacity + s_reply_capacity / 2;
-        if (capacity < needed) capacity = needed;
-        if (capacity > AGENT_CONTENT_MAX_BYTES + 1) capacity = AGENT_CONTENT_MAX_BYTES + 1;
-        char *next = realloc(s_reply_text, capacity);
-        if (next == NULL) {
-            agent_copy_text(s_view.notice, sizeof(s_view.notice), "内存不足，请退出会话");
-            changed();
-            unlock();
-            return false;
-        }
-        s_reply_text = next;
-        s_reply_capacity = capacity;
-    }
-    memcpy(s_reply_text + current, delta + overlap, kept);
-    s_reply_text[current + kept] = '\0';
-    s_reply_total = current + extra;
-    s_reply_truncated = truncating;
-    s_reply_loaded = true;
-    s_view.message.reply_bytes = (uint32_t)s_reply_total;
-    agent_copy_text(s_view.message.state, sizeof(s_view.message.state), "receiving");
-    s_view.turn.message = s_view.message;
-    if (s_view.text_kind == AGENT_TEXT_REPLY) s_view.text_generation++;
-    changed();
-    unlock();
-    return true;
-}
-
-static bool stream_event(const char *json, void *context)
-{
-    watch_context_t *watch = context;
-    if (!watch_current(watch)) return false;
-    cJSON *root = cJSON_Parse(json);
-    const cJSON *type = cJSON_GetObjectItemCaseSensitive(root, "type");
-    const cJSON *id = cJSON_GetObjectItemCaseSensitive(root, "message_id");
-    bool refresh = false, ok = cJSON_IsString(type);
-    if (ok && strcmp(type->valuestring, "resync") == 0) refresh = true;
-    else if (ok && cJSON_IsString(id)) {
-        lock();
-        const bool selected = strcmp(id->valuestring, s_cached_message) == 0;
-        unlock();
-        if (selected && strcmp(type->valuestring, "chat.delta") == 0) {
-            const cJSON *text = cJSON_GetObjectItemCaseSensitive(root, "text");
-            const cJSON *offset = cJSON_GetObjectItemCaseSensitive(root, "offset");
-            const bool valid_offset = offset == NULL || (cJSON_IsNumber(offset) &&
-                offset->valuedouble >= 0 && offset->valuedouble <= UINT32_MAX &&
-                offset->valuedouble == (uint32_t)offset->valuedouble);
-            if (!cJSON_IsString(text) || !valid_offset) ok = false;
-            else refresh = !append_reply(id->valuestring, offset == NULL ? 0 : (size_t)offset->valuedouble, text->valuestring);
-        } else if (selected && (strcmp(type->valuestring, "chat.reset") == 0 ||
-                   strcmp(type->valuestring, "message.updated") == 0)) refresh = true;
-    }
-    cJSON_Delete(root);
-    if (refresh && watch_current(watch)) {
-        agent_client_copy(&s_read_view);
-        ok = poll_turn(&s_read_view);
-    }
-    return ok;
+    return active ? true : poll_turn(view);
 }
 
 // A message sent from another client (the web page) only shows up in the
@@ -801,45 +721,10 @@ static bool poll_latest(agent_view_t *view)
     return poll_turn(view);
 }
 
-static bool watch_reply(agent_view_t *view)
-{
-    char path[112];
-    snprintf(path, sizeof(path), "/events?session_id=%s", view->session_id);
-    watch_context_t watch = {.selection = view->selection, .request = view->chat_request};
-    agent_copy_text(watch.session, sizeof(watch.session), view->session_id);
-    esp_http_client_handle_t client = http_client(path, HTTP_METHOD_GET);
-    if (client == NULL) return false;
-    esp_http_client_set_header(client, "Accept", "text/event-stream");
-    bool opened = esp_http_client_open(client, 0) == ESP_OK;
-    if (opened) opened = esp_http_client_fetch_headers(client) >= 0 && esp_http_client_get_status_code(client) == 200;
-    if (opened) {
-        // IDF reads try to fill the requested buffer. Bound the small-event tail
-        // wait to one UI frame instead of holding tokens for a quarter second.
-        esp_http_client_set_timeout_ms(client, 40);
-        memset(&s_events, 0, sizeof(s_events));
-        char bytes[256];
-        while (watch_current(&watch)) {
-            const int count = esp_http_client_read(client, bytes, sizeof(bytes));
-            if (count == -ESP_ERR_HTTP_EAGAIN) continue;
-            if (count <= 0 || !agent_sse_feed(&s_events, bytes, (size_t)count, stream_event, &watch)) break;
-            lock();
-            const bool active = agent_message_active(s_view.message.state);
-            unlock();
-            if (!active) break;
-        }
-    }
-    esp_http_client_close(client);
-    esp_http_client_cleanup(client);
-    lock();
-    const bool active = agent_message_active(s_view.message.state);
-    unlock();
-    return !watch_current(&watch) || !active;
-}
-
 static void sync_task(void *arg)
 {
     (void)arg;
-    int64_t last_list = 0, last_latest = 0;
+    int64_t last_list = 0, last_latest = 0, last_state = 0;
     unsigned failures = 0;
     for (;;) {
         if (!s_paused && connected()) {
@@ -878,8 +763,14 @@ static void sync_task(void *arg)
                     }
                 }
                 agent_client_copy(&s_read_view);
-                if (ok && s_read_view.text_kind != AGENT_TEXT_DRAFT &&
-                    s_read_view.turn.present && agent_message_active(s_read_view.message.state)) ok = watch_reply(&s_read_view);
+                if (ok && s_read_view.text_kind != AGENT_TEXT_DRAFT && s_read_view.turn.present &&
+                    agent_message_active(s_read_view.message.state)) {
+                    const int64_t now = esp_timer_get_time();
+                    if (now - last_state >= 1000000) {
+                        last_state = now;
+                        ok = poll_reply_state(&s_read_view);
+                    }
+                }
             }
             if (!ok && !s_paused) {
                 lock();

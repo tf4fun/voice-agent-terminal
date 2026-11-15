@@ -12,21 +12,21 @@ import (
 
 // speech streams a reply's synthesized voice as framed binary: a kind byte, a
 // little-endian uint16 length and the payload (sentence start, 16 kHz PCM16LE
-// mono audio, or end with a status byte). Synthesis follows the reply while it
-// is still being generated; listeners joining later start from the beginning.
+// mono audio, or end with a status byte). Speech starts once the reply is
+// complete; the stream is cached so listeners can join or resume at any byte.
 func (s *Server) speech(w http.ResponseWriter, r *http.Request) {
-	// from=<sentence> resumes after a dropped connection without repeating
-	// the sentences already heard.
-	from := 0
-	if value := r.URL.Query().Get("from"); value != "" {
+	// offset=<bytes> resumes after a dropped connection exactly where the
+	// device stopped reading, even mid-frame; keepalives are not counted.
+	offset := 0
+	if value := r.URL.Query().Get("offset"); value != "" {
 		parsed, err := strconv.Atoi(value)
-		if err != nil || parsed < 0 || parsed > 65535 {
-			writeError(w, 400, "invalid_from")
+		if err != nil || parsed < 0 {
+			writeError(w, 400, "invalid_offset")
 			return
 		}
-		from = parsed
+		offset = parsed
 	}
-	reader, err := s.service.OpenSpeech(r.Context(), r.PathValue("session"), r.PathValue("message"), from)
+	reader, err := s.service.OpenSpeech(r.Context(), r.PathValue("session"), r.PathValue("message"), offset)
 	if errors.Is(err, gateway.ErrSpeechUnavailable) {
 		writeError(w, 503, "speech_unavailable")
 		return
