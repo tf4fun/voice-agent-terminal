@@ -13,6 +13,7 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "freertos/stream_buffer.h"
 #include "freertos/task.h"
 #include "memo_discovery.h"
 #include "memo_net.h"
@@ -26,6 +27,21 @@ static agent_speech_view_t s_view;
 static char s_request_session[37], s_request_message[37];
 static atomic_uint s_request;   // Incremented by play/stop; the task follows the latest.
 static atomic_bool s_running;   // The task holds a stream (and the speaker).
+
+// Playback buffer: the network reader fills it while a separate writer feeds
+// the 90 ms I2S DMA ring, so neither a slow read nor a busy UI starves the
+// speaker. Allocated only while a stream plays.
+enum {
+    PLAY_BUFFER = 12288, // ~384 ms of 16 kHz PCM16
+    PLAY_START = 6400,   // Prebuffer 200 ms before the first sound...
+    PLAY_RESUME = 3200,  // ...and 100 ms after running dry.
+};
+typedef struct {
+    StreamBufferHandle_t pcm;
+    atomic_bool ended, stop;
+    SemaphoreHandle_t done;
+    uint8_t chunk[1024];
+} player_t;
 
 static void lock(void) { xSemaphoreTake(s_lock, portMAX_DELAY); }
 static void unlock(void) { xSemaphoreGive(s_lock); }
@@ -85,6 +101,42 @@ static uint8_t loudness(const uint8_t *pcm, size_t bytes)
     return level > 100 ? 100 : (uint8_t)level;
 }
 
+static void publish_level(uint8_t level)
+{
+    lock();
+    s_view.level = level;
+    unlock();
+}
+
+static void writer_task(void *arg)
+{
+    player_t *player = arg;
+    bool primed = false;
+    for (;;) {
+        if (atomic_load(&player->stop)) break;
+        const size_t queued = xStreamBufferBytesAvailable(player->pcm);
+        const bool ended = atomic_load(&player->ended);
+        if (!primed) {
+            // Wait for enough audio to ride out network and UI jitter.
+            if (queued >= (size_t)PLAY_START || (ended && queued > 0)) primed = true;
+            else if (ended) break;
+            else { vTaskDelay(pdMS_TO_TICKS(10)); continue; }
+        }
+        const size_t got = xStreamBufferReceive(player->pcm, player->chunk, sizeof(player->chunk), pdMS_TO_TICKS(20));
+        if (got == 0) {
+            if (atomic_load(&player->ended)) break;
+            // Ran dry: refill a little before speaking again rather than stutter.
+            if (xStreamBufferBytesAvailable(player->pcm) < (size_t)PLAY_RESUME) { primed = false; publish_level(0); }
+            continue;
+        }
+        publish_level(loudness(player->chunk, got));
+        if (bsp_audio_write(player->chunk, got) != ESP_OK) break;
+    }
+    publish_level(0);
+    xSemaphoreGive(player->done);
+    vTaskDelete(NULL);
+}
+
 // Plays one stream until it ends, fails or a newer request supersedes it.
 static void play(unsigned request, const char *session, const char *message)
 {
@@ -96,7 +148,23 @@ static void play(unsigned request, const char *session, const char *message)
     uint8_t status = 1;
     char sentence[AGENT_SPEECH_SENTENCE_BYTES];
     uint16_t index = 0;
-    if (client != NULL && bsp_audio_set_format(16000, 16, 1) == ESP_OK) {
+    player_t *player = calloc(1, sizeof(*player));
+    if (player != NULL) {
+        player->pcm = xStreamBufferCreate(PLAY_BUFFER, 1);
+        player->done = xSemaphoreCreateBinary();
+    }
+    const bool ready = player != NULL && player->pcm != NULL && player->done != NULL &&
+        xTaskCreate(writer_task, "agent_play", 2560, player, 6, NULL) == pdPASS;
+    if (!ready) {
+        ESP_LOGW(TAG, "no memory for speech playback");
+        if (player != NULL) {
+            if (player->pcm != NULL) vStreamBufferDelete(player->pcm);
+            if (player->done != NULL) vSemaphoreDelete(player->done);
+            free(player);
+            player = NULL;
+        }
+    }
+    if (client != NULL && player != NULL && bsp_audio_set_format(16000, 16, 1) == ESP_OK) {
         uint8_t buffer[512];
         bool done = false;
         // IDF reads try to fill the buffer; a short timeout keeps stop requests
@@ -129,8 +197,10 @@ static void play(unsigned request, const char *session, const char *message)
                     sentence[text] = '\0';
                     publish(true, true, index, sentence, NULL, 0);
                 } else if (parser->kind == AGENT_SPEECH_AUDIO) {
-                    publish(true, true, index, NULL, NULL, loudness(parser->payload, parser->length));
-                    if (bsp_audio_write(parser->payload, parser->length) != ESP_OK) done = true;
+                    // Queue for the writer; wait in short slices so a stop stays prompt.
+                    size_t sent = 0;
+                    while (sent < parser->length && atomic_load(&s_request) == request)
+                        sent += xStreamBufferSend(player->pcm, parser->payload + sent, parser->length - sent, pdMS_TO_TICKS(50));
                 } else if (parser->kind == AGENT_SPEECH_END) {
                     status = parser->length ? parser->payload[0] : 1;
                     done = true;
@@ -138,6 +208,16 @@ static void play(unsigned request, const char *session, const char *message)
             }
         }
         if (atomic_load(&s_request) != request) status = 2;
+    }
+    if (player != NULL) {
+        // Let the queued audio finish unless playback was stopped.
+        atomic_store(&player->ended, true);
+        if (status == 2 || client == NULL) atomic_store(&player->stop, true);
+        while (xSemaphoreTake(player->done, pdMS_TO_TICKS(50)) != pdTRUE)
+            if (atomic_load(&s_request) != request) atomic_store(&player->stop, true);
+        vStreamBufferDelete(player->pcm);
+        vSemaphoreDelete(player->done);
+        free(player);
     }
     if (client != NULL) {
         esp_http_client_close(client);

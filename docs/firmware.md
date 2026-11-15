@@ -34,8 +34,19 @@ streams `/messages/{id}/speech` (framed sentence starts, 16 kHz PCM and
 keepalives every 5 s while Hermes thinks), writes audio to the ES8311 at the
 capture format and publishes the current sentence and loudness for the orb.
 Recording stops speech before the microphone starts; long Down stops it in
-either view; leaving the session stops it. A 4 KiB frame buffer is allocated
-only while a stream plays. With a draft, long Down clears it through
+either view; leaving the session stops it. The I2S DMA ring holds only 90 ms,
+so playback is split: the stream reader queues PCM into a 12 KiB buffer
+(about 0.4 s) and a separate writer task at the capture task's priority feeds
+the codec after 200 ms of prebuffer, refilling 100 ms after running dry. The
+4 KiB frame buffer, the playback buffer and the writer's stack exist only
+while a stream plays.
+
+The resting marquee is an LVGL animation in step with the display refresh;
+its label holds only a window of about 360 px around the visible text. The
+first up/down press stops it in place and eases (0.3 s) to the start of the
+sentence in view, after which a still label shows the piece; further pieces
+slide in (0.18 s). The orb sits 8 px below the mode marks so the thinking arc
+never touches the header. With a draft, long Down clears it through
 `DELETE /sessions/{id}/draft` at the reviewed revision.
 
 ## Diagnostic reports

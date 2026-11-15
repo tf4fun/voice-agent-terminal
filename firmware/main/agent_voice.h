@@ -111,10 +111,10 @@ static inline const char *agent_utf8_tail(const char *text, size_t max_runes)
 // Layout grid on the 240 x 320 panel (see the design draft):
 // header 0-28, mode dots at 31, orb, status line, one-line strip, key hints.
 enum {
-    VOICE_ORB = 104, VOICE_ORB_X = 68, VOICE_ORB_Y = 46,
+    VOICE_ORB = 96, VOICE_ORB_X = 72, VOICE_ORB_Y = 54, // Arc clears the mode marks by 8 px.
     VOICE_ORB_SMALL = 44, VOICE_ORB_SMALL_X = 20, VOICE_ORB_SMALL_Y = 44,
-    VOICE_STATUS_Y = 162, VOICE_TIMER_Y = 152,
-    VOICE_STRIP_X = 14, VOICE_STRIP_Y = 206, VOICE_STRIP_W = 212, VOICE_STRIP_H = 44,
+    VOICE_STATUS_Y = 168, VOICE_TIMER_Y = 160,
+    VOICE_STRIP_X = 14, VOICE_STRIP_Y = 212, VOICE_STRIP_W = 212, VOICE_STRIP_H = 44,
     VOICE_PANEL_Y = 98, VOICE_PANEL_H = 178,
     VOICE_SIDE_X = 76, VOICE_SIDE_Y = 42,
     VOICE_HINTS_Y = 280, VOICE_HINTS_H = 34,
