@@ -161,6 +161,9 @@ bool agent_parse_turn(const char *json, agent_turn_t *turn)
     if (valid) {
         agent_copy_text(turn->before, sizeof(turn->before), before);
         agent_copy_text(turn->after, sizeof(turn->after), after);
+        // Optional on older gateways.
+        if (!number_field(root, "index", &turn->index) || !number_field(root, "total", &turn->total) ||
+            turn->index > turn->total) turn->index = turn->total = 0;
     }
     cJSON_Delete(root);
     return valid;

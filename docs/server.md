@@ -226,7 +226,8 @@ required capabilities before connecting.
 The device and management page select one complete user/assistant exchange with
 `GET /api/v1/sessions/{id}/turn`. The response contains `message` metadata and
 `before`/`after` message IDs. A session with no sent messages returns
-`{"message":null,"before":"","after":""}`. Select one historical exchange with
+`{"message":null,"before":"","after":""}`. `index` (1-based) and `total` give
+the exchange's position among the session's exchanges. Select one historical exchange with
 exactly one `message=<uuid>`, `before=<uuid>` or `after=<uuid>` query. Neighbor
 selection is scoped to the current session and returns 404 at either boundary.
 Malformed or repeated selectors return 400.

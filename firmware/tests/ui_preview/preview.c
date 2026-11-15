@@ -277,14 +277,22 @@ static void scene_voice(const char *out, const char *suffix)
     voice_session(true, "completed");
     show(AGENT_PAGE_VOICE);
     s_voice_review = 2;
+    marquee_glide(2, -1000000); // Settled after the glide.
     render();
     frame(out, "21-voice-review", suffix);
 
     voice_session(true, "completed");
     g_chat_text = voice_reply;
     show(AGENT_PAGE_CHAT);
-    chat_hint("再按 ↑ 看上一条");
+    chat_hint("双击 ↑ 看上一条");
     frame(out, "27-text-edge-hint", suffix);
+
+    voice_session(true, "completed");
+    s_view.turn.index = 3;
+    s_view.turn.total = 7;
+    g_chat_text = voice_reply;
+    show(AGENT_PAGE_CHAT);
+    frame(out, "28-text-position", suffix);
 }
 
 static void scene_settings(const char *out, const char *suffix)

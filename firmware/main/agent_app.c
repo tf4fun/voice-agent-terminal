@@ -101,8 +101,10 @@ static int64_t s_voice_review_at; // Last review key; review ends after 15 s wit
 // it on the sentence being shown.
 static lv_obj_t *s_voice_marquee_box, *s_voice_marquee_label;
 static const char *s_marquee_source;
-static int32_t s_marquee_width;
-static int64_t s_marquee_start;
+static int32_t s_marquee_width, s_marquee_x, s_glide_from, s_glide_to;
+static size_t s_marquee_plain; // Bytes of the reply the marquee holds (before any "…").
+static int64_t s_marquee_start, s_glide_at;
+static bool s_reviewing_before;
 static char s_think_id[37];
 static int64_t s_think_since;
 static agent_speech_view_t s_speech;
@@ -624,6 +626,11 @@ static void render_chat(void)
     const char *status = input ? (draft ? "待发送" : "") : message_status(s_view.message.state);
     if (loading || reading) status = "正在读取";
     if (speaking && !input) status = "正在朗读";
+    char position[48];
+    if (status[0] == '\0' && s_view.turn.total > 1) {
+        snprintf(position, sizeof(position), "第 %lu/%lu 轮", (unsigned long)s_view.turn.index, (unsigned long)s_view.turn.total);
+        status = position;
+    }
     if (!loading && !has_text && !input) {
         const char *empty = status[0] ? status : "回复为空";
         set_text(s_chat_body, empty, false);
@@ -782,9 +789,10 @@ static void voice_wrap_lines(void)
     display[used] = '\0';
     s_voice_display = display;
     // The marquee: the reply on one line, bounded so a long reply still loops.
-    size_t marquee = used < 1024 ? used : 1024;
+    size_t marquee = used < 3000 ? used : 3000;
     while (marquee < used && marquee > 0 && ((unsigned char)display[marquee] & 0xC0) == 0x80) marquee--;
     s_voice_marquee = malloc(marquee + 4);
+    s_marquee_plain = marquee;
     if (s_voice_marquee != NULL) {
         for (size_t i = 0; i < marquee; i++) s_voice_marquee[i] = display[i] == '\n' ? ' ' : display[i];
         memcpy(s_voice_marquee + marquee, marquee < used ? "…" : "", marquee < used ? 4 : 1);
@@ -867,6 +875,21 @@ static int marquee_unit(int64_t now)
     return unit;
 }
 
+enum { GLIDE_MS = 300 };
+
+// Starts a short ease-out glide of the stopped marquee to a review piece.
+static void marquee_glide(int unit, int64_t now)
+{
+    s_glide_from = s_marquee_x;
+    s_glide_to = -text_width(s_voice_marquee, s_voice_lines[unit]);
+    s_glide_at = now;
+}
+
+static bool marquee_holds(int unit)
+{
+    return s_voice_marquee != NULL && unit >= 0 && unit < s_voice_line_count && s_voice_lines[unit] < s_marquee_plain;
+}
+
 static void marquee_show(bool visible, int64_t now)
 {
     reveal(s_voice_marquee_box, visible);
@@ -887,8 +910,33 @@ static void marquee_show(bool visible, int64_t now)
             free(loop);
         }
     }
-    const int32_t x = -marquee_offset(now);
+    const bool reviewing = s_voice_review >= 0;
+    if (s_reviewing_before && !reviewing) {
+        // Resume scrolling from where the text stands instead of the start.
+        const int64_t offset = -s_marquee_x > 0 ? -s_marquee_x : 0;
+        s_marquee_start = now - (MARQUEE_PAUSE_MS + offset * 1000 / MARQUEE_SPEED) * 1000;
+    }
+    s_reviewing_before = reviewing;
+    int32_t x, width = VOICE_STRIP_W - 28;
+    if (!reviewing) x = -marquee_offset(now);
+    else {
+        const int64_t elapsed = (now - s_glide_at) / 1000;
+        if (elapsed >= GLIDE_MS) {
+            x = s_glide_to;
+            // Settled: show only this piece, without the start of the next.
+            int32_t piece = text_width(s_voice_marquee, s_voice_lines[s_voice_review + 1]) + s_glide_to;
+            if (piece > 0 && piece < width) width = piece;
+        } else {
+            const int32_t left = GLIDE_MS - (int32_t)elapsed; // Ease out: cubic.
+            const int64_t remain = (int64_t)left * left * left;
+            const int64_t total = (int64_t)GLIDE_MS * GLIDE_MS * GLIDE_MS;
+            x = s_glide_to + (int32_t)((s_glide_from - s_glide_to) * remain / total);
+        }
+    }
+    s_marquee_x = x;
+    set_text_color(s_voice_marquee_label, reviewing ? UI_FG : UI_DIM); // Still text reads at full contrast.
     if (lv_obj_get_x(s_voice_marquee_label) != x) lv_obj_set_x(s_voice_marquee_label, x);
+    if (lv_obj_get_width(s_voice_marquee_box) != width) lv_obj_set_width(s_voice_marquee_box, width);
 }
 
 // Keeps a copy of the newest reply and its sentence ranges for the strip.
@@ -1072,8 +1120,8 @@ static void render_voice(void)
         if (lv_obj_get_x(s_voice_strip_text) != text_x) lv_obj_set_x(s_voice_strip_text, text_x);
         if (lv_obj_get_width(s_voice_strip_text) != text_w) lv_obj_set_width(s_voice_strip_text, text_w);
         set_long_mode(s_voice_strip_text, circular ? LV_LABEL_LONG_SCROLL_CIRCULAR : LV_LABEL_LONG_DOT);
-        const bool marquee = line[0] == '\0' && s_voice_marquee != NULL && s_voice_review < 0 &&
-                             (mode == AGENT_VOICE_IDLE || mode == AGENT_VOICE_FAILED);
+        const bool marquee = (mode == AGENT_VOICE_IDLE || mode == AGENT_VOICE_FAILED) && s_voice_marquee != NULL &&
+                             ((line[0] == '\0' && s_voice_review < 0) || marquee_holds(s_voice_review));
         marquee_show(marquee, now);
         if (!marquee && strcmp(lv_label_get_text(s_voice_strip_text), line) != 0) set_text(s_voice_strip_text, line, false);
         set_text_color(s_voice_strip_text, strip_tone);
@@ -1262,7 +1310,10 @@ static void scroll_chat(bsp_btn_t button)
     lv_obj_update_layout(s_scroll);
     const int32_t position = lv_obj_get_scroll_y(s_scroll);
     const int32_t remaining = lv_obj_get_scroll_bottom(s_scroll);
-    const int32_t step = 2 * memo_font_label()->line_height + 2 * AGENT_CHAT_LINE_SPACE;
+    // About 70 % of the visible area per press, in whole lines.
+    const int32_t pitch = memo_font_label()->line_height + AGENT_CHAT_LINE_SPACE;
+    int32_t step = lv_obj_get_height(s_scroll) * 7 / 10 / pitch * pitch;
+    if (step < pitch) step = pitch;
     if (direction < 0 && position > 0) {
         lv_obj_scroll_to_y(s_scroll, position > step ? position - step : 0, LV_ANIM_OFF);
         s_edge_at = 0;
@@ -1271,10 +1322,16 @@ static void scroll_chat(bsp_btn_t button)
         s_edge_at = 0;
     } else if (!draft && !s_view.chat_loading && !s_view.text_loading) {
         const int64_t now = esp_timer_get_time();
-        if (s_edge_button != button || s_edge_at == 0 || now - s_edge_at > 500000) {
+        // Input comes before its reply; exchanges continue through before/after.
+        const bool first = direction < 0 && input && s_view.turn.before[0] == '\0';
+        const bool last = direction > 0 && !input && s_view.turn.after[0] == '\0';
+        if (first || last) {
+            s_edge_at = 0;
+            chat_hint(first ? "已是第一条" : "已是最后一条");
+        } else if (s_edge_button != button || s_edge_at == 0 || now - s_edge_at > 500000) {
             s_edge_button = button;
             s_edge_at = now;
-            chat_hint(direction < 0 ? "再按 ↑ 看上一条" : "再按 ↓ 看下一条");
+            chat_hint(direction < 0 ? "双击 ↑ 看上一条" : "双击 ↓ 看下一条");
         } else {
             s_edge_at = 0;
             chat_hint("");
@@ -1326,13 +1383,16 @@ static void voice_key(bsp_btn_t button)
     } else if ((mode == AGENT_VOICE_IDLE || mode == AGENT_VOICE_FAILED) && s_voice_line_count > 0) {
         // Then each press steps one sentence (or one strip-wide piece of a long
         // sentence); past the end, the strip returns to scrolling the reply.
-        s_voice_review_at = esp_timer_get_time();
-        // The first press only stops the scrolling, on the sentence in view.
-        if (s_voice_review < 0) s_voice_review = marquee_unit(s_voice_review_at);
+        const int64_t now = esp_timer_get_time();
+        s_voice_review_at = now;
+        // The first press stops the scrolling where it is, then glides to the
+        // start of the sentence in view; later presses glide between pieces.
+        if (s_voice_review < 0) s_voice_review = marquee_unit(now);
         else {
             const int index = s_voice_review + direction;
             s_voice_review = index < 0 ? 0 : index >= s_voice_line_count ? -1 : index;
         }
+        if (marquee_holds(s_voice_review)) marquee_glide(s_voice_review, now);
         render();
     }
     bsp_lvgl_unlock();

@@ -27,6 +27,7 @@ typedef struct {
     agent_message_t message;
     char before[37], after[37];
     bool present;
+    uint32_t index, total; // 1-based position among the session's exchanges; 0 when unknown.
 } agent_turn_t;
 
 bool agent_parse_turn(const char *json, agent_turn_t *turn);

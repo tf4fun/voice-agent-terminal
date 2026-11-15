@@ -173,7 +173,7 @@ Go 增量地将 16 kHz 输入重采样为 24 kHz，并连接 OpenAI。响应成�
 
 设备和管理页通过 `GET /api/v1/sessions/{id}/turn` 选择完整的一次用户提问／助手回复。
 响应包含 `message` 元数据以及 `before`／`after` 消息 ID。尚未发送消息的会话返回
-`{"message":null,"before":"","after":""}`。历史读取通过 `message=<uuid>`、
+`{"message":null,"before":"","after":""}`。`index`（从 1 开始）和 `total` 给出该轮在会话中的位置与总轮数。历史读取通过 `message=<uuid>`、
 `before=<uuid>` 或 `after=<uuid>` 选择其中一个参数。相邻消息查询限定在当前会话内，
 到达历史边界时返回 404。无效或重复的选择参数返回 400。
 
