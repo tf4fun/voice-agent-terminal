@@ -27,7 +27,7 @@
 
 typedef enum {
     CMD_REFRESH, CMD_OPEN, CMD_CLOSE, CMD_RECORD, CMD_SEND,
-    CMD_REVIEW, CMD_RETRY, CMD_PROVISION, CMD_PAUSE,
+    CMD_REVIEW, CMD_RETRY, CMD_PROVISION, CMD_PAUSE, CMD_CLEAR,
 } command_kind_t;
 
 typedef struct {
@@ -282,6 +282,10 @@ static void discover_server(void)
             cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, "replacement_reservation")) &&
             cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, "whole_messages")) &&
             cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, "reply_sse"))) {
+            lock();
+            s_view.speech = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, "speech"));
+            s_view.draft_clear = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, "draft_clear"));
+            unlock();
             memo_discovery_confirm(&endpoint);
             notice("");
         } else {
@@ -506,6 +510,21 @@ char *agent_client_text_copy(uint32_t selection, uint32_t generation)
             agent_copy_text(s_view.notice, sizeof(s_view.notice), "内存不足，请退出会话");
             changed();
         }
+    }
+    unlock();
+    return copy;
+}
+
+char *agent_client_part_copy(uint32_t selection, bool input)
+{
+    lock();
+    const bool loaded = input ? s_input_loaded && s_view.text_kind != AGENT_TEXT_DRAFT : s_reply_loaded;
+    const char *source = input ? s_input_text : s_reply_text;
+    char *copy = NULL;
+    if (selection == s_view.selection && loaded && source != NULL) {
+        const size_t length = strlen(source);
+        copy = malloc(length + 1);
+        if (copy != NULL) memcpy(copy, source, length + 1);
     }
     unlock();
     return copy;
@@ -1140,7 +1159,7 @@ static void record(const command_t *command)
     } else {
         // An unresolved commit may already have saved a new session's message.
         audio_kept = !resolved;
-        notice(resolved ? "转写失败，请重新录音" : "结果待确认，请稍后重试");
+        notice(resolved ? "没有听清，请再说一次" : "结果待确认，请稍后重试");
     }
 finished:
     if (prepared) {
@@ -1283,6 +1302,21 @@ static void execute(const command_t *command)
     const bool selected = command->selection == s_view.selection;
     unlock();
     if (!selected || !connected()) { notice("请先连接服务器"); return; }
+    if (command->kind == CMD_CLEAR) {
+        snprintf(path, sizeof(path), "/sessions/%s/draft", session);
+        snprintf(body, sizeof(body), "{\"revision\":%lu}", (unsigned long)command->revision);
+        const int status = request(HTTP_METHOD_DELETE, path, body, s_operation_body, sizeof(s_operation_body));
+        uint32_t revision = 0;
+        if (status == 200 && agent_parse_revision(s_operation_body, &revision)) {
+            lock();
+            s_view.draft_revision = revision;
+            changed();
+            unlock();
+            notice("");
+        } else notice(http_notice(status));
+        s_resync = true; // The draft poll switches the view back to the exchange.
+        return;
+    }
     if (command->kind == CMD_SEND) {
         if (s_pending_message[0] == '\0' || s_pending_revision != command->revision) {
             uuid(s_pending_message);
@@ -1589,6 +1623,35 @@ esp_err_t agent_client_send(uint32_t revision, uint32_t selection)
     command_t c = {.kind = CMD_SEND, .revision = revision, .selection = selection};
     return queue(&c);
 }
+esp_err_t agent_client_clear_draft(void)
+{
+    lock();
+    const bool ready = s_view.draft_clear && !s_view.busy && s_view.capture == AGENT_IDLE &&
+        s_view.segment_total > 0 && s_view.draft_revision > 0;
+    command_t c = {.kind = CMD_CLEAR, .revision = s_view.draft_revision, .selection = s_view.selection};
+    unlock();
+    return ready ? queue(&c) : ESP_ERR_INVALID_STATE;
+}
+
+esp_err_t agent_client_show_latest(void)
+{
+    lock();
+    if (s_view.capture != AGENT_IDLE || s_view.turn_anchor[0] == '\0' || s_view.turn.after[0] == '\0') {
+        unlock();
+        return ESP_ERR_INVALID_STATE;
+    }
+    s_view.turn_anchor[0] = '\0';
+    s_view.text_kind = AGENT_TEXT_REPLY;
+    s_view.chat_loading = s_view.text_loading = true;
+    s_view.chat_request++;
+    s_view.text_request++;
+    s_view.text_generation++;
+    changed();
+    unlock();
+    xTaskNotifyGive(s_sync_task);
+    return ESP_OK;
+}
+
 esp_err_t agent_client_review_draft(void)
 {
     command_t command = {.kind = CMD_REVIEW};

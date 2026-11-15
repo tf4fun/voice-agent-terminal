@@ -10,7 +10,7 @@ typedef struct {
 static inline agent_chat_card_layout_t agent_chat_card_layout(int width, int height,
                                                              int line_height)
 {
-    const int top = 34;
+    const int top = 40; // Below the voice/text mode marks.
     const int card_height = height - top - 12;
     const int body_y = line_height + 1;
     const int body_width = width - 50;

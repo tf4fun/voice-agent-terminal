@@ -16,6 +16,8 @@ static bool g_has_ip = true;
 static memo_net_state_t g_net = MEMO_NET_CONNECTED;
 static memo_provision_state_t g_prov = MEMO_PROV_ADVERTISING;
 static const char *g_chat_text = "";
+static const char *g_reply = "", *g_input = "";
+static agent_speech_view_t g_speech;
 static uint8_t g_level;
 static uint32_t g_duration_ms = 83000;
 
@@ -41,6 +43,13 @@ char *agent_client_text_copy(uint32_t selection, uint32_t generation)
     (void)selection; (void)generation;
     return strdup(g_chat_text);
 }
+char *agent_client_part_copy(uint32_t selection, bool input)
+{
+    (void)selection;
+    return strdup(input ? g_input : g_reply);
+}
+void agent_speech_copy(agent_speech_view_t *out) { *out = g_speech; }
+void agent_trace(agent_trace_type_t type, uint16_t a, int32_t b, const char *s) { (void)type; (void)a; (void)b; (void)s; }
 uint32_t agent_capture_duration_ms(void) { return g_duration_ms; }
 uint8_t agent_capture_level(void) { return g_level; }
 int64_t esp_timer_get_time(void) { return 0; }
@@ -93,6 +102,9 @@ static void reset_view(void)
     s_local_notice[0] = '\0';
     s_notice_until = 0;
     s_record_requested = s_record_dismissed = false;
+    s_voice_review = -1;
+    memset(&g_speech, 0, sizeof(g_speech));
+    g_reply = g_input = "";
     g_has_ip = true;
     g_net = MEMO_NET_CONNECTED;
     s_soc = 82;
@@ -169,41 +181,104 @@ static void scene_chat(const char *out, const char *suffix)
     snprintf(name, sizeof(name), "07-chat-input-%s", suffix);
     save(out, name);
 
-    s_view.text_kind = AGENT_TEXT_DRAFT;
-    s_view.selection++;
-    g_chat_text = "再详细解释一下投机解码的原理";
-    render();
-    snprintf(name, sizeof(name), "08-chat-draft-%s", suffix);
-    save(out, name);
-
-    s_view.text_kind = AGENT_TEXT_REPLY;
-    s_view.selection++;
-    snprintf(s_view.message.state, sizeof(s_view.message.state), "%s", "waiting");
-    render();
-    snprintf(name, sizeof(name), "09-chat-thinking-%s", suffix);
-    save(out, name);
 }
 
-static void scene_record(const char *out, const char *suffix)
-{
-    char name[64];
-    reset_view();
-    s_view.capture = AGENT_PREPARING;
-    render();
-    snprintf(name, sizeof(name), "10-preparing-%s", suffix);
-    save(out, name);
+static const char *voice_reply = "周六广州白云区多云，22 到 28 度，降雨概率一成，适合登山。推荐从南门上山，经鸣春谷到摩星岭，再从西门下山，全程约三小时。早茶可以先去南门附近的点都德，七点开门。";
+static const char *voice_draft = "帮我查一下这周六白云山的天气，如果不下雨，推荐一条半天能走完的路线，最好顺路吃个早茶。";
 
+static void voice_session(bool turn, const char *state)
+{
+    reset_view();
+    snprintf(s_view.title, sizeof(s_view.title), "%s", "周末去白云山");
+    snprintf(s_view.session_id, sizeof(s_view.session_id), "%s", "00000000-0000-4000-8000-000000000001");
+    s_view.turn.present = turn;
+    snprintf(s_view.message.id, sizeof(s_view.message.id), "%s", "00000000-0000-4000-8000-000000000002");
+    snprintf(s_view.message.state, sizeof(s_view.message.state), "%s", state);
+    s_view.turn.message = s_view.message;
+    s_view.message.reply_bytes = (uint32_t)strlen(voice_reply);
+    s_view.text_kind = AGENT_TEXT_REPLY;
+    g_reply = turn ? voice_reply : "";
+    g_input = voice_draft;
+}
+
+static void frame(const char *out, const char *name, const char *suffix)
+{
+    char path[64];
+    snprintf(path, sizeof(path), "%s-%s", name, suffix);
+    save(out, path);
+}
+
+static void scene_voice(const char *out, const char *suffix)
+{
+    voice_session(false, "");
+    show(AGENT_PAGE_VOICE);
+    frame(out, "10-voice-new", suffix);
+
+    voice_session(true, "completed");
+    show(AGENT_PAGE_VOICE);
+    frame(out, "11-voice-after-reply", suffix);
+
+    voice_session(true, "completed");
     s_view.capture = AGENT_RECORDING;
-    snprintf(s_view.text.text, sizeof(s_view.text.text), "%s", "帮我查一下明天杭州的天气，顺便提醒我带伞");
-    static const uint8_t levels[] = {8, 22, 45, 70, 52, 30, 88, 64, 40, 18, 56, 34};
+    snprintf(s_view.text.text, sizeof(s_view.text.text), "%s", "帮我查一下这周六白云山的天气，如果不下雨推荐一条路线");
+    g_duration_ms = 7000;
+    show(AGENT_PAGE_VOICE);
+    static const uint8_t levels[] = {8, 22, 45, 70, 52, 30, 88, 64, 40, 18, 56, 64};
     for (size_t i = 0; i < sizeof(levels); i++) { g_level = levels[i]; render(); }
-    snprintf(name, sizeof(name), "11-recording-%s", suffix);
-    save(out, name);
+    frame(out, "12-voice-recording", suffix);
 
     s_view.capture = AGENT_FINALIZING;
     render();
-    snprintf(name, sizeof(name), "12-finalizing-%s", suffix);
-    save(out, name);
+    frame(out, "13-voice-transcribing", suffix);
+
+    voice_session(false, "");
+    snprintf(s_view.notice, sizeof(s_view.notice), "%s", "没有听清，请再说一次");
+    show(AGENT_PAGE_VOICE);
+    frame(out, "14-voice-unheard", suffix);
+
+    voice_session(true, "completed");
+    s_view.text_kind = AGENT_TEXT_DRAFT;
+    s_view.segment_total = 1;
+    g_chat_text = voice_draft;
+    show(AGENT_PAGE_VOICE);
+    frame(out, "15-voice-draft", suffix);
+
+    g_chat_text = "帮我查一下这周六白云山的天气，如果不下雨，推荐一条半天能走完的路线，最好顺路吃个早茶。我们一共四个人，有一位膝盖不太好，尽量少走台阶。另外想知道停车方不方便，南门和西门哪边更好停。";
+    s_view.text_generation++;
+    render();
+    lv_obj_scroll_to_y(s_voice_panel_scroll, 2 * memo_font_label()->line_height + 2 * AGENT_CHAT_LINE_SPACE, LV_ANIM_OFF);
+    frame(out, "16-voice-draft-scrolled", suffix);
+
+    voice_session(true, "completed");
+    snprintf(s_view.notice, sizeof(s_view.notice), "%s", "草稿已清空");
+    show(AGENT_PAGE_VOICE);
+    frame(out, "17-voice-cleared", suffix);
+
+    voice_session(true, "waiting");
+    g_reply = "";
+    snprintf(s_think_id, sizeof(s_think_id), "%s", s_view.message.id);
+    s_think_since = -18000000;
+    show(AGENT_PAGE_VOICE);
+    frame(out, "18-voice-thinking", suffix);
+
+    voice_session(true, "receiving");
+    g_speech = (agent_speech_view_t){.active = true, .audible = true, .index = 1, .level = 60};
+    snprintf(g_speech.sentence, sizeof(g_speech.sentence), "%s", "推荐从南门上山，经鸣春谷到摩星岭，再从西门下山，全程约三小时。");
+    snprintf(g_speech.message_id, sizeof(g_speech.message_id), "%s", s_view.message.id);
+    show(AGENT_PAGE_VOICE);
+    for (int i = 0; i < 4; i++) render();
+    frame(out, "19-voice-speaking", suffix);
+
+    s_view.text_kind = AGENT_TEXT_REPLY;
+    g_chat_text = voice_reply;
+    show(AGENT_PAGE_CHAT);
+    frame(out, "20-text-speaking", suffix);
+
+    voice_session(true, "completed");
+    show(AGENT_PAGE_VOICE);
+    s_voice_review = 1;
+    render();
+    frame(out, "21-voice-review", suffix);
 }
 
 static void scene_settings(const char *out, const char *suffix)
@@ -212,29 +287,29 @@ static void scene_settings(const char *out, const char *suffix)
     reset_view();
     s_setting_selected = MEMO_SETTING_VOLUME;
     show(AGENT_PAGE_SETTINGS);
-    snprintf(name, sizeof(name), "13-settings-%s", suffix);
+    snprintf(name, sizeof(name), "22-settings-%s", suffix);
     save(out, name);
 
     memo_settings_t draft = g_settings;
     memo_ui_settings_enter(&draft);
-    snprintf(name, sizeof(name), "14-settings-volume-%s", suffix);
+    snprintf(name, sizeof(name), "23-settings-volume-%s", suffix);
     save(out, name);
 
     s_setting_selected = MEMO_SETTING_THEME;
     show(AGENT_PAGE_SETTINGS);
     draft.theme = MEMO_THEME_AUTO;
     memo_ui_settings_enter(&draft);
-    snprintf(name, sizeof(name), "15-settings-theme-%s", suffix);
+    snprintf(name, sizeof(name), "24-settings-theme-%s", suffix);
     save(out, name);
 
     g_prov = MEMO_PROV_ADVERTISING;
     show(AGENT_PAGE_PROVISION);
-    snprintf(name, sizeof(name), "16-provision-%s", suffix);
+    snprintf(name, sizeof(name), "25-provision-%s", suffix);
     save(out, name);
 
     g_prov = MEMO_PROV_WIFI_CONNECTED;
     memo_ui_provision_refresh();
-    snprintf(name, sizeof(name), "17-provision-done-%s", suffix);
+    snprintf(name, sizeof(name), "26-provision-done-%s", suffix);
     save(out, name);
 }
 
@@ -259,7 +334,7 @@ int main(int argc, char **argv)
         memo_ui_apply_theme(NULL, themes[i].theme == MEMO_THEME_DARK);
         scene_sessions(out, themes[i].suffix);
         scene_chat(out, themes[i].suffix);
-        scene_record(out, themes[i].suffix);
+        scene_voice(out, themes[i].suffix);
         scene_settings(out, themes[i].suffix);
     }
     return 0;

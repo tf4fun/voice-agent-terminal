@@ -13,6 +13,8 @@ python3 tools/check-firmware.py
     firmware/tests/test_agent_trace.c firmware/main/agent_trace.c firmware/tests/vendor/cjson/cJSON.c \
     -lm -o "$test_dir/trace"
 "$test_dir/trace"
+"${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Ifirmware/main firmware/tests/test_agent_voice.c -o "$test_dir/voice"
+"$test_dir/voice"
 for test in test_memo_key test_key_guard test_memo_power; do
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Ifirmware/main \
         "firmware/tests/$test.c" -o "$test_dir/$test"

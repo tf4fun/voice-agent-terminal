@@ -9,6 +9,8 @@
 #include "agent_client.h"
 #include "agent_trace.h"
 #include "agent_logic.h"
+#include "agent_speech.h"
+#include "agent_voice.h"
 #include "agent_ui_status.h"
 #include "bsp_audio.h"
 #include "bsp_battery.h"
@@ -79,6 +81,23 @@ static uint32_t s_chat_generation, s_chat_selection;
 static agent_text_kind_t s_chat_kind;
 static bool s_chat_wait_animating, s_chat_open_bottom;
 
+// Voice page (see agent_voice.h for the layout grid).
+static lv_obj_t *s_voice_orb, *s_voice_arc, *s_voice_status, *s_voice_timer, *s_voice_side, *s_voice_side_sub;
+static lv_obj_t *s_voice_strip, *s_voice_strip_text, *s_voice_strip_spin, *s_voice_strip_tag;
+static lv_obj_t *s_voice_panel, *s_voice_panel_count, *s_voice_panel_scroll, *s_voice_panel_body, *s_voice_hints;
+static int s_voice_mode = -1, s_voice_hint_set = -1, s_voice_review = -1, s_voice_sentences;
+static bool s_voice_small, s_voice_arc_spinning, s_voice_spin_spinning;
+static char *s_voice_reply, *s_voice_draft, *s_voice_question;
+static char s_voice_reply_key[96], s_voice_question_id[37];
+static uint32_t s_voice_draft_generation = UINT32_MAX, s_voice_draft_selection;
+static uint16_t s_voice_starts[AGENT_VOICE_MAX_SENTENCES], s_voice_ends[AGENT_VOICE_MAX_SENTENCES];
+static char s_think_id[37];
+static int64_t s_think_since;
+static agent_speech_view_t s_speech;
+// Spoken-reply follower: the newest exchange seen in this session.
+static char s_play_session[37], s_play_seen[37];
+static bool s_play_baseline;
+
 static void set_text(lv_obj_t *label, const char *text, bool body)
 {
     if (label != NULL && strcmp(lv_label_get_text(label), text) != 0) memo_font_label_text(label, text, body);
@@ -127,6 +146,18 @@ static void delete_screen(void)
     s_chat_generation = s_chat_selection = UINT32_MAX;
     s_chat_kind = AGENT_TEXT_REPLY;
     s_chat_wait_animating = s_chat_open_bottom = false;
+    s_voice_orb = s_voice_arc = s_voice_status = s_voice_timer = s_voice_side = s_voice_side_sub = NULL;
+    s_voice_strip = s_voice_strip_text = s_voice_strip_spin = s_voice_strip_tag = NULL;
+    s_voice_panel = s_voice_panel_count = s_voice_panel_scroll = s_voice_panel_body = s_voice_hints = NULL;
+    s_voice_mode = s_voice_hint_set = -1;
+    s_voice_small = s_voice_arc_spinning = s_voice_spin_spinning = false;
+    free(s_voice_reply);
+    free(s_voice_draft);
+    free(s_voice_question);
+    s_voice_reply = s_voice_draft = s_voice_question = NULL;
+    s_voice_reply_key[0] = s_voice_question_id[0] = '\0';
+    s_voice_draft_generation = UINT32_MAX;
+    s_voice_sentences = 0;
 }
 
 static void build_rows(void)
@@ -168,6 +199,124 @@ static void title_initial(const char *title, char *out, size_t capacity)
     if (lead >= 'a' && lead <= 'z' && length == 1) out[0] = (char)(lead - 'a' + 'A');
 }
 
+
+static lv_obj_t *bare(lv_obj_t *parent)
+{
+    lv_obj_t *object = lv_obj_create(parent);
+    lv_obj_remove_style_all(object);
+    lv_obj_set_scrollable(object, false);
+    lv_obj_set_clickable(object, false);
+    return object;
+}
+
+static void spin(lv_obj_t *arc, bool on, bool *running, uint32_t period)
+{
+    if (on == *running) return;
+    *running = on;
+    lv_obj_set_hidden(arc, !on);
+    if (!on) { lv_anim_delete(arc, arc_rotate); return; }
+    lv_anim_t animation;
+    lv_anim_init(&animation);
+    lv_anim_set_var(&animation, arc);
+    lv_anim_set_values(&animation, 0, 360);
+    lv_anim_set_duration(&animation, period);
+    lv_anim_set_repeat_count(&animation, LV_ANIM_REPEAT_INFINITE);
+    lv_anim_set_exec_cb(&animation, arc_rotate);
+    lv_anim_start(&animation);
+}
+
+static void build_voice(void)
+{
+    // A thin comet arc that orbits the orb while Hermes thinks.
+    s_voice_arc = lv_arc_create(s_screen);
+    lv_obj_set_size(s_voice_arc, VOICE_ORB + 18, VOICE_ORB + 18);
+    lv_obj_set_pos(s_voice_arc, VOICE_ORB_X - 9, VOICE_ORB_Y - 9);
+    lv_arc_set_bg_angles(s_voice_arc, 0, 360);
+    lv_arc_set_angles(s_voice_arc, 0, 80);
+    lv_obj_remove_style(s_voice_arc, NULL, LV_PART_KNOB);
+    lv_obj_set_clickable(s_voice_arc, false);
+    lv_obj_set_style_arc_opa(s_voice_arc, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_arc_width(s_voice_arc, 4, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_color(s_voice_arc, lv_color_hex(UI_ACCENT), LV_PART_INDICATOR);
+    lv_obj_set_style_arc_rounded(s_voice_arc, true, LV_PART_INDICATOR);
+    lv_obj_set_hidden(s_voice_arc, true);
+
+    s_voice_orb = memo_ui_icon_badge(s_screen, VOICE_ORB_X, VOICE_ORB_Y, VOICE_ORB);
+    lv_obj_set_style_outline_pad(s_voice_orb, 0, 0);
+    lv_obj_set_style_outline_opa(s_voice_orb, LV_OPA_20, 0);
+    for (int i = 0; i < AGENT_WAVE_BARS; i++) {
+        s_wave[i] = lv_obj_create(s_voice_orb);
+        memo_ui_flat_rect(s_wave[i], UI_ACCENT, 5);
+    }
+    s_voice_status = label(s_screen, 16, VOICE_STATUS_Y, BSP_LCD_W - 32, false, UI_FG);
+    lv_obj_set_style_text_align(s_voice_status, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_height(s_voice_status, memo_font_label()->line_height);
+    lv_label_set_long_mode(s_voice_status, LV_LABEL_LONG_DOT);
+    s_voice_timer = memo_ui_label(s_screen, &lv_font_montserrat_40, UI_FG);
+    lv_obj_set_pos(s_voice_timer, 0, VOICE_TIMER_Y);
+    lv_obj_set_width(s_voice_timer, BSP_LCD_W);
+    lv_obj_set_style_text_align(s_voice_timer, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_hidden(s_voice_timer, true);
+    s_voice_side = label(s_screen, VOICE_SIDE_X, VOICE_SIDE_Y, BSP_LCD_W - VOICE_SIDE_X - 18, false, UI_FG);
+    s_voice_side_sub = label(s_screen, VOICE_SIDE_X, VOICE_SIDE_Y + 24, BSP_LCD_W - VOICE_SIDE_X - 18, false, UI_DIM);
+    lv_obj_set_hidden(s_voice_side, true);
+    lv_obj_set_hidden(s_voice_side_sub, true);
+
+    // The one-line strip; it expands into the draft panel.
+    s_voice_strip = memo_ui_card(s_screen, VOICE_STRIP_X, VOICE_STRIP_Y, VOICE_STRIP_W, VOICE_STRIP_H, NULL);
+    lv_obj_set_style_radius(s_voice_strip, 14, 0);
+    lv_obj_set_style_border_width(s_voice_strip, 1, 0);
+    lv_obj_set_style_pad_all(s_voice_strip, 0, 0);
+    s_voice_strip_spin = memo_ui_spinner(s_voice_strip, 18, 3);
+    lv_obj_set_pos(s_voice_strip_spin, 12, (VOICE_STRIP_H - 18) / 2 - 1);
+    lv_obj_set_hidden(s_voice_strip_spin, true);
+    s_voice_strip_text = label(s_voice_strip, 14, (VOICE_STRIP_H - memo_font_label()->line_height) / 2 - 1, VOICE_STRIP_W - 28, false, UI_FG);
+    lv_obj_set_height(s_voice_strip_text, memo_font_label()->line_height);
+    lv_label_set_long_mode(s_voice_strip_text, LV_LABEL_LONG_DOT);
+    s_voice_strip_tag = memo_ui_label(s_voice_strip, memo_font_meta(), UI_DIM);
+    lv_obj_set_pos(s_voice_strip_tag, VOICE_STRIP_W - 48, (VOICE_STRIP_H - memo_font_meta()->line_height) / 2 - 1);
+    lv_obj_set_width(s_voice_strip_tag, 36);
+    lv_obj_set_style_text_align(s_voice_strip_tag, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_set_hidden(s_voice_strip_tag, true);
+    lv_obj_set_hidden(s_voice_strip, true);
+
+    s_voice_panel = memo_ui_card(s_screen, VOICE_STRIP_X, VOICE_PANEL_Y, VOICE_STRIP_W, VOICE_PANEL_H, NULL);
+    lv_obj_set_style_radius(s_voice_panel, 14, 0);
+    lv_obj_set_style_border_width(s_voice_panel, 1, 0);
+    lv_obj_set_style_pad_all(s_voice_panel, 0, 0);
+    lv_obj_t *head = label(s_voice_panel, 14, 4, 100, false, UI_DIM);
+    lv_label_set_text_static(head, "我说的");
+    s_voice_panel_count = memo_ui_label(s_voice_panel, memo_font_label(), UI_DIM);
+    lv_obj_set_pos(s_voice_panel_count, VOICE_STRIP_W - 104, 4);
+    lv_obj_set_width(s_voice_panel_count, 88);
+    lv_obj_set_style_text_align(s_voice_panel_count, LV_TEXT_ALIGN_RIGHT, 0);
+    s_voice_panel_scroll = lv_obj_create(s_voice_panel);
+    memo_ui_flat_rect(s_voice_panel_scroll, UI_SURFACE, 0);
+    lv_obj_set_pos(s_voice_panel_scroll, 14, 32);
+    lv_obj_set_size(s_voice_panel_scroll, VOICE_STRIP_W - 24, VOICE_PANEL_H - 40);
+    lv_obj_set_style_pad_all(s_voice_panel_scroll, 0, 0);
+    lv_obj_set_style_pad_right(s_voice_panel_scroll, 8, 0);
+    lv_obj_set_scroll_dir(s_voice_panel_scroll, LV_DIR_VER);
+    lv_obj_remove_flag(s_voice_panel_scroll, LV_OBJ_FLAG_SCROLL_ELASTIC | LV_OBJ_FLAG_SCROLL_MOMENTUM);
+    lv_obj_set_scrollbar_mode(s_voice_panel_scroll, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_style_width(s_voice_panel_scroll, 4, LV_PART_SCROLLBAR);
+    lv_obj_set_style_radius(s_voice_panel_scroll, 2, LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_color(s_voice_panel_scroll, lv_color_hex(UI_ACCENT), LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_opa(s_voice_panel_scroll, LV_OPA_COVER, LV_PART_SCROLLBAR);
+    s_voice_panel_body = label(s_voice_panel_scroll, 0, 0, VOICE_STRIP_W - 36, false, UI_FG);
+    lv_obj_set_height(s_voice_panel_body, LV_SIZE_CONTENT);
+    lv_label_set_long_mode(s_voice_panel_body, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_line_space(s_voice_panel_body, AGENT_CHAT_LINE_SPACE, 0);
+    lv_obj_set_hidden(s_voice_panel, true);
+
+    s_voice_hints = bare(s_screen);
+    lv_obj_set_pos(s_voice_hints, 0, VOICE_HINTS_Y);
+    lv_obj_set_size(s_voice_hints, BSP_LCD_W, VOICE_HINTS_H);
+    lv_obj_set_flex_flow(s_voice_hints, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(s_voice_hints, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(s_voice_hints, 14, 0);
+}
+
 static void build_screen(agent_page_t page)
 {
     delete_screen();
@@ -184,11 +333,11 @@ static void build_screen(agent_page_t page)
         s_screen = lv_obj_create(NULL);
         memo_ui_flat_rect(s_screen, UI_BG, 0);
         const char *title = "会话";
-        if (page == AGENT_PAGE_CHAT) title = "对话";
-        else if (page == AGENT_PAGE_RECORD) title = "录音";
-        else if (page == AGENT_PAGE_PREPARING) title = "准备录音";
+        if (page == AGENT_PAGE_CHAT || page == AGENT_PAGE_VOICE) title = s_view.title[0] ? s_view.title : "对话";
         s_title = memo_ui_header(s_screen, title, page != AGENT_PAGE_SESSIONS);
         if (page == AGENT_PAGE_SESSIONS) memo_ui_page_dots(s_screen, 0, AGENT_ROOT_PAGE_COUNT);
+        // Two marks in a session: voice (left) and the text card (right).
+        if (page == AGENT_PAGE_VOICE || page == AGENT_PAGE_CHAT) memo_ui_page_dots(s_screen, page == AGENT_PAGE_CHAT, 2);
         if (page == AGENT_PAGE_CHAT) {
             const agent_chat_card_layout_t layout = agent_chat_card_layout(
                 BSP_LCD_W, BSP_LCD_H, memo_font_label()->line_height);
@@ -227,64 +376,8 @@ static void build_screen(agent_page_t page)
             lv_obj_set_height(s_status, memo_font_label()->line_height);
             lv_label_set_long_mode(s_status, LV_LABEL_LONG_DOT);
             lv_obj_set_hidden(s_status, true);
-        } else if (page == AGENT_PAGE_PREPARING) {
-            lv_obj_t *badge = memo_ui_icon_badge(s_screen, 72, 96, 96);
-            s_arc = memo_ui_spinner(badge, 72, 5);
-            lv_obj_center(s_arc);
-            lv_obj_t *mic = lv_obj_create(badge);
-            memo_ui_flat_rect(mic, UI_ACCENT, 7);
-            lv_obj_set_size(mic, 14, 24);
-            lv_obj_align(mic, LV_ALIGN_CENTER, 0, -3);
-            lv_obj_t *stand = lv_obj_create(badge);
-            memo_ui_flat_rect(stand, UI_ACCENT, 1);
-            lv_obj_set_size(stand, 2, 7);
-            lv_obj_align(stand, LV_ALIGN_CENTER, 0, 13);
-            lv_anim_t animation;
-            lv_anim_init(&animation);
-            lv_anim_set_var(&animation, s_arc);
-            lv_anim_set_values(&animation, 0, 360);
-            lv_anim_set_duration(&animation, 900);
-            lv_anim_set_repeat_count(&animation, LV_ANIM_REPEAT_INFINITE);
-            lv_anim_set_exec_cb(&animation, arc_rotate);
-            lv_anim_start(&animation);
-            s_status = label(s_screen, 24, 214, 192, false, UI_DIM);
-            lv_obj_set_style_text_align(s_status, LV_TEXT_ALIGN_CENTER, 0);
-            set_text(s_status, "正在连接语音服务", false);
-        } else if (page == AGENT_PAGE_RECORD) {
-            s_clock = memo_ui_label(s_screen, &lv_font_montserrat_40, UI_FG);
-            lv_obj_set_pos(s_clock, 24, 44);
-            lv_obj_set_width(s_clock, 192);
-            lv_obj_set_style_text_align(s_clock, LV_TEXT_ALIGN_CENTER, 0);
-            lv_obj_t *pill = lv_obj_create(s_screen);
-            memo_ui_flat_rect(pill, UI_SURFACE, 15);
-            lv_obj_set_size(pill, 120, 30);
-            lv_obj_set_pos(pill, 60, 98);
-            s_record_dot = lv_obj_create(pill);
-            memo_ui_flat_rect(s_record_dot, UI_RECORDING, 4);
-            lv_obj_set_size(s_record_dot, 8, 8);
-            lv_obj_set_pos(s_record_dot, 18, 11);
-            s_status = label(pill, 30, -1, 80, false, UI_DIM);
-            lv_obj_set_style_text_align(s_status, LV_TEXT_ALIGN_CENTER, 0);
-            const int wave_x = (BSP_LCD_W - (AGENT_WAVE_BARS - 1) * AGENT_WAVE_PITCH - AGENT_WAVE_WIDTH) / 2;
-            for (int i = 0; i < AGENT_WAVE_BARS; i++) {
-                s_wave[i] = lv_obj_create(s_screen);
-                memo_ui_flat_rect(s_wave[i], UI_ACCENT, AGENT_WAVE_WIDTH / 2);
-                lv_obj_set_pos(s_wave[i], wave_x + i * AGENT_WAVE_PITCH, AGENT_WAVE_CENTER - AGENT_WAVE_WIDTH / 2);
-                lv_obj_set_size(s_wave[i], AGENT_WAVE_WIDTH, AGENT_WAVE_WIDTH);
-            }
-            lv_obj_t *transcript = memo_ui_card(s_screen, 16, 204, BSP_LCD_W - 32, 100, NULL);
-            lv_obj_set_style_pad_all(transcript, 0, 0);
-            s_scroll = lv_obj_create(transcript);
-            memo_ui_flat_rect(s_scroll, UI_SURFACE, 0);
-            lv_obj_set_pos(s_scroll, 14, 8);
-            lv_obj_set_size(s_scroll, BSP_LCD_W - 60, 84);
-            lv_obj_set_style_pad_all(s_scroll, 0, 0);
-            lv_obj_set_scrollable(s_scroll, true);
-            lv_obj_set_scroll_dir(s_scroll, LV_DIR_VER);
-            lv_obj_set_scrollbar_mode(s_scroll, LV_SCROLLBAR_MODE_OFF);
-            s_text = label(s_scroll, 0, 0, BSP_LCD_W - 60, false, UI_FG);
-            lv_label_set_long_mode(s_text, LV_LABEL_LONG_WRAP);
-            lv_obj_set_style_text_line_space(s_text, AGENT_CHAT_LINE_SPACE, 0);
+        } else if (page == AGENT_PAGE_VOICE) {
+            build_voice();
         }
     }
     lv_screen_load(s_screen);
@@ -442,7 +535,10 @@ static void render_chat(void)
     set_background(s_chat_wait, color);
     set_background(s_chat_dot, shown_input ? UI_DIM : UI_ACCENT);
 
-    if (generating) {
+    agent_speech_copy(&s_speech);
+    const bool speaking = s_speech.active && s_speech.audible;
+    // Before the first words arrive the card waits; after that it follows the SSE text.
+    if (generating && s_view.message.reply_bytes == 0) {
         chat_wait(true);
         chat_status(s_view.notice[0] ? s_view.notice : message_status(s_view.message.state));
         return;
@@ -484,6 +580,7 @@ static void render_chat(void)
                 s_chat_open_bottom = false;
             }
             if (!input && s_chat_wait_animating) target = 0;
+            if (generating) target = position + lv_obj_get_scroll_bottom(s_scroll); // Follow new words.
             if (target < 0) target = 0;
             lv_obj_scroll_to_y(s_scroll, target, LV_ANIM_OFF);
             s_chat_selection = s_view.selection;
@@ -496,15 +593,336 @@ static void render_chat(void)
     const bool current = s_chat_selection == s_view.selection && s_chat_kind == s_view.text_kind &&
                          strcmp(s_chat_id, s_view.text_id) == 0;
     const bool has_text = (current || retain_loading) && s_chat_text != NULL && s_chat_text[0] != '\0';
-    const bool reading = (!current && !has_text) || (loading && !has_text);
+    const bool reading = (!current && !has_text) || (loading && !has_text && !generating);
     chat_wait(reading);
     const char *status = input ? (draft ? "待发送" : "") : message_status(s_view.message.state);
     if (loading || reading) status = "正在读取";
+    if (speaking && !input) status = "正在朗读";
     if (!loading && !has_text && !input) {
         const char *empty = status[0] ? status : "回复为空";
         set_text(s_chat_body, empty, false);
     }
     chat_status(s_view.notice[0] ? s_view.notice : status);
+}
+
+
+typedef struct { const char *key; bool hold; const char *text; } voice_hint_t;
+
+// Key hints: an outlined key is a short press, a filled key a long press.
+static void voice_hints(int set, const voice_hint_t *items, int count)
+{
+    if (set == s_voice_hint_set) return;
+    s_voice_hint_set = set;
+    lv_obj_clean(s_voice_hints);
+    for (int i = 0; i < count; i++) {
+        lv_obj_t *item = bare(s_voice_hints);
+        lv_obj_set_size(item, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+        lv_obj_set_flex_flow(item, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(item, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_style_pad_column(item, 5, 0);
+        lv_obj_t *chip = bare(item);
+        lv_obj_set_size(chip, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+        lv_obj_set_style_radius(chip, 6, 0);
+        lv_obj_set_style_pad_hor(chip, 5, 0);
+        lv_obj_set_style_pad_ver(chip, 1, 0);
+        lv_obj_set_style_border_width(chip, 2, 0);
+        lv_obj_set_style_border_color(chip, lv_color_hex(items[i].hold ? UI_FG : UI_DIM), 0);
+        lv_obj_set_style_bg_color(chip, lv_color_hex(UI_FG), 0);
+        lv_obj_set_style_bg_opa(chip, items[i].hold ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
+        const bool latin = strcmp(items[i].key, "OK") == 0;
+        lv_obj_t *key = memo_ui_label(chip, latin ? &lv_font_montserrat_14 : memo_font_label(), items[i].hold ? UI_BG : UI_FG);
+        lv_label_set_text_static(key, items[i].key);
+        lv_obj_t *text = memo_ui_label(item, memo_font_label(), UI_DIM);
+        lv_label_set_text_static(text, items[i].text);
+    }
+}
+
+static void set_text_color(lv_obj_t *object, uint32_t color)
+{
+    if ((lv_color_to_u32(lv_obj_get_style_text_color(object, 0)) & 0xFFFFFF) != color)
+        lv_obj_set_style_text_color(object, lv_color_hex(color), 0);
+}
+
+static void set_long_mode(lv_obj_t *object, lv_label_long_mode_t mode)
+{
+    if (lv_label_get_long_mode(object) != mode) lv_label_set_long_mode(object, mode);
+}
+
+static void reveal(lv_obj_t *object, bool visible)
+{
+    if (lv_obj_is_hidden(object) == visible) lv_obj_set_hidden(object, !visible);
+}
+
+// Bars inside the orb: heights in pixels for the big orb, scaled for the small one.
+static void voice_bars(const int heights[3], uint32_t color, lv_opa_t opa)
+{
+    const int size = s_voice_small ? VOICE_ORB_SMALL : VOICE_ORB;
+    const int width = s_voice_small ? 5 : 10, pitch = s_voice_small ? 9 : 18;
+    for (int i = 0; i < AGENT_WAVE_BARS; i++) {
+        int height = s_voice_small ? heights[i] * 44 / 100 : heights[i];
+        if (height < width) height = width;
+        const int x = size / 2 + (i - 1) * pitch - width / 2;
+        const int y = size / 2 - height / 2;
+        if (lv_obj_get_x(s_wave[i]) != x || lv_obj_get_y(s_wave[i]) != y) lv_obj_set_pos(s_wave[i], x, y);
+        if (lv_obj_get_width(s_wave[i]) != width || lv_obj_get_height(s_wave[i]) != height) lv_obj_set_size(s_wave[i], width, height);
+        set_background(s_wave[i], color);
+        if (lv_obj_get_style_bg_opa(s_wave[i], 0) != opa) lv_obj_set_style_bg_opa(s_wave[i], opa, 0);
+    }
+}
+
+static void voice_orb(bool small, uint32_t fill, lv_opa_t fill_opa, uint32_t ring, bool ringed)
+{
+    if (small != s_voice_small) {
+        s_voice_small = small;
+        const int size = small ? VOICE_ORB_SMALL : VOICE_ORB;
+        lv_obj_set_pos(s_voice_orb, small ? VOICE_ORB_SMALL_X : VOICE_ORB_X, small ? VOICE_ORB_SMALL_Y : VOICE_ORB_Y);
+        lv_obj_set_size(s_voice_orb, size, size);
+    }
+    set_background(s_voice_orb, fill);
+    if (lv_obj_get_style_bg_opa(s_voice_orb, 0) != fill_opa) lv_obj_set_style_bg_opa(s_voice_orb, fill_opa, 0);
+    const int outline = ringed ? 7 : 0;
+    if (lv_obj_get_style_outline_width(s_voice_orb, 0) != outline) lv_obj_set_style_outline_width(s_voice_orb, outline, 0);
+    if ((lv_color_to_u32(lv_obj_get_style_outline_color(s_voice_orb, 0)) & 0xFFFFFF) != ring)
+        lv_obj_set_style_outline_color(s_voice_orb, lv_color_hex(ring), 0);
+}
+
+// One display sentence without Markdown emphasis, bounded for one label.
+static void sentence_text(const char *text, uint16_t start, uint16_t end, char *out, size_t capacity)
+{
+    size_t used = 0;
+    for (size_t i = start; i < end && used + 1 < capacity;) {
+        if ((text[i] == '*' && text[i + 1] == '*') || (text[i] == '_' && text[i + 1] == '_')) { i += 2; continue; }
+        if (text[i] == '`') { i++; continue; }
+        const size_t step = agent_utf8_step(text, i);
+        if (used + step >= capacity) break;
+        memcpy(out + used, text + i, step);
+        used += step;
+        i += step;
+    }
+    out[used] = '\0';
+}
+
+static bool voice_has_draft(void)
+{
+    return s_view.text_kind == AGENT_TEXT_DRAFT && s_view.segment_total > 0;
+}
+
+// Keeps a copy of the newest reply and its sentence ranges for the strip.
+static void voice_reply_cache(bool streaming)
+{
+    static int64_t copied;
+    char key[sizeof(s_voice_reply_key)];
+    snprintf(key, sizeof(key), "%lu/%lu/%s/%lu/%lu", (unsigned long)s_view.selection, (unsigned long)s_view.text_generation,
+             s_view.message.id, (unsigned long)s_view.message.revision, (unsigned long)s_view.message.reply_bytes);
+    if (strcmp(key, s_voice_reply_key) == 0) return;
+    // A growing reply is copied at most twice a second to spare the heap.
+    const int64_t now = esp_timer_get_time();
+    if (streaming && s_voice_reply != NULL && now - copied < 500000) return;
+    copied = now;
+    char *reply = agent_client_part_copy(s_view.selection, false);
+    if (reply == NULL) return; // Not loaded yet; keep the last copy.
+    memo_font_filter_text(reply, false);
+    free(s_voice_reply);
+    s_voice_reply = reply;
+    agent_copy_text(s_voice_reply_key, sizeof(s_voice_reply_key), key);
+    s_voice_sentences = agent_sentence_split(s_voice_reply, s_voice_starts, s_voice_ends, AGENT_VOICE_MAX_SENTENCES);
+    if (s_voice_review >= s_voice_sentences) s_voice_review = -1;
+}
+
+static void render_voice(void)
+{
+    const char *title = s_view.title[0] ? s_view.title : "对话";
+    if (strcmp(s_chat_title, title) != 0 && memo_font_label_text(s_title, title, false))
+        agent_copy_text(s_chat_title, sizeof(s_chat_title), title);
+    agent_speech_copy(&s_speech);
+    const bool speaking = s_speech.active && s_speech.audible && strcmp(s_speech.message_id, s_view.message.id) == 0;
+    const agent_voice_mode_t mode = agent_voice_mode((int)s_view.capture, voice_has_draft(), s_view.turn.present,
+                                                     s_view.message.state, speaking, s_view.message.reply_bytes > 0);
+    // Only the states whose strip shows reply sentences need the reply text.
+    if (s_view.turn.present && (mode == AGENT_VOICE_IDLE || mode == AGENT_VOICE_FAILED || mode == AGENT_VOICE_REPLYING))
+        voice_reply_cache(mode == AGENT_VOICE_REPLYING);
+    if ((int)mode != s_voice_mode) {
+        agent_trace(TRACE_VOICE, (uint16_t)mode, 0, NULL);
+        if (mode != AGENT_VOICE_IDLE && mode != AGENT_VOICE_FAILED) s_voice_review = -1;
+    }
+    s_voice_mode = (int)mode;
+    const int64_t now = esp_timer_get_time();
+    char line[256];
+
+    // Orb and bars.
+    static const int idle_bars[3] = {26, 44, 26};
+    if (mode == AGENT_VOICE_RECORDING || mode == AGENT_VOICE_SPEAKING) {
+        const uint8_t level = mode == AGENT_VOICE_RECORDING ? agent_capture_level() : s_speech.level;
+        s_levels[0] = level > s_levels[0] ? level : (uint8_t)(s_levels[0] * 3 / 4);
+        const int bars[3] = {14 + s_levels[0] * 26 / 100, 14 + s_levels[0] * 46 / 100, 14 + s_levels[0] * 26 / 100};
+        const uint32_t color = mode == AGENT_VOICE_RECORDING ? UI_RECORDING : UI_ACCENT;
+        voice_orb(false, mode == AGENT_VOICE_RECORDING ? UI_RECORDING : UI_ACCENT_SOFT,
+                  mode == AGENT_VOICE_RECORDING ? LV_OPA_20 : LV_OPA_COVER, color, true);
+        voice_bars(bars, color, LV_OPA_COVER);
+    } else if (mode == AGENT_VOICE_THINKING) {
+        // Bars rise one after another, slowly, while the arc orbits.
+        int bars[3];
+        for (int i = 0; i < 3; i++) {
+            const int phase = (int)((now / 1000 + 1600 - i * 200) % 1600);
+            const int rise = phase < 560 ? phase * 100 / 560 : phase < 1120 ? (1120 - phase) * 100 / 560 : 0;
+            bars[i] = 14 + rise * (i == 1 ? 30 : 16) / 100;
+        }
+        voice_orb(false, UI_ACCENT_SOFT, LV_OPA_COVER, UI_ACCENT, false);
+        voice_bars(bars, UI_ACCENT, LV_OPA_COVER);
+    } else {
+        voice_orb(mode == AGENT_VOICE_DRAFT, UI_ACCENT_SOFT, LV_OPA_COVER, UI_ACCENT, false);
+        voice_bars(idle_bars, UI_ACCENT, mode == AGENT_VOICE_TRANSCRIBING ? LV_OPA_COVER : 140);
+    }
+    spin(s_voice_arc, mode == AGENT_VOICE_THINKING, &s_voice_arc_spinning, 1800);
+    spin(s_voice_strip_spin, mode == AGENT_VOICE_TRANSCRIBING, &s_voice_spin_spinning, 900);
+
+    // Status line (or timer, or the side labels next to the small orb).
+    const char *status = "";
+    uint32_t tone = UI_FG;
+    reveal(s_voice_timer, mode == AGENT_VOICE_RECORDING);
+    reveal(s_voice_side, mode == AGENT_VOICE_DRAFT);
+    reveal(s_voice_side_sub, mode == AGENT_VOICE_DRAFT);
+    switch (mode) {
+    case AGENT_VOICE_PREPARING: status = "正在准备"; tone = UI_DIM; break;
+    case AGENT_VOICE_RECORDING: {
+        const uint32_t seconds = agent_capture_duration_ms() / 1000;
+        snprintf(line, sizeof(line), "%02lu:%02lu", (unsigned long)(seconds / 60), (unsigned long)(seconds % 60));
+        set_text(s_voice_timer, line, true);
+        break;
+    }
+    case AGENT_VOICE_TRANSCRIBING: status = "正在转写"; tone = UI_DIM; break;
+    case AGENT_VOICE_DRAFT:
+        set_text(s_voice_side, "草稿待发送", false);
+        set_text(s_voice_side_sub, "长按 ↓ 清空", false);
+        break;
+    case AGENT_VOICE_THINKING:
+        if (strcmp(s_think_id, s_view.message.id) != 0) {
+            agent_copy_text(s_think_id, sizeof(s_think_id), s_view.message.id);
+            s_think_since = now;
+        }
+        snprintf(line, sizeof(line), "Hermes 正在思考 %llus", (unsigned long long)((now - s_think_since) / 1000000));
+        status = line;
+        break;
+    case AGENT_VOICE_SPEAKING: status = "正在朗读"; break;
+    case AGENT_VOICE_REPLYING: status = "正在回复"; break;
+    case AGENT_VOICE_FAILED: status = message_status(s_view.message.state); tone = UI_RECORDING; break;
+    case AGENT_VOICE_IDLE:
+        if (s_voice_review >= 0) { status = "上一轮回复"; tone = UI_DIM; }
+        else status = s_view.turn.present ? "按住 OK 继续说" : "按住 OK 说话";
+        break;
+    }
+    if (s_view.notice[0] != '\0' && mode != AGENT_VOICE_RECORDING && mode != AGENT_VOICE_DRAFT) {
+        status = s_view.notice;
+        tone = strcmp(s_view.notice, "草稿已清空") == 0 ? UI_DIM : UI_RECORDING;
+    }
+    reveal(s_voice_status, mode != AGENT_VOICE_RECORDING && mode != AGENT_VOICE_DRAFT);
+    if (strcmp(lv_label_get_text(s_voice_status), status) != 0) set_text(s_voice_status, status, false);
+    set_text_color(s_voice_status, tone);
+
+    // The strip: one line of words, or the expanded draft panel.
+    bool strip = false, tag = false, circular = false;
+    uint32_t strip_tone = UI_FG, border = UI_BORDER;
+    line[0] = '\0';
+    if (mode == AGENT_VOICE_RECORDING || mode == AGENT_VOICE_TRANSCRIBING) {
+        strip = true;
+        border = mode == AGENT_VOICE_RECORDING ? UI_RECORDING : UI_BORDER;
+        if (s_view.text.text[0] != '\0') {
+            const char *tail = agent_utf8_tail(s_view.text.text, VOICE_TAIL_RUNES);
+            const size_t lead = tail == s_view.text.text ? 0 : strlen("…");
+            memcpy(line, "…", lead);
+            agent_copy_text(line + lead, sizeof(line) - lead, tail);
+        } else {
+            agent_copy_text(line, sizeof(line), mode == AGENT_VOICE_RECORDING ? "请开始说话" : "…");
+            strip_tone = UI_DIM;
+        }
+    } else if (mode == AGENT_VOICE_THINKING) {
+        if (strcmp(s_voice_question_id, s_view.message.id) != 0) {
+            char *question = agent_client_part_copy(s_view.selection, true);
+            if (question != NULL) {
+                memo_font_filter_text(question, false);
+                for (char *c = question; *c; c++) if (*c == '\n') *c = ' ';
+                free(s_voice_question);
+                s_voice_question = question;
+                agent_copy_text(s_voice_question_id, sizeof(s_voice_question_id), s_view.message.id);
+            }
+        }
+        strip = s_voice_question != NULL && s_voice_question[0] != '\0';
+        if (strip) agent_copy_text(line, sizeof(line), s_voice_question);
+        strip_tone = UI_DIM;
+    } else if (mode == AGENT_VOICE_SPEAKING) {
+        strip = s_speech.sentence[0] != '\0';
+        agent_copy_text(line, sizeof(line), s_speech.sentence);
+        memo_font_filter_text(line, false);
+        circular = true;
+        border = UI_ACCENT;
+    } else if ((mode == AGENT_VOICE_IDLE || mode == AGENT_VOICE_FAILED || mode == AGENT_VOICE_REPLYING) &&
+               s_view.turn.present && s_voice_sentences > 0) {
+        const int index = s_voice_review >= 0 ? s_voice_review : s_voice_sentences - 1;
+        sentence_text(s_voice_reply, s_voice_starts[index], s_voice_ends[index], line, sizeof(line));
+        strip = line[0] != '\0';
+        strip_tone = s_voice_review >= 0 ? UI_FG : UI_DIM;
+        circular = s_voice_review >= 0;
+        tag = s_voice_review >= 0;
+        if (tag) {
+            char count[16];
+            snprintf(count, sizeof(count), "%d/%d", index + 1, s_voice_sentences);
+            set_text(s_voice_strip_tag, count, false);
+        }
+    }
+    reveal(s_voice_strip, strip);
+    if (strip) {
+        reveal(s_voice_strip_tag, tag);
+        const int text_x = mode == AGENT_VOICE_TRANSCRIBING ? 38 : 14;
+        const int text_w = VOICE_STRIP_W - text_x - (tag ? 56 : 14);
+        if (lv_obj_get_x(s_voice_strip_text) != text_x) lv_obj_set_x(s_voice_strip_text, text_x);
+        if (lv_obj_get_width(s_voice_strip_text) != text_w) lv_obj_set_width(s_voice_strip_text, text_w);
+        set_long_mode(s_voice_strip_text, circular ? LV_LABEL_LONG_SCROLL_CIRCULAR : LV_LABEL_LONG_DOT);
+        if (strcmp(lv_label_get_text(s_voice_strip_text), line) != 0) set_text(s_voice_strip_text, line, false);
+        set_text_color(s_voice_strip_text, strip_tone);
+        if ((lv_color_to_u32(lv_obj_get_style_border_color(s_voice_strip, 0)) & 0xFFFFFF) != border)
+            lv_obj_set_style_border_color(s_voice_strip, lv_color_hex(border), 0);
+    }
+
+    reveal(s_voice_panel, mode == AGENT_VOICE_DRAFT);
+    if (mode == AGENT_VOICE_DRAFT &&
+        (s_voice_draft_selection != s_view.selection || s_voice_draft_generation != s_view.text_generation)) {
+        char *draft = agent_client_text_copy(s_view.selection, s_view.text_generation);
+        if (draft != NULL) {
+            memo_font_filter_text(draft, false);
+            lv_label_set_text_static(s_voice_panel_body, draft);
+            free(s_voice_draft);
+            s_voice_draft = draft;
+            s_voice_draft_selection = s_view.selection;
+            s_voice_draft_generation = s_view.text_generation;
+            size_t runes = 0;
+            for (const char *c = draft; *c; c++) if (((unsigned char)*c & 0xC0) != 0x80) runes++;
+            char count[24];
+            snprintf(count, sizeof(count), "%u 字", (unsigned)runes);
+            set_text(s_voice_panel_count, count, false);
+            lv_obj_update_layout(s_voice_panel_scroll);
+            lv_obj_scroll_to_y(s_voice_panel_scroll, 0, LV_ANIM_OFF);
+        }
+    }
+
+    // Key hints for what the keys do right now.
+    static const voice_hint_t idle[] = {{"OK", false, "文字"}, {"OK", true, "说话"}};
+    static const voice_hint_t review[] = {{"↑↓", false, "逐句"}, {"OK", true, "说话"}};
+    static const voice_hint_t failed[] = {{"OK", false, "重试"}, {"OK", true, "说话"}};
+    static const voice_hint_t draft[] = {{"OK", false, "发送"}, {"OK", true, "重录"}};
+    static const voice_hint_t recording[] = {{"OK", true, "松开结束"}};
+    static const voice_hint_t speaking_hints[] = {{"OK", false, "文字"}, {"↓", true, "停止"}};
+    switch (mode) {
+    case AGENT_VOICE_PREPARING:
+    case AGENT_VOICE_RECORDING: voice_hints(1, recording, 1); break;
+    case AGENT_VOICE_TRANSCRIBING: voice_hints(2, NULL, 0); break;
+    case AGENT_VOICE_DRAFT: voice_hints(3, draft, 2); break;
+    case AGENT_VOICE_SPEAKING: voice_hints(4, speaking_hints, 2); break;
+    case AGENT_VOICE_FAILED: voice_hints(5, failed, 2); break;
+    default:
+        if (s_voice_review >= 0) voice_hints(6, review, 2);
+        else voice_hints(7, idle, 2);
+        break;
+    }
 }
 
 static void render(void)
@@ -517,12 +935,11 @@ static void render(void)
     if (esp_timer_get_time() < s_notice_until)
         agent_copy_text(s_view.notice, sizeof(s_view.notice), s_local_notice);
     if (s_view.capture != AGENT_IDLE && !s_record_dismissed) {
-        const agent_page_t page = s_view.capture == AGENT_PREPARING ? AGENT_PAGE_PREPARING : AGENT_PAGE_RECORD;
-        if (s_page != page) build_screen(page);
+        if (s_page != AGENT_PAGE_VOICE) build_screen(AGENT_PAGE_VOICE);
     } else if (s_record_requested) {
         const bool settled = s_view.capture == AGENT_IDLE;
         const agent_page_t next = settled && !s_record_dismissed && s_seen_capture != s_view.capture_serial ?
-            AGENT_PAGE_CHAT : s_record_return;
+            AGENT_PAGE_VOICE : s_record_return;
         if (settled && next == AGENT_PAGE_SESSIONS) agent_client_close_session();
         if (s_page != next) build_screen(next);
         if (settled) {
@@ -534,32 +951,7 @@ static void render(void)
     else if (s_page == AGENT_PAGE_CHAT) render_chat();
     else if (s_page == AGENT_PAGE_SETTINGS) memo_ui_settings_refresh_values();
     else if (s_page == AGENT_PAGE_PROVISION) memo_ui_provision_refresh();
-    else if (s_page == AGENT_PAGE_RECORD) {
-        const uint32_t seconds = agent_capture_duration_ms() / 1000;
-        char clock[32];
-        snprintf(clock, sizeof(clock), "%02lu:%02lu", (unsigned long)(seconds / 60), (unsigned long)(seconds % 60));
-        set_text(s_clock, clock, true);
-        const bool listening = s_view.capture == AGENT_RECORDING;
-        set_text(s_status, s_view.capture == AGENT_COMMITTING ? "正在保存" :
-            s_view.capture == AGENT_FINALIZING ? "正在收尾" : "正在录音", false);
-        set_background(s_record_dot, listening ? UI_RECORDING : UI_ACCENT);
-        set_text(s_text, s_view.text.text[0] ? s_view.text.text : "请开始说话", false);
-        if ((lv_color_to_u32(lv_obj_get_style_text_color(s_text, 0)) & 0xFFFFFF) != (s_view.text.text[0] ? UI_FG : UI_DIM))
-            lv_obj_set_style_text_color(s_text, lv_color_hex(s_view.text.text[0] ? UI_FG : UI_DIM), 0);
-        lv_obj_update_layout(s_scroll);
-        lv_obj_scroll_to_y(s_scroll, lv_obj_get_scroll_y(s_scroll) + lv_obj_get_scroll_bottom(s_scroll), LV_ANIM_OFF);
-        // A symmetric three-bar meter: rise immediately, fall back gently. The
-        // outer bars follow the centre at 60 %, so only one small area redraws.
-        const uint8_t level = listening ? agent_capture_level() : 0;
-        s_levels[0] = level > s_levels[0] ? level : (uint8_t)(s_levels[0] * 3 / 4);
-        for (int i = 0; i < AGENT_WAVE_BARS; i++) {
-            const int span = i == AGENT_WAVE_BARS / 2 ? 50 : 30;
-            const int height = AGENT_WAVE_WIDTH + s_levels[0] * span / 100;
-            if (lv_obj_get_height(s_wave[i]) == height) continue;
-            lv_obj_set_y(s_wave[i], AGENT_WAVE_CENTER - height / 2);
-            lv_obj_set_height(s_wave[i], height);
-        }
-    }
+    else if (s_page == AGENT_PAGE_VOICE) render_voice();
     memo_ui_battery_update(s_soc);
 }
 
@@ -636,7 +1028,15 @@ static void exit_page(void)
         s_record_dismissed = true;
         s_record_return = target;
         show_page(target);
-    } else if (s_page == AGENT_PAGE_CHAT) {
+    } else if (s_page == AGENT_PAGE_CHAT || s_page == AGENT_PAGE_VOICE) {
+        // Long Down leaves the current state: speaking, then the draft, then the session.
+        agent_speech_copy(&s_speech);
+        if (s_speech.active) { agent_speech_stop(false); return; }
+        if (s_page == AGENT_PAGE_VOICE && voice_has_draft()) {
+            const bool cleared = agent_client_clear_draft() == ESP_OK;
+            if (bsp_lvgl_lock(1000)) { ui_notice(cleared ? "草稿已清空" : "暂时无法清空草稿"); bsp_lvgl_unlock(); }
+            return;
+        }
         if (agent_client_close_session() == ESP_OK) show_page(target);
     } else if (s_page != target) show_page(target);
 }
@@ -677,19 +1077,51 @@ static void scroll_chat(bsp_btn_t button)
     bsp_lvgl_unlock();
 }
 
-static void confirm_chat(void)
+
+// Back to the voice view from the text card, on the newest exchange's reply.
+static void leave_text_card(void)
 {
-    if (s_view.busy) return;
-    if (s_view.text_kind == AGENT_TEXT_DRAFT) {
-        if (agent_client_send(s_view.text.revision, s_view.selection) != ESP_OK && bsp_lvgl_lock(1000)) {
-            ui_notice("内容已更新，请稍候");
-            bsp_lvgl_unlock();
+    if (s_view.turn.present && s_view.turn.after[0] != '\0') agent_client_show_latest();
+    else if (s_view.text_kind == AGENT_TEXT_INPUT) agent_client_message_select(false);
+    show_page(AGENT_PAGE_VOICE);
+}
+
+static void voice_key(bsp_btn_t button)
+{
+    const agent_voice_mode_t mode = (agent_voice_mode_t)s_voice_mode;
+    if (button == BSP_BTN_OK) {
+        if (mode == AGENT_VOICE_DRAFT) {
+            if (agent_client_send(s_view.text.revision, s_view.selection) != ESP_OK && bsp_lvgl_lock(1000)) {
+                ui_notice("内容已更新，请稍候");
+                bsp_lvgl_unlock();
+            }
+        } else if (mode == AGENT_VOICE_FAILED) {
+            agent_client_retry(s_view.message.id, s_view.selection);
+        } else if (mode != AGENT_VOICE_TRANSCRIBING) {
+            show_page(AGENT_PAGE_CHAT);
         }
-    } else if (s_view.segment_total > 0) agent_client_review_draft();
-    else if (s_view.turn.present &&
-             (strcmp(s_view.message.state, "failed") == 0 || strcmp(s_view.message.state, "unconfirmed") == 0)) {
-        agent_client_retry(s_view.message.id, s_view.selection);
+        return;
     }
+    if (!bsp_lvgl_lock(1000)) return;
+    const int direction = button == BSP_BTN_UP ? -1 : 1;
+    if (mode == AGENT_VOICE_DRAFT) {
+        lv_obj_update_layout(s_voice_panel_scroll);
+        const int32_t position = lv_obj_get_scroll_y(s_voice_panel_scroll);
+        const int32_t step = 2 * memo_font_label()->line_height + 2 * AGENT_CHAT_LINE_SPACE;
+        int32_t target = position + direction * step;
+        const int32_t bottom = position + lv_obj_get_scroll_bottom(s_voice_panel_scroll);
+        if (target > bottom) target = bottom;
+        if (target < 0) target = 0;
+        lv_obj_scroll_to_y(s_voice_panel_scroll, target, LV_ANIM_OFF);
+    } else if ((mode == AGENT_VOICE_IDLE || mode == AGENT_VOICE_FAILED) && s_voice_sentences > 1) {
+        // Review the last reply sentence by sentence; past the end returns to the latest.
+        int index = s_voice_review >= 0 ? s_voice_review : s_voice_sentences - 1;
+        index += direction;
+        if (index < 0) index = 0;
+        s_voice_review = index >= s_voice_sentences - 1 ? -1 : index;
+        render();
+    }
+    bsp_lvgl_unlock();
 }
 
 static void gesture(bsp_btn_t button, bool hold)
@@ -698,7 +1130,11 @@ static void gesture(bsp_btn_t button, bool hold)
     snprintf(page, sizeof(page), "p%d c%d", (int)s_page, (int)s_view.capture);
     agent_trace(TRACE_GESTURE, (uint16_t)button, hold ? 1 : 0, page);
     if (s_sleep_requested) return;
-    if (hold && button == BSP_BTN_DOWN) { exit_page(); return; }
+    if (hold && button == BSP_BTN_DOWN) {
+        // While OK is held to record, or the transcript settles, Down does nothing.
+        if (s_view.capture == AGENT_IDLE) exit_page();
+        return;
+    }
     if (hold && button == BSP_BTN_UP && agent_page_is_root(s_page, s_edit.active)) {
         show_page(agent_page_cycle(s_page, agent_root_pages, AGENT_ROOT_PAGE_COUNT));
         return;
@@ -709,14 +1145,15 @@ static void gesture(bsp_btn_t button, bool hold)
         return;
     }
     if (s_page == AGENT_PAGE_SETTINGS) { settings_key(button, hold); return; }
-    if (s_view.capture != AGENT_IDLE || s_page == AGENT_PAGE_PREPARING || s_page == AGENT_PAGE_RECORD) return;
+    if (s_view.capture != AGENT_IDLE) return;
     if (hold && button == BSP_BTN_OK && agent_page_can_record(s_page)) {
         s_record_return = s_page;
         s_seen_capture = s_view.capture_serial;
+        agent_speech_stop(true); // Recording interrupts a reply being read aloud.
         if (agent_client_record(s_page == AGENT_PAGE_SESSIONS) == ESP_OK) {
             s_record_requested = true;
             s_record_dismissed = false;
-            show_page(AGENT_PAGE_PREPARING);
+            show_page(AGENT_PAGE_VOICE);
         } else if (bsp_lvgl_lock(1000)) { ui_notice("请先连接服务器"); bsp_lvgl_unlock(); }
         return;
     }
@@ -724,7 +1161,7 @@ static void gesture(bsp_btn_t button, bool hold)
         if (hold) return;
         if (button == BSP_BTN_OK) {
             if (s_selected < s_view.session_count && agent_client_open(&s_view.sessions[s_selected]) == ESP_OK)
-                show_page(AGENT_PAGE_CHAT);
+                show_page(AGENT_PAGE_VOICE);
         } else {
             const agent_step_t step = agent_page_step(s_selected, s_view.session_count, button == BSP_BTN_UP ? -1 : 1,
                 s_view.session_offset > 0, s_view.sessions_more);
@@ -732,8 +1169,10 @@ static void gesture(bsp_btn_t button, bool hold)
             if (step.direction != 0) agent_client_sessions_page(step.direction);
         }
     } else if (s_page == AGENT_PAGE_CHAT && !hold) {
-        if (button == BSP_BTN_OK) confirm_chat();
+        if (button == BSP_BTN_OK) leave_text_card();
         else scroll_chat(button);
+    } else if (s_page == AGENT_PAGE_VOICE && !hold) {
+        voice_key(button);
     }
 }
 
@@ -783,6 +1222,27 @@ static void power_tick(int64_t now)
     }
 }
 
+// Reads aloud each new newest exchange of the open session: one sent from this
+// device or from the web page. Opening a session does not replay its last reply.
+static void follow_speech(void)
+{
+    if (strcmp(s_view.session_id, s_play_session) != 0) {
+        agent_speech_stop(false);
+        agent_copy_text(s_play_session, sizeof(s_play_session), s_view.session_id);
+        s_play_seen[0] = '\0';
+        s_play_baseline = true;
+    }
+    if (!s_view.speech || s_view.session_id[0] == '\0' || !s_view.turn.present || s_view.capture != AGENT_IDLE ||
+        s_view.session_switching || s_view.chat_loading || s_view.turn.after[0] != '\0') return;
+    const char *id = s_view.turn.message.id;
+    if (id[0] == '\0' || strcmp(id, s_play_seen) == 0) return;
+    const bool baseline = s_play_baseline;
+    s_play_baseline = false;
+    agent_copy_text(s_play_seen, sizeof(s_play_seen), id);
+    if (baseline && !agent_message_active(s_view.turn.message.state)) return;
+    agent_speech_play(s_view.session_id, id);
+}
+
 static void input_task(void *arg)
 {
     (void)arg;
@@ -794,6 +1254,7 @@ static void input_task(void *arg)
         const bool received = xQueueReceive(s_input, &input, pdMS_TO_TICKS(40)) == pdTRUE;
         if (!s_ready) continue;
         agent_client_copy(&s_view);
+        follow_speech();
         const int64_t now = esp_timer_get_time();
         if (now - last_memory >= 5000000 || s_view.capture != last_capture || (int)s_page != last_page) {
             ESP_LOGI(TAG, "memory page=%d capture=%d free=%u largest=%u minimum=%u input_stack=%u",
@@ -862,6 +1323,7 @@ void app_main(void)
     bsp_battery_init();
     if (memo_net_start() != ESP_OK || memo_discovery_init() != ESP_OK) ESP_LOGW(TAG, "network initialization failed");
     if (agent_capture_init() != ESP_OK || agent_client_init() != ESP_OK) { ESP_LOGE(TAG, "worker allocation failed"); return; }
+    if (agent_speech_init() != ESP_OK) ESP_LOGW(TAG, "speech playback unavailable");
     s_input = xQueueCreate(16, sizeof(input_event_t));
     if (s_input == NULL || xTaskCreate(input_task, "agent_input", 6144, NULL, 5, NULL) != pdPASS) return;
     if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_GPIO) key_guard_arm(&s_guard, esp_timer_get_time(), 3000000);

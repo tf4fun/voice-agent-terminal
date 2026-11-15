@@ -153,10 +153,11 @@ static void test_whole_turn(void)
 static void test_chat_layout(void)
 {
     const agent_chat_card_layout_t card = agent_chat_card_layout(240, 320, 31);
-    assert(card.x == 12 && card.width == 216 && card.top == 34);
+    // The card starts below the voice/text mode marks (y 31, 6 px high).
+    assert(card.x == 12 && card.width == 216 && card.top == 40);
     assert(card.top + card.height == 308);
     assert(card.body_width == 190);
-    assert(card.body_y == 32 && card.body_height == 228);
+    assert(card.body_y == 32 && card.body_height == 222);
     assert(card.role_y + 31 < card.body_y);
     assert(card.body_y + card.body_height == card.height - 14);
     assert(card.status_y == card.role_y && card.status_x >= 12 + 40);

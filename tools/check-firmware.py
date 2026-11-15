@@ -95,9 +95,14 @@ assert "esp_audio_codec" not in (firmware / "main/idf_component.yml").read_text(
 app = (firmware / "main/agent_app.c").read_text()
 assert "memo_font_meta()" in app and "memo_font_meta()" in common
 assert "memo_font_mono" not in app + common
-navigation = app[app.index("static void scroll_chat("):app.index("static void confirm_chat(")]
+navigation = app[app.index("static void scroll_chat("):app.index("static void leave_text_card(")]
 assert "lv_obj_scroll" in navigation and "LV_ANIM_OFF" in navigation
 assert "s_chat_cards[4]" not in app
 assert "lv_obj_set_style_text_line_space(s_chat_body, AGENT_CHAT_LINE_SPACE, 0)" in app
+# Voice-first session view: recording never offers a cancel, long Down leaves states in order.
+voice = app[app.index("static void voice_key("):app.index("static void gesture(")]
+assert "AGENT_VOICE_TRANSCRIBING" in voice
+assert "if (s_view.capture == AGENT_IDLE) exit_page();" in app
+assert "agent_speech_stop(true); // Recording interrupts" in app
 print("PASS: font payloads, both GB2312 Chinese levels (including 渥), metadata font and bounded device contract")
 

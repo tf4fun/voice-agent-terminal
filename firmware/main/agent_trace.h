@@ -22,6 +22,8 @@ typedef enum {
     TRACE_HEAP,        // a: largest free block / 1024, b: free bytes
     TRACE_REPORT,      // a: trigger, b: 1 uploaded / 0 failed
     TRACE_CAPTURE_ERROR, // b: esp_err_t from audio capture
+    TRACE_SPEECH,      // a: end status (0 done, 1 failed, 2 stopped, 3 limit), b: last sentence index
+    TRACE_VOICE,       // a: voice mode shown
 } agent_trace_type_t;
 
 typedef enum {
