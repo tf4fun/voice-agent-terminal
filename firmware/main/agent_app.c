@@ -93,9 +93,10 @@ static uint32_t s_voice_draft_generation = UINT32_MAX, s_voice_draft_selection;
 static uint16_t s_voice_starts[AGENT_VOICE_MAX_SENTENCES], s_voice_ends[AGENT_VOICE_MAX_SENTENCES];
 // Line review: the reply without Markdown marks, wrapped to the strip's width.
 #define VOICE_MAX_LINES 256
-static char *s_voice_display;
+static char *s_voice_display, *s_voice_marquee;
 static uint16_t s_voice_lines[VOICE_MAX_LINES + 1];
 static int s_voice_line_count;
+static int64_t s_voice_review_at; // Last review key; review ends after 15 s without one.
 static char s_think_id[37];
 static int64_t s_think_since;
 static agent_speech_view_t s_speech;
@@ -160,7 +161,8 @@ static void delete_screen(void)
     free(s_voice_draft);
     free(s_voice_question);
     free(s_voice_display);
-    s_voice_reply = s_voice_draft = s_voice_question = s_voice_display = NULL;
+    free(s_voice_marquee);
+    s_voice_reply = s_voice_draft = s_voice_question = s_voice_display = s_voice_marquee = NULL;
     s_voice_line_count = 0;
     s_voice_reply_key[0] = s_voice_question_id[0] = '\0';
     s_voice_draft_generation = UINT32_MAX;
@@ -728,13 +730,15 @@ static uint32_t utf8_codepoint(const char *text, size_t at, size_t *size)
     return ((uint32_t)(c[0] & 0x07) << 18) | ((uint32_t)(c[1] & 0x3F) << 12) | ((uint32_t)(c[2] & 0x3F) << 6) | (c[3] & 0x3F);
 }
 
-// Builds the review lines: Markdown emphasis, code ticks and line leaders are
-// dropped, blank lines collapse, and text wraps at the strip's pixel width so
-// each up/down press shows exactly one readable line.
+// Builds the review units: Markdown emphasis, code ticks and line leaders are
+// dropped and blank lines collapse. Every sentence starts a unit, and a
+// sentence wider than the strip continues in further units, so each up/down
+// press shows one still, readable piece. Also builds the one-line marquee.
 static void voice_wrap_lines(void)
 {
     free(s_voice_display);
-    s_voice_display = NULL;
+    free(s_voice_marquee);
+    s_voice_display = s_voice_marquee = NULL;
     s_voice_line_count = 0;
     const size_t length = strlen(s_voice_reply);
     char *display = malloc(length + 1);
@@ -761,27 +765,48 @@ static void voice_wrap_lines(void)
     }
     display[used] = '\0';
     s_voice_display = display;
+    // The marquee: the reply on one line, bounded so a long reply still loops.
+    size_t marquee = used < 1024 ? used : 1024;
+    while (marquee < used && marquee > 0 && ((unsigned char)display[marquee] & 0xC0) == 0x80) marquee--;
+    s_voice_marquee = malloc(marquee + 4);
+    if (s_voice_marquee != NULL) {
+        for (size_t i = 0; i < marquee; i++) s_voice_marquee[i] = display[i] == '\n' ? ' ' : display[i];
+        memcpy(s_voice_marquee + marquee, marquee < used ? "…" : "", marquee < used ? 4 : 1);
+    }
+    static const char closers[] = "，。！？；：、）」』”’》】,.!?;:)\"'";
     const lv_font_t *font = memo_font_label();
     const int32_t width = VOICE_STRIP_W - 28;
     size_t at = 0;
-    while (at < used && s_voice_line_count < VOICE_MAX_LINES) {
+    while (at < used && s_voice_line_count < VOICE_MAX_LINES && at <= UINT16_MAX) {
+        while (at < used && (display[at] == ' ' || display[at] == '\n')) at++;
+        if (at >= used) break;
         s_voice_lines[s_voice_line_count++] = (uint16_t)at;
         int32_t line = 0;
         while (at < used && display[at] != '\n') {
             size_t size;
             const uint32_t letter = utf8_codepoint(display, at, &size);
             const int32_t glyph = lv_font_get_glyph_width(font, letter, 0);
-            // Closing punctuation never starts a line; it stays at the end of this one.
-            static const char closers[] = "，。！？；：、）」』”’》】,.!?;:)";
-            const bool closer = size > 1 ? strstr(closers, (char[5]){display[at], display[at + 1],
-                                                    size > 2 ? display[at + 2] : 0, size > 3 ? display[at + 3] : 0, 0}) != NULL
-                                         : strchr(",.!?;:)", display[at]) != NULL;
+            char piece[5] = {0};
+            memcpy(piece, display + at, size);
+            // Closing punctuation never starts a unit; it stays with the text before it.
+            const bool closer = strstr(closers, piece) != NULL;
             if (line > 0 && line + glyph > width && !closer) break;
             line += glyph;
+            const size_t was = at;
             at += size;
+            if (agent_sentence_end(display, was, size)) {
+                for (;;) { // Keep closing quotes and brackets with the sentence.
+                    size_t next;
+                    if (at >= used) break;
+                    utf8_codepoint(display, at, &next);
+                    char tail[5] = {0};
+                    memcpy(tail, display + at, next);
+                    if (strstr("”’」』）)\"'】》", tail) == NULL) break;
+                    at += next;
+                }
+                break;
+            }
         }
-        if (at < used && display[at] == '\n') at++;
-        if (at > UINT16_MAX) break;
     }
     s_voice_lines[s_voice_line_count] = (uint16_t)(at < UINT16_MAX ? at : UINT16_MAX);
 }
@@ -827,6 +852,7 @@ static void render_voice(void)
     }
     s_voice_mode = (int)mode;
     const int64_t now = esp_timer_get_time();
+    if (s_voice_review >= 0 && now - s_voice_review_at > 15000000) s_voice_review = -1; // Back to scrolling.
     char line[256];
 
     // Orb and bars.
@@ -941,13 +967,19 @@ static void render_voice(void)
         border = UI_ACCENT;
     } else if (s_voice_review >= 0 && s_voice_display != NULL && s_voice_review < s_voice_line_count) {
         size_t start = s_voice_lines[s_voice_review], end = s_voice_lines[s_voice_review + 1];
-        while (end > start && s_voice_display[end - 1] == '\n') end--;
+        while (end > start && (s_voice_display[end - 1] == '\n' || s_voice_display[end - 1] == ' ')) end--;
         const size_t size = end - start < sizeof(line) - 1 ? end - start : sizeof(line) - 1;
         memcpy(line, s_voice_display + start, size);
         line[size] = '\0';
         strip = true;
-    } else if ((mode == AGENT_VOICE_IDLE || mode == AGENT_VOICE_FAILED || mode == AGENT_VOICE_REPLYING) &&
-               s_view.turn.present && s_voice_sentences > 0) {
+    } else if ((mode == AGENT_VOICE_IDLE || mode == AGENT_VOICE_FAILED) && s_view.turn.present &&
+               s_voice_marquee != NULL && s_voice_marquee[0] != '\0') {
+        // At rest the strip scrolls through the whole last reply.
+        agent_copy_text(line, sizeof(line), "");
+        strip = true;
+        circular = true;
+        strip_tone = UI_DIM;
+    } else if (mode == AGENT_VOICE_REPLYING && s_voice_sentences > 0) {
         const int index = s_voice_sentences - 1;
         sentence_text(s_voice_reply, s_voice_starts[index], s_voice_ends[index], line, sizeof(line));
         strip = line[0] != '\0';
@@ -961,7 +993,9 @@ static void render_voice(void)
         if (lv_obj_get_x(s_voice_strip_text) != text_x) lv_obj_set_x(s_voice_strip_text, text_x);
         if (lv_obj_get_width(s_voice_strip_text) != text_w) lv_obj_set_width(s_voice_strip_text, text_w);
         set_long_mode(s_voice_strip_text, circular ? LV_LABEL_LONG_SCROLL_CIRCULAR : LV_LABEL_LONG_DOT);
-        if (strcmp(lv_label_get_text(s_voice_strip_text), line) != 0) set_text(s_voice_strip_text, line, false);
+        const char *shown = line[0] == '\0' && s_voice_marquee != NULL && s_voice_review < 0 &&
+                            (mode == AGENT_VOICE_IDLE || mode == AGENT_VOICE_FAILED) ? s_voice_marquee : line;
+        if (strcmp(lv_label_get_text(s_voice_strip_text), shown) != 0) set_text(s_voice_strip_text, shown, false);
         set_text_color(s_voice_strip_text, strip_tone);
         if ((lv_color_to_u32(lv_obj_get_style_border_color(s_voice_strip, 0)) & 0xFFFFFF) != border)
             lv_obj_set_style_border_color(s_voice_strip, lv_color_hex(border), 0);
@@ -990,7 +1024,7 @@ static void render_voice(void)
 
     // Key hints for what the keys do right now.
     static const voice_hint_t idle[] = {{"OK", false, "文字"}, {"OK", true, "说话"}};
-    static const voice_hint_t review[] = {{"↑↓", false, "逐行"}, {"OK", true, "说话"}};
+    static const voice_hint_t review[] = {{"↑↓", false, "逐句"}, {"OK", true, "说话"}};
     static const voice_hint_t failed[] = {{"OK", false, "重试"}, {"OK", true, "说话"}};
     static const voice_hint_t draft[] = {{"OK", false, "发送"}, {"OK", true, "重录"}};
     static const voice_hint_t recording[] = {{"OK", true, "松开结束"}};
@@ -1210,8 +1244,10 @@ static void voice_key(bsp_btn_t button)
         if (target < 0) target = 0;
         lv_obj_scroll_to_y(s_voice_panel_scroll, target, LV_ANIM_OFF);
     } else if ((mode == AGENT_VOICE_IDLE || mode == AGENT_VOICE_FAILED) && s_voice_line_count > 0) {
-        // Read the last reply one line at a time from its first line; past the
-        // last line, review ends and the strip shows the closing sentence again.
+        // Step through the last reply one sentence (or one strip-wide piece of a
+        // long sentence) per press from the start; past the end, the strip
+        // returns to scrolling the whole reply.
+        s_voice_review_at = esp_timer_get_time();
         if (s_voice_review < 0) s_voice_review = 0;
         else {
             const int index = s_voice_review + direction;
