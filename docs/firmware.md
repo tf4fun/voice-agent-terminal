@@ -36,11 +36,13 @@ keepalives every 5 s while Hermes thinks), writes audio to the ES8311 at the
 capture format and publishes the current sentence and loudness for the orb.
 Recording stops speech before the microphone starts; long Down stops it in
 either view; leaving the session stops it. The I2S DMA ring holds only 90 ms,
-so playback is split: the stream reader queues PCM into a 12 KiB buffer
-(about 0.4 s) and a separate writer task at the capture task's priority feeds
-the codec after 200 ms of prebuffer, refilling 100 ms after running dry. The
-4 KiB frame buffer, the playback buffer and the writer's stack exist only
-while a stream plays.
+so playback is split: the stream reader passes audio straight from the HTTP
+reads into an 8 KiB buffer (about 256 ms) and a writer task at the capture
+task's priority feeds the codec after 200 ms of prebuffer, refilling 100 ms
+after running dry. The buffer and the writer are reserved once at boot:
+allocating them per reply fragmented the heap (after one spoken reply the
+largest free block fell from 59 KiB to 35 KiB while the minimum free heap
+reached 26.7 KiB).
 
 The resting ticker draws one still line and animates only the 0.25 s slide
 between lines, so it costs almost nothing to render. The orb sits 8 px below the mode marks so the thinking arc
