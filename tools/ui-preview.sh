@@ -33,7 +33,7 @@ main="$repo_root/firmware/main"
     "$repo_root/firmware/tests/vendor/cjson/cJSON.c" \
     "$repo_root/firmware/components/bsp/src/bsp_display_rounding.c" \
     "$repo_root/firmware/assets/fonts/memo_font_16.c" "$repo_root/firmware/assets/fonts/memo_font_20.c" \
-    "$repo_root/firmware/assets/fonts/memo_font_meta_16.c" \
+    "$repo_root/firmware/assets/fonts/memo_font_meta_16.c" "$repo_root/firmware/assets/fonts/memo_font_emoji_16.c" \
     "$library" -lm -no-pie -Wl,--unresolved-symbols=ignore-all -o "$work/preview"
 rm -rf "$work/frames" && mkdir -p "$work/frames"
 "$work/preview" "$work/frames" >/dev/null

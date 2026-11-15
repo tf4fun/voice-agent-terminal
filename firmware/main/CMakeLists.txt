@@ -11,4 +11,5 @@ target_sources(${COMPONENT_LIB} PRIVATE
     "${CMAKE_CURRENT_LIST_DIR}/../assets/fonts/memo_font_16.c"
     "${CMAKE_CURRENT_LIST_DIR}/../assets/fonts/memo_font_20.c"
     "${CMAKE_CURRENT_LIST_DIR}/../assets/fonts/memo_font_meta_16.c"
+    "${CMAKE_CURRENT_LIST_DIR}/../assets/fonts/memo_font_emoji_16.c"
 )

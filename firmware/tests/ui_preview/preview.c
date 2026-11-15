@@ -157,7 +157,7 @@ static void scene_chat(const char *out, const char *suffix)
     snprintf(s_view.text_id, sizeof(s_view.text_id), "%s", s_view.message.id);
     snprintf(s_view.message.state, sizeof(s_view.message.state), "%s", "completed");
     s_view.text_kind = AGENT_TEXT_REPLY;
-    g_chat_text = "这篇文章主要讨论了三类推理优化：\n1. KV 缓存复用，减少重复计算；\n2. 投机解码，用小模型先猜再由大模型校验；\n3. 量化与算子融合，降低显存带宽压力。作者认为在端侧场景里，第三点收益最明显。";
+    g_chat_text = "明天杭州 12°C～18°C，午后有雨 🌧️，记得带伞 ☂️\n① 气温：比今天低 3℃\n② 湿度 ≈ 85%，体感偏凉\n③ 空气质量良 ✅\n繁體也能顯示，人名「张喆」「王堃」也没问题 👍";
     show(AGENT_PAGE_CHAT);
     snprintf(name, sizeof(name), "06-chat-reply-%s", suffix);
     save(out, name);

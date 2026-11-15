@@ -63,8 +63,9 @@ static lv_obj_t *s_rows[4], *s_row_titles[4], *s_row_details[4];
 static lv_obj_t *s_row_badges[4], *s_row_initials[4];
 static bool s_row_selected[4];
 static lv_obj_t *s_scroll, *s_text, *s_arc, *s_clock, *s_record_dot;
-#define AGENT_WAVE_BARS 16
-#define AGENT_WAVE_PITCH 10
+#define AGENT_WAVE_BARS 3
+#define AGENT_WAVE_WIDTH 10
+#define AGENT_WAVE_PITCH 18
 #define AGENT_WAVE_CENTER 166
 static lv_obj_t *s_wave[AGENT_WAVE_BARS];
 static uint8_t s_levels[AGENT_WAVE_BARS];
@@ -263,12 +264,12 @@ static void build_screen(agent_page_t page)
             lv_obj_set_pos(s_record_dot, 18, 11);
             s_status = label(pill, 30, -1, 80, false, UI_DIM);
             lv_obj_set_style_text_align(s_status, LV_TEXT_ALIGN_CENTER, 0);
-            const int wave_x = (BSP_LCD_W - AGENT_WAVE_BARS * AGENT_WAVE_PITCH + 4) / 2;
+            const int wave_x = (BSP_LCD_W - (AGENT_WAVE_BARS - 1) * AGENT_WAVE_PITCH - AGENT_WAVE_WIDTH) / 2;
             for (int i = 0; i < AGENT_WAVE_BARS; i++) {
                 s_wave[i] = lv_obj_create(s_screen);
-                memo_ui_flat_rect(s_wave[i], UI_ACCENT, 3);
-                lv_obj_set_pos(s_wave[i], wave_x + i * AGENT_WAVE_PITCH, AGENT_WAVE_CENTER - 3);
-                lv_obj_set_size(s_wave[i], 6, 6);
+                memo_ui_flat_rect(s_wave[i], UI_ACCENT, AGENT_WAVE_WIDTH / 2);
+                lv_obj_set_pos(s_wave[i], wave_x + i * AGENT_WAVE_PITCH, AGENT_WAVE_CENTER - AGENT_WAVE_WIDTH / 2);
+                lv_obj_set_size(s_wave[i], AGENT_WAVE_WIDTH, AGENT_WAVE_WIDTH);
             }
             lv_obj_t *transcript = memo_ui_card(s_screen, 16, 204, BSP_LCD_W - 32, 100, NULL);
             lv_obj_set_style_pad_all(transcript, 0, 0);
@@ -546,10 +547,13 @@ static void render(void)
             lv_obj_set_style_text_color(s_text, lv_color_hex(s_view.text.text[0] ? UI_FG : UI_DIM), 0);
         lv_obj_update_layout(s_scroll);
         lv_obj_scroll_to_y(s_scroll, lv_obj_get_scroll_y(s_scroll) + lv_obj_get_scroll_bottom(s_scroll), LV_ANIM_OFF);
-        memmove(s_levels, s_levels + 1, sizeof(s_levels) - 1);
-        s_levels[AGENT_WAVE_BARS - 1] = listening ? agent_capture_level() : 0;
+        // A symmetric three-bar meter: rise immediately, fall back gently. The
+        // outer bars follow the centre at 60 %, so only one small area redraws.
+        const uint8_t level = listening ? agent_capture_level() : 0;
+        s_levels[0] = level > s_levels[0] ? level : (uint8_t)(s_levels[0] * 3 / 4);
         for (int i = 0; i < AGENT_WAVE_BARS; i++) {
-            const int height = 6 + s_levels[i] * 52 / 100;
+            const int span = i == AGENT_WAVE_BARS / 2 ? 50 : 30;
+            const int height = AGENT_WAVE_WIDTH + s_levels[0] * span / 100;
             if (lv_obj_get_height(s_wave[i]) == height) continue;
             lv_obj_set_y(s_wave[i], AGENT_WAVE_CENTER - height / 2);
             lv_obj_set_height(s_wave[i], height);

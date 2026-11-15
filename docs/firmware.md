@@ -55,7 +55,8 @@ the recording red. Session rows are rounded cards with a title-initial badge,
 and today's sessions show only the time. A two-dot indicator under the header
 marks the Sessions/Settings root cycle. The light palette avoids pure white,
 which glares on the small backlit panel. The recording page shows a large timer,
-a status pill, sixteen rounded level bars and a transcript card. Empty states,
+a status pill, a symmetric three-bar level meter (short outer bars, tall centre)
+and a transcript card. Empty states,
 provisioning and settings use accent-tinted circular icon badges, and numeric
 setting values use large figures with a pill meter. The design adds no shadows,
 gradients or translucent layers, and its animations are the two existing
@@ -453,8 +454,15 @@ time-zone settings. The implementation and latest build are recorded below.
 ## Fonts and coverage
 
 Chat and session titles use Noto Sans SC Bold at 16 px. The inventory includes
-all 6,763 GB2312 level-one and level-two Chinese characters, plus Latin and
-punctuation, for 7,040 emitted code points. Chinese curly double and single quotes
+all of GB2312, including its symbol rows, all 20,902 GBK ideographs
+U+4E00-U+9FA5 for traditional and rare characters, and the Noto Sans SC glyphs
+for Latin-1/Latin Extended-A, Greek, Cyrillic, kana, arrows, math operators,
+enclosed numerals, box drawing, geometric and miscellaneous symbols and fullwidth
+forms, for 22,668 emitted code points. Temperatures such as `12°C` and `℃` render
+directly. A 16 px monochrome Noto Emoji 3.002 font supplies 1,353 emoji absent
+from Noto Sans SC as the chat font's fallback. Variation selectors, zero-width
+joiners, keycap marks and skin-tone modifiers are removed before display, so a
+joined sequence shows its component emoji. Chinese curly double and single quotes
 (U+2018/U+2019/U+201C/U+201D), en/em dashes, ellipsis and common typographic marks
 are included in both the chat and 20 px UI inventories. The reported missing
 character U+6E25 is covered. The 20 px Regular UI font falls back to this expanded
@@ -471,12 +479,15 @@ provenance accompany the assets. Reproduce the maintained payloads using the
 pinned converter and licensed source files.
 
 ```sh
-python3 tools/generate_memo_fonts.py --check \
-  --source-dir /path/to/NotoSansSC \
+python3 tools/generate_memo_fonts.py --check --fetch \
+  --source-dir /path/to/font-sources \
   --converter /path/to/lv_font_conv
 ```
 
-Host checks cover both GB2312 Chinese levels, generated payload hashes, fixed UI
+The expanded inventories add about 1.6 MB of constant Flash and no RAM.
+
+Host checks cover both GB2312 Chinese levels, the GBK ideograph range, common
+reply symbols, emoji fallback separation, generated payload hashes, fixed UI
 strings and the proportional battery width. Native LVGL checks also exercise the
 real glyph descriptors, U+6E25 rendering, the 20 px fallback and 40-line partial
 rendering. Owned whole-message snapshots preserve and render curly quotations

@@ -37,6 +37,14 @@ for high in range(0xB0, 0xF8):
             continue
         assert character in coverage["memo_font_16.c"], character
 assert "渥" in coverage["memo_font_16.c"]
+# Chat replies use temperatures, math, arrows, list markers and Western names.
+for symbol in "°℃±×÷≈≤≥→←①②★√µ²½€£©é ü αβ ДЖ あア ─│":
+    assert symbol == " " or symbol in coverage["memo_font_16.c"], symbol
+# GBK ideographs cover traditional characters and rare given names.
+assert all(chr(code) in coverage["memo_font_16.c"] for code in range(0x4E00, 0x9FA6))
+assert set("✅😊🌧👍🎉❤☔") <= coverage["memo_font_16.c"] | coverage["memo_font_emoji_16.c"]
+assert not coverage["memo_font_emoji_16.c"] & coverage["memo_font_16.c"]
+assert manifest["outputs"]["memo_font_emoji_16.c"]["line_height"] <= manifest["outputs"]["memo_font_16.c"]["line_height"]
 # Chat content and UI labels retain Chinese quotation marks and common punctuation.
 common_punctuation = set("‘’“”‚„–—‐‑‒―•‧‥…‰′″‵※")
 assert common_punctuation <= coverage["memo_font_16.c"]

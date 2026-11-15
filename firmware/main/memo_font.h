@@ -10,6 +10,7 @@
 LV_FONT_DECLARE(memo_font_16);
 LV_FONT_DECLARE(memo_font_20);
 LV_FONT_DECLARE(memo_font_meta_16);
+LV_FONT_DECLARE(memo_font_emoji_16);
 
 /* 建立带 fallback 的可写描述符。必须在创建任何控件之前、持 LVGL 锁调用一次。 */
 void memo_fonts_init(void);
@@ -17,7 +18,8 @@ void memo_fonts_init(void);
 /* 20 px Regular UI text, falling back to the expanded 16 px chat font. */
 const lv_font_t *memo_font_body(void);
 
-/* 16 px Bold chat and labels, including both GB2312 Chinese levels. */
+/* 16 px Bold chat and labels: GB2312, GBK ideographs and common symbols, falling
+ * back to 16 px monochrome emoji. */
 const lv_font_t *memo_font_label(void);
 
 /* 16 px Regular ASCII for dates and battery percentages. */
