@@ -983,6 +983,7 @@ static bool upload_audio(const char *session, const char *segment, uint32_t revi
     }
     agent_capture_end();
     while (agent_capture_running()) vTaskDelay(pdMS_TO_TICKS(10));
+    agent_capture_release(); // Spoken replies may use the shared buffer again.
     if (agent_capture_error() != ESP_OK || sent < 3200 || s_cancelled) ok = false;
     lock();
     s_view.capture = AGENT_FINALIZING;

@@ -55,6 +55,9 @@ func TestVoiceAndSpeechEventsRender(t *testing.T) {
 	if got := describe(Event{Type: typeSpeech, A: 0, B: 1, Tag: "dry 1 r1"}); got != "朗读结束：读完（到第 2 句），断流 1 次，断线续播 1 次" {
 		t.Fatal(got)
 	}
+	if got := describe(Event{Type: typeSpeech, A: 2, B: 6, Tag: "d6 g82 r2"}); got != "朗读结束：被停止（到第 7 句），断流 6 次，最长 8.2 秒没收到数据，断线续播 2 次" {
+		t.Fatal(got)
+	}
 	if got := describe(Event{Type: typeWifi, A: 200, B: -54}); got != "Wi-Fi 断开：信标超时（信号 -54 dBm）" {
 		t.Fatal(got)
 	}

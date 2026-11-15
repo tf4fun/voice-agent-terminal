@@ -134,6 +134,7 @@ void memo_discovery_confirm(const memo_endpoint_t *endpoint) { (void)endpoint; }
 void memo_discovery_invalidate(const memo_endpoint_t *endpoint) { (void)endpoint; }
 esp_err_t agent_capture_begin(void) { capture_running=true;return ESP_OK; }
 void agent_capture_end(void) { capture_running=false; }
+void agent_capture_release(void) {}
 bool agent_capture_running(void) { return capture_running; }
 esp_err_t agent_capture_error(void) { return ESP_OK; }
 size_t agent_capture_read(void *buffer, size_t capacity, uint32_t timeout)

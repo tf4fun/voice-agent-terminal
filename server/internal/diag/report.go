@@ -231,8 +231,16 @@ func describe(e Event) string {
 		return fmt.Sprintf("诊断上报（%s）%s", TriggerLabel(triggerName(int(e.A))), result)
 	case typeSpeech:
 		text := fmt.Sprintf("朗读结束：%s（到第 %d 句）", pick(speechEnds, int(e.A)), e.B+1)
-		var dry, resumes int
-		if n, _ := fmt.Sscanf(e.Tag, "dry %d r%d", &dry, &resumes); n >= 1 {
+		var dry, gap, resumes int
+		if n, _ := fmt.Sscanf(e.Tag, "d%d g%d r%d", &dry, &gap, &resumes); n == 3 {
+			text += fmt.Sprintf("，断流 %d 次", dry)
+			if gap >= 5 {
+				text += fmt.Sprintf("，最长 %.1f 秒没收到数据", float64(gap)/10)
+			}
+			if resumes > 0 {
+				text += fmt.Sprintf("，断线续播 %d 次", resumes)
+			}
+		} else if n, _ := fmt.Sscanf(e.Tag, "dry %d r%d", &dry, &resumes); n >= 1 {
 			text += fmt.Sprintf("，断流 %d 次", dry)
 			if n == 2 && resumes > 0 {
 				text += fmt.Sprintf("，断线续播 %d 次", resumes)

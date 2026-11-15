@@ -5,12 +5,14 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "agent_pcm_pool.h"
 #include "agent_speech_frames.h"
 #include "agent_trace.h"
 #include "bsp_audio.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/stream_buffer.h"
@@ -21,14 +23,13 @@
 
 static const char *TAG = "agent_speech";
 
-// The I2S DMA ring holds only 90 ms, so the network reader queues PCM here and
-// a writer task feeds the codec. Both buffers and the writer are reserved once
-// at boot: allocating ~11 KiB per reply fragmented the heap (the largest free
-// block fell from 59 KiB to 35 KiB after one spoken reply).
+// The I2S DMA ring holds only 90 ms, so the network reader queues PCM in the
+// 16 KiB buffer shared with recording (agent_pcm_pool) and a writer task feeds
+// the codec. The buffer and the writer are reserved once at boot: allocating
+// them per reply fragmented the heap.
 enum {
-    PLAY_BUFFER = 8192, // ~256 ms of 16 kHz PCM16
-    PLAY_START = 6400,  // Prebuffer 200 ms before the first sound...
-    PLAY_RESUME = 3200, // ...and 100 ms after running dry.
+    PLAY_START = 12800, // Prebuffer 400 ms before the first sound...
+    PLAY_RESUME = 6400, // ...and 200 ms after running dry.
     WRITER_STACK = 2560,
 };
 
@@ -39,15 +40,15 @@ static char s_request_session[37], s_request_message[37];
 static atomic_uint s_request;   // Incremented by play/stop; the task follows the latest.
 static atomic_bool s_running;   // The task holds a stream (and the speaker).
 
-static StreamBufferHandle_t s_pcm;
-static StaticStreamBuffer_t s_pcm_control;
-static uint8_t s_pcm_storage[PLAY_BUFFER + 1];
+static StreamBufferHandle_t s_pcm; // Borrowed from the pool while a reply plays.
 static StaticTask_t s_writer_tcb;
 static StackType_t s_writer_stack[WRITER_STACK / sizeof(StackType_t)];
 static SemaphoreHandle_t s_writer_done;
 static StaticSemaphore_t s_writer_done_control;
 static atomic_bool s_ended, s_stop;
 static atomic_uint s_underruns; // Times the speaker ran dry mid-stream (diagnostics).
+static _Atomic int64_t s_heard_us; // Last time stream bytes arrived.
+static atomic_uint s_longest_gap_ms; // Longest wait for stream bytes in this reply.
 static uint8_t s_chunk[1024];
 static agent_speech_parser_t s_parser;
 
@@ -86,13 +87,29 @@ static uint8_t loudness(const uint8_t *pcm, size_t bytes)
     return level > 100 ? 100 : (uint8_t)level;
 }
 
+// Ramps PCM16LE samples linearly from silence up (or down to silence). The
+// I2S ring outputs zeros when it runs dry, so an unramped stop or restart
+// mid-waveform is a step the speaker plays as a click.
+static void ramp(uint8_t *pcm, size_t bytes, bool up)
+{
+    const size_t samples = bytes / 2;
+    if (samples == 0) return;
+    for (size_t i = 0; i < samples; i++) {
+        int16_t value = (int16_t)(pcm[2 * i] | (pcm[2 * i + 1] << 8));
+        const int32_t weight = (int32_t)(up ? i : samples - 1 - i);
+        value = (int16_t)((int32_t)value * weight / (int32_t)samples);
+        pcm[2 * i] = (uint8_t)value;
+        pcm[2 * i + 1] = (uint8_t)((uint16_t)value >> 8);
+    }
+}
+
 // Drains the playback buffer into the codec for one stream at a time.
 static void writer_task(void *arg)
 {
     (void)arg;
     for (;;) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-        bool primed = false;
+        bool primed = false, fade_in = true;
         size_t carry = 0; // A received odd byte waits for the rest of its sample.
         for (;;) {
             if (atomic_load(&s_stop)) break;
@@ -110,12 +127,26 @@ static void writer_task(void *arg)
                 // Ran dry: refill a little before speaking again rather than stutter.
                 if (xStreamBufferBytesAvailable(s_pcm) < (size_t)PLAY_RESUME) {
                     primed = false;
+                    fade_in = true;
                     publish_level(0);
-                    ESP_LOGI(TAG, "speech underrun %u", atomic_fetch_add(&s_underruns, 1) + 1);
+                    // Record whether the network went quiet, to tell a stalled
+                    // radio from synthesis that could not keep up.
+                    wifi_ap_record_t ap = {0};
+                    const int rssi = esp_wifi_sta_get_ap_info(&ap) == ESP_OK ? ap.rssi : 0;
+                    ESP_LOGI(TAG, "speech underrun %u: no stream data for %lld ms, rssi %d",
+                             atomic_fetch_add(&s_underruns, 1) + 1,
+                             (long long)((esp_timer_get_time() - atomic_load(&s_heard_us)) / 1000), rssi);
                 }
                 continue;
             }
             const size_t total = carry + got, even = total & ~(size_t)1;
+            // Fade into sound after silence, and out of it when this chunk
+            // empties the buffer before the stream has ended.
+            if (fade_in) { ramp(s_chunk, even, true); fade_in = false; }
+            else if (!atomic_load(&s_ended) && xStreamBufferBytesAvailable(s_pcm) == 0) {
+                ramp(s_chunk, even, false);
+                fade_in = true;
+            }
             publish_level(loudness(s_chunk, even));
             if (even > 0 && bsp_audio_write(s_chunk, even) != ESP_OK) break;
             carry = total - even;
@@ -169,7 +200,26 @@ static bool network_back(unsigned request)
 enum { STREAM_DONE, STREAM_STOPPED, STREAM_BROKEN };
 
 // Reads one connection into the playback buffer; reports how it ended.
+static int read_stream_body(esp_http_client_handle_t client, unsigned request, uint16_t *index, uint8_t *status,
+                            size_t *audio);
+
+// A connection can drop in the middle of a PCM16 sample. The resumed stream
+// starts on a whole sample, so a stray half sample would shift every later
+// sample by one byte and turn the rest of the reply into noise; pad it.
 static int read_stream(esp_http_client_handle_t client, unsigned request, uint16_t *index, uint8_t *status)
+{
+    size_t audio = 0;
+    const int outcome = read_stream_body(client, request, index, status, &audio);
+    if (audio & 1) {
+        const uint8_t pad = 0;
+        while (atomic_load(&s_request) == request && xStreamBufferSend(s_pcm, &pad, 1, pdMS_TO_TICKS(50)) == 0) {}
+        ESP_LOGW(TAG, "speech stream ended mid-sample; padded");
+    }
+    return outcome;
+}
+
+static int read_stream_body(esp_http_client_handle_t client, unsigned request, uint16_t *index, uint8_t *status,
+                            size_t *audio)
 {
     uint8_t buffer[512];
     // IDF reads try to fill the buffer; a short timeout keeps stop requests
@@ -184,7 +234,11 @@ static int read_stream(esp_http_client_handle_t client, unsigned request, uint16
             continue;
         }
         if (got <= 0) return STREAM_BROKEN;
-        heard = esp_timer_get_time();
+        const int64_t now = esp_timer_get_time();
+        const unsigned gap = (unsigned)((now - heard) / 1000);
+        if (gap > atomic_load(&s_longest_gap_ms)) atomic_store(&s_longest_gap_ms, gap);
+        heard = now;
+        atomic_store(&s_heard_us, now);
         size_t offset = 0;
         while (offset < (size_t)got && atomic_load(&s_request) == request) {
             agent_speech_event_t event;
@@ -195,6 +249,7 @@ static int read_stream(esp_http_client_handle_t client, unsigned request, uint16
                 size_t sent = 0;
                 while (sent < event.size && atomic_load(&s_request) == request)
                     sent += xStreamBufferSend(s_pcm, event.data + sent, event.size - sent, pdMS_TO_TICKS(50));
+                *audio += sent;
             } else if (event.kind == AGENT_SPEECH_SENTENCE && event.size >= 2) {
                 *index = (uint16_t)(event.data[0] | (event.data[1] << 8));
                 char sentence[AGENT_SPEECH_SENTENCE_BYTES];
@@ -223,10 +278,13 @@ static void play(unsigned request, const char *session, const char *message)
     uint8_t status = 1;
     uint16_t index = 0;
     int outcome = STREAM_BROKEN, resumes = 0;
-    if (bsp_audio_set_format(16000, 16, 1) == ESP_OK) {
-        // The writer is idle here, so the buffer can be emptied safely.
-        xStreamBufferReset(s_pcm);
+    // Recording owns the shared buffer while it runs; a reply never plays over it.
+    s_pcm = agent_pcm_pool_take(AGENT_PCM_PLAYBACK);
+    if (s_pcm == NULL) status = 2;
+    else if (bsp_audio_set_format(16000, 16, 1) == ESP_OK) {
         atomic_store(&s_underruns, 0);
+        atomic_store(&s_longest_gap_ms, 0);
+        atomic_store(&s_heard_us, esp_timer_get_time());
         atomic_store(&s_ended, false);
         atomic_store(&s_stop, false);
         xTaskNotifyGive(s_writer);
@@ -249,12 +307,16 @@ static void play(unsigned request, const char *session, const char *message)
         while (xSemaphoreTake(s_writer_done, pdMS_TO_TICKS(50)) != pdTRUE)
             if (atomic_load(&s_request) != request) atomic_store(&s_stop, true);
     }
+    if (s_pcm != NULL) agent_pcm_pool_release(AGENT_PCM_PLAYBACK);
+    s_pcm = NULL;
     memo_net_hold_awake(false);
+    // "d<underruns> g<longest network gap, 0.1 s> r<resumes>"
     char tag[AGENT_TRACE_TAG_BYTES];
-    snprintf(tag, sizeof(tag), "dry %u r%d", atomic_load(&s_underruns), resumes);
+    const unsigned gap = atomic_load(&s_longest_gap_ms) / 100;
+    snprintf(tag, sizeof(tag), "d%u g%u r%d", atomic_load(&s_underruns), gap > 999 ? 999 : gap, resumes);
     agent_trace(TRACE_SPEECH, status, index, tag);
-    ESP_LOGI(TAG, "speech end status=%u sentences=%u underruns=%u resumes=%d", status, index + 1,
-             atomic_load(&s_underruns), resumes);
+    ESP_LOGI(TAG, "speech end status=%u sentences=%u underruns=%u longest_gap_ms=%u resumes=%d", status,
+             index + 1, atomic_load(&s_underruns), atomic_load(&s_longest_gap_ms), resumes);
     publish(false, false, index, NULL, NULL);
 }
 
@@ -284,9 +346,8 @@ static void speech_task(void *arg)
 esp_err_t agent_speech_init(void)
 {
     s_lock = xSemaphoreCreateMutex();
-    s_pcm = xStreamBufferCreateStatic(PLAY_BUFFER, 1, s_pcm_storage, &s_pcm_control);
     s_writer_done = xSemaphoreCreateBinaryStatic(&s_writer_done_control);
-    if (s_lock == NULL || s_pcm == NULL || s_writer_done == NULL) return ESP_ERR_NO_MEM;
+    if (s_lock == NULL || s_writer_done == NULL || agent_pcm_pool_init() != ESP_OK) return ESP_ERR_NO_MEM;
     // At the capture task's priority, above LVGL; the two never run together.
     s_writer = xTaskCreateStatic(writer_task, "agent_play", WRITER_STACK / sizeof(StackType_t), NULL, 6,
                                  s_writer_stack, &s_writer_tcb);

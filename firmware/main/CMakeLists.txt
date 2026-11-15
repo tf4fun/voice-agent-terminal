@@ -1,5 +1,5 @@
 idf_component_register(
-    SRCS "agent_app.c" "agent_client.c" "agent_protocol.c" "agent_capture.c" "agent_speech.c" "agent_trace.c" "agent_ui_status.c"
+    SRCS "agent_app.c" "agent_client.c" "agent_protocol.c" "agent_capture.c" "agent_pcm_pool.c" "agent_speech.c" "agent_trace.c" "agent_ui_status.c"
          "memo_settings.c" "memo_ui_settings.c" "memo_ui_common.c"
          "memo_ui_provision.c" "memo_font.c" "memo_text.c"
          "memo_net.c" "memo_discovery.c" "memo_provision.c" "memo_provision_security.c"

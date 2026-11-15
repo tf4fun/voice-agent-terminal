@@ -30,10 +30,11 @@ const (
 	speechMaxStreams = 8
 	speechKeep       = 10 * time.Minute // Finished streams stay replayable.
 	speechIdleCancel = 10 * time.Second // Synthesis stops this long after the last listener leaves.
-	// The first sentence is released once this much audio is ready (or it is
-	// complete), so the device starts with a lead instead of draining its
-	// small buffer while the realtime model warms up.
-	speechLeadBytes = 25600 // 0.8 s of 16 kHz PCM16
+	// The stream opens only once this much audio is ready, across sentences,
+	// so a short first sentence does not drain the device's half-second
+	// buffer while the next one is still being synthesized. Waiting for reply
+	// text or reaching the end releases it early.
+	speechLeadBytes = 64000 // 2 s of 16 kHz PCM16
 )
 
 var ErrSpeechUnavailable = errors.New("speech_unavailable")
@@ -235,6 +236,27 @@ func (s *Service) synthesize(ctx context.Context, stream *speechStream, sessionI
 	wake := s.watchMessage(ctx, messageID)
 	offset, index := 0, 0
 	started := time.Now()
+	var held [][]byte // Frames waiting for the lead.
+	heldBytes, holding := 0, true
+	release := func() bool {
+		for _, f := range held {
+			if !stream.append(f) {
+				return false
+			}
+		}
+		held, holding = nil, false
+		return true
+	}
+	emit := func(f []byte) bool {
+		if !holding {
+			return stream.append(f)
+		}
+		held = append(held, f)
+		if f[0] == FrameAudio {
+			heldBytes += len(f) - 3
+		}
+		return heldBytes < speechLeadBytes || release()
+	}
 	for {
 		if ctx.Err() != nil {
 			stream.end(SpeechCancelled)
@@ -248,6 +270,10 @@ func (s *Service) synthesize(ctx context.Context, stream *speechStream, sessionI
 		final := !activeReply(message.State)
 		sentence, next, ok := speech.Next(message.Reply, offset, final)
 		if !ok {
+			// Nothing more to synthesize yet: holding back would only add delay.
+			if !release() {
+				return
+			}
 			if final {
 				stream.end(SpeechDone)
 				s.Log.Info("speech finished", "message_id", messageID, "sentences", index, "elapsed_ms", time.Since(started).Milliseconds())
@@ -266,36 +292,17 @@ func (s *Service) synthesize(ctx context.Context, stream *speechStream, sessionI
 		if len(text) > 1024 {
 			text = text[:1024]
 		}
-		if !stream.append(frame(FrameSentence, append(payload, text...))) {
+		if !emit(frame(FrameSentence, append(payload, text...))) {
 			return
 		}
 		pending := make([]byte, 0, speechFrameAudio)
-		var held [][]byte // First-sentence frames waiting for the lead.
-		heldBytes, holding := 0, index == 0
-		release := func() bool {
-			for _, f := range held {
-				if !stream.append(f) {
-					return false
-				}
-			}
-			held, holding = nil, false
-			return true
-		}
 		flush := func() bool {
 			if len(pending) == 0 {
 				return true
 			}
 			f := frame(FrameAudio, pending)
 			pending = make([]byte, 0, speechFrameAudio)
-			if holding {
-				held = append(held, f)
-				heldBytes += len(f)
-				if heldBytes < speechLeadBytes {
-					return true
-				}
-				return release()
-			}
-			return stream.append(f)
+			return emit(f)
 		}
 		limited := false
 		err = s.TTS.Speak(ctx, sentence, func(pcm []byte) error {
@@ -315,11 +322,12 @@ func (s *Service) synthesize(ctx context.Context, stream *speechStream, sessionI
 			}
 			return nil
 		})
-		if err == nil && (!flush() || !release()) {
+		if err == nil && !flush() {
 			return
 		}
 		switch {
 		case limited:
+			release()
 			stream.end(SpeechLimit)
 			return
 		case err != nil && ctx.Err() != nil:
@@ -327,6 +335,7 @@ func (s *Service) synthesize(ctx context.Context, stream *speechStream, sessionI
 			return
 		case err != nil:
 			s.Log.Warn("speech synthesis failed", "message_id", messageID, "sentence", index, "error", err.Error())
+			release() // Speak what was synthesized before the failure.
 			stream.end(SpeechFailed)
 			return
 		}
