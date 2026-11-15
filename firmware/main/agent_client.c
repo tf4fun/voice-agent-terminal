@@ -754,6 +754,34 @@ static bool stream_event(const char *json, void *context)
     return ok;
 }
 
+// A message sent from another client (the web page) only shows up in the
+// session's newest turn. While the newest turn is open and settled, check its
+// small metadata now and then and switch to a newer message when one appears;
+// reading older history is left alone.
+static bool poll_latest(agent_view_t *view)
+{
+    if (!view->turn.present || view->turn.after[0] != '\0' || view->turn_anchor[0] == '\0') return true;
+    char path[112];
+    snprintf(path, sizeof(path), "/sessions/%s/turn", view->session_id);
+    agent_turn_t latest;
+    const int status = request(HTTP_METHOD_GET, path, NULL, s_sync_body, sizeof(s_sync_body));
+    if (status != 200 || !agent_parse_turn(s_sync_body, &latest)) return false;
+    if (!latest.present || strcmp(latest.message.id, view->turn_anchor) == 0) return true;
+    lock();
+    const bool selected = still_selected(view) && s_view.chat_request == view->chat_request &&
+        s_view.capture == AGENT_IDLE && s_view.text_kind != AGENT_TEXT_DRAFT &&
+        strcmp(s_view.turn_anchor, view->turn_anchor) == 0;
+    if (selected) {
+        s_view.turn_anchor[0] = '\0'; // Follow the newest turn.
+        s_view.text_kind = AGENT_TEXT_REPLY;
+    }
+    unlock();
+    if (!selected) return true;
+    agent_trace(TRACE_PAGE, 0xfe, 0, "newer turn");
+    agent_client_copy(view);
+    return poll_turn(view);
+}
+
 static bool watch_reply(agent_view_t *view)
 {
     char path[112];
@@ -792,7 +820,7 @@ static bool watch_reply(agent_view_t *view)
 static void sync_task(void *arg)
 {
     (void)arg;
-    int64_t last_list = 0;
+    int64_t last_list = 0, last_latest = 0;
     unsigned failures = 0;
     for (;;) {
         if (!s_paused && connected()) {
@@ -822,6 +850,14 @@ static void sync_task(void *arg)
                 }
                 if (ok && s_read_view.text_kind == AGENT_TEXT_DRAFT) ok = poll_full_draft(&s_read_view);
                 else if (ok && (urgent || s_read_view.chat_loading || !s_read_view.chat_ready)) ok = poll_turn(&s_read_view);
+                else if (ok && s_read_view.chat_ready &&
+                         !agent_message_active(s_read_view.message.state)) {
+                    const int64_t now = esp_timer_get_time();
+                    if (now - last_latest >= 3000000) {
+                        last_latest = now;
+                        ok = poll_latest(&s_read_view);
+                    }
+                }
                 agent_client_copy(&s_read_view);
                 if (ok && s_read_view.text_kind != AGENT_TEXT_DRAFT &&
                     s_read_view.turn.present && agent_message_active(s_read_view.message.state)) ok = watch_reply(&s_read_view);

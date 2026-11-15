@@ -570,6 +570,40 @@ static size_t unchunk(const char *in, size_t length, char *out)
     return used;
 }
 
+// A message sent from the web page becomes the newest turn; an open, settled
+// newest turn follows it, while reading older history does not jump.
+static void test_follows_newer_turn_from_other_client(void)
+{
+    static const char newer[]=
+        "{\"message\":{\"id\":\"00000000-0000-4000-8000-000000000003\",\"state\":\"waiting\","
+        "\"revision\":1,\"input_bytes\":5,\"reply_bytes\":0},"
+        "\"before\":\"00000000-0000-4000-8000-000000000002\",\"after\":\"\"}";
+    setup();
+    injected_response=turn_response;
+    s_view.text_kind=AGENT_TEXT_REPLY;s_view.chat_loading=true;
+    agent_view_t view=s_view;
+    CHECK(poll_turn(&view));
+    CHECK(strcmp(s_view.turn_anchor,"00000000-0000-4000-8000-000000000002")==0);
+    // Same newest message: nothing changes.
+    view=s_view;
+    const uint32_t generation=s_view.text_generation;
+    CHECK(poll_latest(&view));
+    CHECK(s_view.text_generation==generation);
+    // A newer message appears.
+    whole_input="hello";whole_reply="";injected_response=newer;
+    s_view.text_kind=AGENT_TEXT_INPUT;
+    view=s_view;
+    CHECK(poll_latest(&view));
+    CHECK(strcmp(s_view.turn_anchor,"00000000-0000-4000-8000-000000000003")==0);
+    CHECK(s_view.text_kind==AGENT_TEXT_REPLY && strcmp(s_input_text,"hello")==0);
+    // Reading an older exchange (one with a newer neighbour) stays put.
+    strcpy(s_view.turn.after,"00000000-0000-4000-8000-000000000009");
+    strcpy(s_view.turn_anchor,"00000000-0000-4000-8000-000000000002");
+    view=s_view;
+    CHECK(poll_latest(&view));
+    CHECK(strcmp(s_view.turn_anchor,"00000000-0000-4000-8000-000000000002")==0);
+}
+
 static void test_failure_report_upload(void)
 {
     setup();
@@ -618,6 +652,7 @@ int main(void)
     test_retry_accepts_server_message();
     for(enum capture_case item=CAPTURE_NORMAL;item<=CAPTURE_SHORT;item++)test_capture(item);
     test_failure_report_upload();
+    test_follows_newer_turn_from_other_client();
     clear_message_cache();
     printf("client regression assertions failed=%u\n",failed);
     return failed?1:0;

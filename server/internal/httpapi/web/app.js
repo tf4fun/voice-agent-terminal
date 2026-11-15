@@ -701,11 +701,14 @@ async function reconcileOnce() {
     for (const meta of page.items.slice().reverse()) {
       let message = findMessage(meta.id);
       if (!message) {
+        // Sent from the device or another page: show it and follow, like a new turn here.
         message = makeMessage(meta);
         state.messages.push(message);
         message.loading = true;
         try { await fetchContent(message); } finally { message.loading = false; }
+        if (sequence !== state.threadSequence) return;
         renderThread();
+        scrollToBottom(true); // Instant, so later deltas still see the view at the bottom.
         continue;
       }
       if (message.state !== meta.state || ACTIVE.has(meta.state)) {
@@ -1083,7 +1086,7 @@ async function send() {
     state.draft.dirty = false;
     ui.input.value = "";
     renderThread();
-    scrollToBottom(false);
+    scrollToBottom(true);
     const session = currentSession();
     if (session && session.title === DEFAULT_TITLE) {
       request(`/sessions/${id}`, { method: "PATCH", json: { title: titleFrom(text) } })

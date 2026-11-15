@@ -52,6 +52,8 @@ or is chosen in the sidebar. Narrow screens use a slide-in sidebar.
   edit, append or deletions at the reviewed revision), then sends that
   revision; a draft that is still recording returns a busy notice. A new
   conversation creates its session on the first send and is titled from it.
+- A message sent from the device appears as soon as its first event arrives,
+  and the view follows it to the bottom while its reply streams.
 - Failed or unconfirmed replies offer retry on the latest exchange. Messages and
   code blocks can be copied, including on plain-HTTP LAN pages.
 - `#/c/<session-id>` links open a session directly. Ctrl/Cmd+K starts a new

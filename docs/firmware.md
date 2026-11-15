@@ -26,6 +26,13 @@ idle, at most once per 15 s and 30 times per boot; a failed upload stays pending
 The upload streams chunked JSON from a 5.4 KiB heap snapshot held only during the
 request. Reports never contain audio, transcripts or credentials.
 
+## Following messages from other clients
+
+While a conversation shows its newest exchange and that reply has settled, the
+sync task reads the session's newest turn metadata every 3 s. When the web page
+(or another client) has sent a newer message, the device switches to it and
+streams its reply. Reading an older exchange is not interrupted.
+
 ## Screens and controls
 
 | Screen | Short press | Long press |

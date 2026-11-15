@@ -177,6 +177,9 @@ func describe(e Event) string {
 		}
 		return fmt.Sprintf("手势 %s %s（%s）", pick(buttons, int(e.A)), kind, pageState(e.Tag))
 	case typePage:
+		if e.A == 0xfe {
+			return "切换到更新的一轮对话（来自其他客户端）"
+		}
 		return "页面 → " + pick(pages, int(e.A))
 	case typeCapture:
 		return "录音状态 → " + pick(captures, int(e.A))
