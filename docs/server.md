@@ -31,18 +31,39 @@ Local data and environment files are ignored by Git. Bind network exposure and
 device credentials to the intended LAN deployment. A configured Hermes API
 server provides the matching `HERMES_API_KEY` value and API-created sessions.
 
-## Session management page
+## Web chat
 
-Open the server root, such as `http://localhost:8080/`, to manage the device
-session index. The embedded page provides 20-entry list pages, chronological
-complete question/reply previews, and deletion with confirmation. Narrow screens switch
-between the list and detail views. The assets are compiled into the Go binary
-using the standard library's `embed` and `net/http` support.
+Open the server root, such as `http://localhost:8080/`, for a chat client that
+shares sessions, drafts and replies with the device. Its layout follows common
+chat web apps: a sidebar of sessions grouped by recent activity with title
+search, rename and delete, and a conversation column with a composer. Colors
+reuse the device's light and dark palette roles; the theme follows the system
+or is chosen in the sidebar. Narrow screens use a slide-in sidebar.
 
-If `VOICE_API_KEY` is configured, enter that gateway key on the page. The public
-HTML/CSS/JavaScript shell serves the interface assets. API requests use bearer
-authentication and same-origin mutation protection. The page keeps
-the entered key in memory for the open page lifetime.
+- Replies stream live through `GET /api/v1/events`, read with `fetch` so the
+  bearer key can be sent. Deltas apply at their UTF-8 byte offsets; a gap or
+  `chat.reset` refetches the complete reply, and a reconnect reconciles the
+  newest page of messages. Replies render a safe Markdown subset (headings,
+  lists, quotes, tables, code blocks with copy, links) built as DOM nodes,
+  never as HTML strings.
+- The composer edits the session's shared draft. A voice draft from the device
+  appears in it, and while the device records, a status line shows the live
+  transcript. Sending makes the draft equal to the composer text (one segment
+  edit, append or deletions at the reviewed revision), then sends that
+  revision; a draft that is still recording returns a busy notice. A new
+  conversation creates its session on the first send and is titled from it.
+- Failed or unconfirmed replies offer retry on the latest exchange. Messages and
+  code blocks can be copied, including on plain-HTTP LAN pages.
+- `#/c/<session-id>` links open a session directly. Ctrl/Cmd+K starts a new
+  conversation; Enter sends and Shift+Enter inserts a line break.
+
+If `VOICE_API_KEY` is configured, enter that gateway key on the page. It stays in
+page memory unless "remember in this browser" is checked, which stores it in
+`localStorage` until sign-out. The public HTML/CSS/JavaScript/icon shell
+contains no session data or credentials; API requests use bearer
+authentication and same-origin mutation protection, and the page's content
+security policy allows only same-origin resources. The assets are compiled into
+the Go binary with the standard library's `embed` support.
 
 Deletion uses the existing session API and synchronizes the corresponding
 Hermes session. A pending deletion remains visible until synchronization
@@ -301,6 +322,18 @@ exercises editing and sending, and verifies persistence after a restart.
 and uploads both architecture artifacts. A `v*` tag also publishes them as
 release assets. Real provider credentials, LAN mDNS,
 microphone accuracy/latency and device RAM remain integration acceptance work.
+
+## Web chat validation on 2026-11-15
+
+Go tests passed, including the public asset check for `/ui/icon.svg`. A local
+gateway with fake ASR and a fake streaming Hermes was driven in headless
+Chromium: key rejection and sign-in, first-send session creation and titling,
+streaming with Markdown tables, nested lists and code blocks, a second message,
+a device-appended draft appearing in the composer, a staged device recording
+showing its live transcript and committed text, Ctrl+K, rename, reload with a
+`#/c/` link, remembered key, dark theme, deletion, and a 390-pixel layout
+without horizontal scrolling. The deployed gateway still needs a check against
+the live Hermes.
 
 ## Management validation on 2026-11-13
 

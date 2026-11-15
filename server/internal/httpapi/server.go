@@ -31,6 +31,7 @@ func New(service *gateway.Service) http.Handler {
 	mux.HandleFunc("GET /{$}", managementAsset(managementHTML, "text/html; charset=utf-8"))
 	mux.HandleFunc("GET /ui/app.css", managementAsset(managementCSS, "text/css; charset=utf-8"))
 	mux.HandleFunc("GET /ui/app.js", managementAsset(managementJS, "text/javascript; charset=utf-8"))
+	mux.HandleFunc("GET /ui/icon.svg", managementAsset(managementIcon, "image/svg+xml"))
 	handle := func(pattern string, handler http.HandlerFunc) {
 		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
 			for _, parameter := range []string{"session", "segment", "message"} {

@@ -12,7 +12,7 @@ import (
 
 func TestManagementShellIsPublicAndAPIsStayAuthenticated(t *testing.T) {
 	e := setup(t)
-	for _, path := range []string{"/", "/ui/app.css", "/ui/app.js"} {
+	for _, path := range []string{"/", "/ui/app.css", "/ui/app.js", "/ui/icon.svg"} {
 		response, err := e.server.Client().Get(e.server.URL + path)
 		if err != nil {
 			t.Fatal(err)
