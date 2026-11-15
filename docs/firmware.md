@@ -70,8 +70,14 @@ A three-minute observation covered two successful recordings (0.9 s and 5.8 s,
 both `audio response=200`) without a PCM queue overflow. Minimum free heap was
 71,060 bytes and the lowest sampled largest block was 65,536 bytes. The earlier
 sixteen-bar build `fcc93bb` overflowed the PCM queue once in two recordings,
-which led to the three-bar meter. More recordings are needed before treating
-capture headroom as settled.
+which led to the three-bar meter. A five-minute run of nine recordings then
+showed the real cause: seven succeeded (up to 57.9 s), while the first recording
+in a new session and the first after about 30 s idle overflowed at 2.8-2.9 s.
+The gateway did not read the upload until the OpenAI session reported
+`session.updated`, about 2.5 s on a cold connection through the proxy, so TCP
+backpressure filled the 8 KiB device queue. The gateway now prefetches up to
+16 MiB of upload per capture (see the server document). Minimum free heap in
+that run was 67,304 bytes with a 65,536-byte lowest largest block.
 
 `tools/ui-preview.sh` renders every screen on the host in both themes with the
 locked LVGL version and the production `agent_app.c`, writing PNG frames and

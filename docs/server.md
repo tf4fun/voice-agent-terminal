@@ -99,6 +99,13 @@ An upstream session's API source is verified before deletion.
 
 ## Drafts and audio
 
+Audio uploads are drained from the first byte, while the OpenAI realtime session
+is still opening. A cold handshake through a proxy takes about 2.5 s; before this
+change the gateway did not read the body until `session.updated`, so TCP
+backpressure overflowed the device's 8 KiB PCM queue at 2.8-2.9 s. The prefetch
+holds up to 16 MiB per capture, more than a full 300 s 16 kHz recording, and
+allocates chunks only as audio arrives. The request's byte limit stays in force.
+
 `GET /api/v1/sessions/{id}/draft` returns one consistent draft revision and a
 metadata page. Each item includes segment identity, state, size and a preview.
 `GET /api/v1/sessions/{id}/draft/text` reads the joined draft text and its

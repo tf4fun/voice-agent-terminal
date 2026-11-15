@@ -34,6 +34,9 @@ func (o *OpenAI) Enabled() bool { return o.APIKey != "" }
 func (o *OpenAI) Transcribe(parent context.Context, input io.ReadCloser, rate int, emit func(Update) error) error {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
+	// Keep draining the device upload while the upstream session opens.
+	input = newPrefetch(input, PrefetchBytes)
+	defer input.Close()
 	connection, response, err := websocket.DefaultDialer.DialContext(ctx, o.URL, http.Header{"Authorization": {"Bearer " + o.APIKey}})
 	if err != nil {
 		if response != nil {
