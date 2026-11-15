@@ -300,6 +300,9 @@ func (s *Server) draft(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"revision": session.Revision, "items": items, "limit": limit, "offset": offset, "has_more": hasMore, "total": total})
 }
 
+// prepareWait bounds the transcriber handshake during segment creation.
+const prepareWait = 3 * time.Second
+
 func (s *Server) addSegment(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		ID       string `json:"id"`
@@ -330,6 +333,12 @@ func (s *Server) addSegment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.service.Events.Publish(events.Event{Type: "draft.updated", SessionID: r.PathValue("session"), SegmentID: body.ID, Revision: revision})
+	if body.Text == "" {
+		// The device is still on its preparing screen; open the transcriber now
+		// so recording starts against a ready session. Bounded below the
+		// device's 4 s request timeout.
+		s.service.PrepareCapture(body.ID, prepareWait)
+	}
 	writeJSON(w, 201, map[string]any{"id": body.ID, "revision": revision})
 }
 

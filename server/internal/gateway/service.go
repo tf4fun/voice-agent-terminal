@@ -21,6 +21,14 @@ type capture struct {
 	cancel     context.CancelFunc
 }
 
+// preparedTTL bounds how long an unused upstream session stays open.
+var preparedTTL = 30 * time.Second
+
+type preparedCapture struct {
+	session asr.Prepared
+	timer   *time.Timer
+}
+
 type Service struct {
 	Store        *store.Store
 	Config       config.Config
@@ -32,6 +40,7 @@ type Service struct {
 	lifecycleMu  sync.Mutex
 	lifecycles   map[string]*sessionLifecycleLock
 	captures     map[string]capture
+	prepared     map[string]*preparedCapture
 	captureSlots chan struct{}
 	wake         chan struct{}
 	workers      sync.WaitGroup
@@ -44,6 +53,7 @@ func New(st *store.Store, cfg config.Config, client *hermes.Client, transcriber 
 		Events: events.NewHub(), Log: logger,
 		lifecycles:   make(map[string]*sessionLifecycleLock),
 		captures:     make(map[string]capture),
+		prepared:     make(map[string]*preparedCapture),
 		captureSlots: make(chan struct{}, 4),
 		wake:         make(chan struct{}, 1),
 	}
@@ -105,6 +115,11 @@ func (s *Service) Close() {
 	for _, active := range s.captures {
 		active.cancel()
 	}
+	for id, entry := range s.prepared {
+		entry.timer.Stop()
+		_ = entry.session.Close()
+		delete(s.prepared, id)
+	}
 	s.mu.Unlock()
 	s.workers.Wait()
 }
@@ -149,6 +164,62 @@ func (s *Service) Reconcile(ctx context.Context, session model.Session) error {
 	}
 	s.Events.Publish(events.Event{Type: "session.updated", SessionID: session.ID})
 	return err
+}
+
+// PrepareCapture opens the upstream transcription session for a recording
+// segment while the device shows its preparing animation. It waits at most
+// wait; a slower or failed handshake leaves the upload to open its own session.
+func (s *Service) PrepareCapture(segmentID string, wait time.Duration) {
+	preparer, ok := s.ASR.(asr.Preparer)
+	if !ok || s.ASR == nil || !s.ASR.Enabled() {
+		return
+	}
+	s.mu.Lock()
+	full := len(s.prepared) >= cap(s.captureSlots)
+	s.mu.Unlock()
+	if full {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), wait)
+	defer cancel()
+	started := time.Now()
+	session, err := preparer.Prepare(ctx)
+	if err != nil {
+		s.Log.Warn("transcription session not prepared", "segment_id", segmentID,
+			"elapsed_ms", time.Since(started).Milliseconds(), "error", err.Error())
+		return
+	}
+	s.Log.Info("transcription session prepared", "segment_id", segmentID, "elapsed_ms", time.Since(started).Milliseconds())
+	entry := &preparedCapture{session: session}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if old := s.prepared[segmentID]; old != nil && old.timer.Stop() {
+		_ = old.session.Close()
+	}
+	entry.timer = time.AfterFunc(preparedTTL, func() {
+		s.mu.Lock()
+		if s.prepared[segmentID] == entry {
+			delete(s.prepared, segmentID)
+		}
+		s.mu.Unlock()
+		_ = session.Close()
+	})
+	s.prepared[segmentID] = entry
+}
+
+// takePrepared hands a prepared session to exactly one upload.
+func (s *Service) takePrepared(segmentID string) asr.Prepared {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entry := s.prepared[segmentID]
+	if entry == nil {
+		return nil
+	}
+	delete(s.prepared, segmentID)
+	if !entry.timer.Stop() {
+		return nil // Expiry is already closing it.
+	}
+	return entry.session
 }
 
 func (s *Service) CancelCapture(segmentID string) {
@@ -263,7 +334,7 @@ func (s *Service) Capture(parent context.Context, sessionID, segmentID string, r
 	}
 	s.Events.Publish(events.Event{Type: "draft.updated", SessionID: sessionID, SegmentID: segmentID, Status: "capturing"})
 	finalized := false
-	err = s.ASR.Transcribe(ctx, input, rate, func(update asr.Update) error {
+	emit := func(update asr.Update) error {
 		state := "capturing"
 		if update.Final {
 			state = "ready"
@@ -279,9 +350,21 @@ func (s *Service) Capture(parent context.Context, sessionID, segmentID string, r
 		}
 		s.Events.Publish(events.Event{Type: "draft.updated", SessionID: sessionID, SegmentID: segmentID, Revision: next, Status: state})
 		return nil
-	})
+	}
+	prepared := s.takePrepared(segmentID)
+	if preparer, ok := s.ASR.(asr.Preparer); ok && prepared != nil {
+		err = preparer.TranscribePrepared(ctx, prepared, input, rate, emit)
+	} else {
+		if prepared != nil {
+			_ = prepared.Close()
+		}
+		err = s.ASR.Transcribe(ctx, input, rate, emit)
+	}
 	if err == nil && !finalized {
 		err = asr.ErrUpstream
+	}
+	if err != nil && parent.Err() == nil {
+		s.Log.Warn("transcription failed", "segment_id", segmentID, "prepared", prepared != nil, "error", err.Error())
 	}
 	return err
 }

@@ -99,8 +99,16 @@ An upstream session's API source is verified before deletion.
 
 ## Drafts and audio
 
-Audio uploads are drained from the first byte, while the OpenAI realtime session
-is still opening. A cold handshake through a proxy takes about 2.5 s; before this
+Creating a recording segment (an empty or replacement segment) opens and
+configures the OpenAI realtime session before the `201` response, waiting at
+most 3 s, below the device's 4 s request timeout. The device keeps its preparing
+animation until that response, so capture starts against a ready transcriber.
+The prepared session belongs to that segment ID, is handed to exactly one
+upload, and closes after 30 s unused or when the gateway stops. Logs record the
+preparation time and any transcription failure code without credentials.
+
+Audio uploads are also drained from the first byte, covering a handshake slower
+than 3 s or an upload without a prepared session. A cold handshake through a proxy takes about 2.5 s; before this
 change the gateway did not read the body until `session.updated`, so TCP
 backpressure overflowed the device's 8 KiB PCM queue at 2.8-2.9 s. The prefetch
 holds up to 16 MiB per capture, more than a full 300 s 16 kHz recording, and

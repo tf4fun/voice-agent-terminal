@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -461,5 +462,56 @@ func TestRetryRescopesMessageAfterHermesIdentityChange(t *testing.T) {
 	requeued, err := service.Store.Claim(ctx)
 	if err != nil || requeued.ID != id || requeued.UpstreamScope != service.Hermes.Scope() {
 		t.Fatalf("retry kept the retired scope: %+v %v", requeued, err)
+	}
+}
+
+type preparedStub struct{ closed atomic.Int32 }
+
+func (p *preparedStub) Close() error { p.closed.Add(1); return nil }
+
+type preparingASR struct {
+	sessions []*preparedStub
+}
+
+func (*preparingASR) Enabled() bool { return true }
+func (*preparingASR) Transcribe(context.Context, io.ReadCloser, int, func(asr.Update) error) error {
+	return nil
+}
+func (a *preparingASR) Prepare(context.Context) (asr.Prepared, error) {
+	session := &preparedStub{}
+	a.sessions = append(a.sessions, session)
+	return session, nil
+}
+func (*preparingASR) TranscribePrepared(context.Context, asr.Prepared, io.ReadCloser, int, func(asr.Update) error) error {
+	return nil
+}
+
+func TestPreparedCaptureIsTakenOnceAndExpires(t *testing.T) {
+	service, _ := lifecycleFixture(t, lifecycleTransport(func(*http.Request) (*http.Response, error) {
+		return lifecycleResponse(500, `{}`), nil
+	}))
+	fake := &preparingASR{}
+	service.ASR = fake
+	segment := model.NewID()
+	service.PrepareCapture(segment, time.Second)
+	if service.takePrepared(segment) != fake.sessions[0] || service.takePrepared(segment) != nil {
+		t.Fatal("a prepared session must be handed to exactly one upload")
+	}
+	previous := preparedTTL
+	preparedTTL = 20 * time.Millisecond
+	defer func() { preparedTTL = previous }()
+	service.PrepareCapture(segment, time.Second)
+	deadline := time.Now().Add(2 * time.Second)
+	for fake.sessions[1].closed.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if fake.sessions[1].closed.Load() != 1 || service.takePrepared(segment) != nil {
+		t.Fatal("an unused prepared session must expire and close")
+	}
+	preparedTTL = time.Minute
+	service.PrepareCapture(model.NewID(), time.Second)
+	service.Close()
+	if fake.sessions[2].closed.Load() != 1 {
+		t.Fatal("closing the service must close prepared sessions")
 	}
 }

@@ -123,3 +123,55 @@ func TestPrefetchCloseStopsBlockedSource(t *testing.T) {
 		t.Fatal("read after close succeeded")
 	}
 }
+
+// A session prepared during the device's preparing screen carries the upload
+// without a second handshake.
+func TestPreparedSessionTranscribesOnOneConnection(t *testing.T) {
+	var connections atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		connection, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		connections.Add(1)
+		defer connection.Close()
+		var setup any
+		_ = connection.ReadJSON(&setup)
+		_ = connection.WriteJSON(map[string]string{"type": "session.updated"})
+		for {
+			var event struct {
+				Type string `json:"type"`
+			}
+			if err := connection.ReadJSON(&event); err != nil {
+				return
+			}
+			if event.Type == "input_audio_buffer.commit" {
+				_ = connection.WriteJSON(map[string]string{"type": "input_audio_buffer.committed", "item_id": "item"})
+				_ = connection.WriteJSON(map[string]string{"type": "conversation.item.input_audio_transcription.completed",
+					"item_id": "item", "transcript": "准备好了"})
+				return
+			}
+		}
+	}))
+	defer upstream.Close()
+	client := OpenAI{URL: "ws" + strings.TrimPrefix(upstream.URL, "http"), APIKey: "test", Model: "gpt-live-transcribe"}
+	prepareCtx, cancelPrepare := context.WithTimeout(context.Background(), 2*time.Second)
+	prepared, err := client.Prepare(prepareCtx)
+	cancelPrepare() // The prepared session must outlive its preparation deadline.
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var text string
+	err = client.TranscribePrepared(ctx, prepared, io.NopCloser(strings.NewReader(string(make([]byte, 6400)))), 16000,
+		func(update Update) error {
+			if update.Final {
+				text = update.Text
+			}
+			return nil
+		})
+	if err != nil || text != "准备好了" || connections.Load() != 1 {
+		t.Fatalf("prepared transcription: %v %q connections=%d", err, text, connections.Load())
+	}
+}

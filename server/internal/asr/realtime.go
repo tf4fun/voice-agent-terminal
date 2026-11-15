@@ -31,31 +31,45 @@ type OpenAI struct{ URL, APIKey, Model string }
 
 func (o *OpenAI) Enabled() bool { return o.APIKey != "" }
 
-func (o *OpenAI) Transcribe(parent context.Context, input io.ReadCloser, rate int, emit func(Update) error) error {
-	ctx, cancel := context.WithCancel(parent)
-	defer cancel()
-	// Keep draining the device upload while the upstream session opens.
-	input = newPrefetch(input, PrefetchBytes)
-	defer input.Close()
+// Prepared is an upstream session opened before its audio upload arrives.
+type Prepared interface{ Close() error }
+
+// Preparer opens the upstream session while the device shows its preparing
+// animation, so recording starts against a ready transcriber.
+type Preparer interface {
+	Prepare(context.Context) (Prepared, error)
+	TranscribePrepared(context.Context, Prepared, io.ReadCloser, int, func(Update) error) error
+}
+
+type openAIPrepared struct{ connection *websocket.Conn }
+
+func (p *openAIPrepared) Close() error { return p.connection.Close() }
+
+func writeEvent(connection *websocket.Conn, value any) error {
+	_ = connection.SetWriteDeadline(time.Now().Add(15 * time.Second))
+	return connection.WriteJSON(value)
+}
+
+// open dials, configures transcription and waits for session.updated.
+func (o *OpenAI) open(ctx context.Context) (*websocket.Conn, error) {
 	connection, response, err := websocket.DefaultDialer.DialContext(ctx, o.URL, http.Header{"Authorization": {"Bearer " + o.APIKey}})
 	if err != nil {
 		if response != nil {
 			response.Body.Close()
 		}
-		return ErrUpstream
+		return nil, ErrUpstream
 	}
-	defer connection.Close()
-	stopClose := context.AfterFunc(ctx, func() { connection.Close(); input.Close() })
-	defer stopClose()
+	stop := context.AfterFunc(ctx, func() { connection.Close() })
+	fail := func() (*websocket.Conn, error) {
+		stop()
+		connection.Close()
+		return nil, ErrUpstream
+	}
 	connection.SetReadLimit(512 << 10)
 	if deadline, ok := ctx.Deadline(); ok {
 		_ = connection.SetReadDeadline(deadline)
 	}
-	write := func(value any) error {
-		_ = connection.SetWriteDeadline(time.Now().Add(15 * time.Second))
-		return connection.WriteJSON(value)
-	}
-	if err := write(map[string]any{
+	if err := writeEvent(connection, map[string]any{
 		"type": "session.update", "session": map[string]any{
 			"type": "transcription", "audio": map[string]any{"input": map[string]any{
 				"format":         map[string]any{"type": "audio/pcm", "rate": 24000},
@@ -64,22 +78,69 @@ func (o *OpenAI) Transcribe(parent context.Context, input io.ReadCloser, rate in
 			}},
 		},
 	}); err != nil {
-		return ErrUpstream
+		return fail()
 	}
 	for {
 		var event struct {
 			Type string `json:"type"`
 		}
-		if err := connection.ReadJSON(&event); err != nil {
-			return ErrUpstream
-		}
-		if event.Type == "error" {
-			return ErrUpstream
+		if err := connection.ReadJSON(&event); err != nil || event.Type == "error" {
+			return fail()
 		}
 		if event.Type == "session.updated" {
 			break
 		}
 	}
+	// A cancelled context has already closed the connection.
+	if !stop() {
+		connection.Close()
+		return nil, ErrUpstream
+	}
+	_ = connection.SetReadDeadline(time.Time{})
+	return connection, nil
+}
+
+func (o *OpenAI) Prepare(ctx context.Context) (Prepared, error) {
+	connection, err := o.open(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &openAIPrepared{connection: connection}, nil
+}
+
+func (o *OpenAI) Transcribe(parent context.Context, input io.ReadCloser, rate int, emit func(Update) error) error {
+	// Keep draining the device upload while the upstream session opens.
+	input = newPrefetch(input, PrefetchBytes)
+	defer input.Close()
+	connection, err := o.open(parent)
+	if err != nil {
+		return err
+	}
+	return o.stream(parent, connection, input, rate, emit)
+}
+
+func (o *OpenAI) TranscribePrepared(parent context.Context, prepared Prepared, input io.ReadCloser, rate int, emit func(Update) error) error {
+	session, ok := prepared.(*openAIPrepared)
+	if !ok {
+		_ = prepared.Close()
+		return o.Transcribe(parent, input, rate, emit)
+	}
+	input = newPrefetch(input, PrefetchBytes)
+	defer input.Close()
+	return o.stream(parent, session.connection, input, rate, emit)
+}
+
+// stream sends audio over a configured session and returns the final transcript.
+func (o *OpenAI) stream(parent context.Context, connection *websocket.Conn, input io.ReadCloser, rate int, emit func(Update) error) error {
+	ctx, cancel := context.WithCancel(parent)
+	defer cancel()
+	defer connection.Close()
+	stopClose := context.AfterFunc(ctx, func() { connection.Close(); input.Close() })
+	defer stopClose()
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = connection.SetReadDeadline(deadline)
+	}
+	write := func(value any) error { return writeEvent(connection, value) }
 	writerResult := make(chan error, 1)
 	var writer sync.WaitGroup
 	writer.Add(1)
