@@ -276,9 +276,15 @@ static void scene_voice(const char *out, const char *suffix)
 
     voice_session(true, "completed");
     show(AGENT_PAGE_VOICE);
-    s_voice_review = 1;
+    s_voice_review = 2;
     render();
     frame(out, "21-voice-review", suffix);
+
+    voice_session(true, "completed");
+    g_chat_text = voice_reply;
+    show(AGENT_PAGE_CHAT);
+    chat_hint("再按 ↑ 看上一条");
+    frame(out, "27-text-edge-hint", suffix);
 }
 
 static void scene_settings(const char *out, const char *suffix)

@@ -91,6 +91,11 @@ static char *s_voice_reply, *s_voice_draft, *s_voice_question;
 static char s_voice_reply_key[96], s_voice_question_id[37];
 static uint32_t s_voice_draft_generation = UINT32_MAX, s_voice_draft_selection;
 static uint16_t s_voice_starts[AGENT_VOICE_MAX_SENTENCES], s_voice_ends[AGENT_VOICE_MAX_SENTENCES];
+// Line review: the reply without Markdown marks, wrapped to the strip's width.
+#define VOICE_MAX_LINES 256
+static char *s_voice_display;
+static uint16_t s_voice_lines[VOICE_MAX_LINES + 1];
+static int s_voice_line_count;
 static char s_think_id[37];
 static int64_t s_think_since;
 static agent_speech_view_t s_speech;
@@ -154,7 +159,9 @@ static void delete_screen(void)
     free(s_voice_reply);
     free(s_voice_draft);
     free(s_voice_question);
-    s_voice_reply = s_voice_draft = s_voice_question = NULL;
+    free(s_voice_display);
+    s_voice_reply = s_voice_draft = s_voice_question = s_voice_display = NULL;
+    s_voice_line_count = 0;
     s_voice_reply_key[0] = s_voice_question_id[0] = '\0';
     s_voice_draft_generation = UINT32_MAX;
     s_voice_sentences = 0;
@@ -568,6 +575,7 @@ static void render_chat(void)
             if (first != text) memmove(text, first, strlen(first) + 1);
             memo_font_filter_text(text, false);
             const int32_t position = lv_obj_get_scroll_y(s_scroll);
+            const bool following = lv_obj_get_scroll_bottom(s_scroll) <= 8;
             if (s_chat_text == NULL || strcmp(s_chat_text, text) != 0) {
                 lv_label_set_text_static(s_chat_body, text);
                 free(s_chat_text);
@@ -580,7 +588,8 @@ static void render_chat(void)
                 s_chat_open_bottom = false;
             }
             if (!input && s_chat_wait_animating) target = 0;
-            if (generating) target = position + lv_obj_get_scroll_bottom(s_scroll); // Follow new words.
+            // New words are followed only while the reader is already at the end.
+            if (generating && following && !different) target = position + lv_obj_get_scroll_bottom(s_scroll);
             if (target < 0) target = 0;
             lv_obj_scroll_to_y(s_scroll, target, LV_ANIM_OFF);
             s_chat_selection = s_view.selection;
@@ -621,10 +630,11 @@ static void voice_hints(int set, const voice_hint_t *items, int count)
         lv_obj_set_flex_align(item, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
         lv_obj_set_style_pad_column(item, 5, 0);
         lv_obj_t *chip = bare(item);
-        lv_obj_set_size(chip, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+        lv_obj_set_size(chip, LV_SIZE_CONTENT, 22);
+        lv_obj_set_flex_flow(chip, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(chip, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
         lv_obj_set_style_radius(chip, 6, 0);
         lv_obj_set_style_pad_hor(chip, 5, 0);
-        lv_obj_set_style_pad_ver(chip, 1, 0);
         lv_obj_set_style_border_width(chip, 2, 0);
         lv_obj_set_style_border_color(chip, lv_color_hex(items[i].hold ? UI_FG : UI_DIM), 0);
         lv_obj_set_style_bg_color(chip, lv_color_hex(UI_FG), 0);
@@ -707,6 +717,75 @@ static bool voice_has_draft(void)
     return s_view.text_kind == AGENT_TEXT_DRAFT && s_view.segment_total > 0;
 }
 
+
+static uint32_t utf8_codepoint(const char *text, size_t at, size_t *size)
+{
+    const unsigned char *c = (const unsigned char *)text + at;
+    *size = agent_utf8_step(text, at);
+    if (*size == 1) return c[0];
+    if (*size == 2) return ((uint32_t)(c[0] & 0x1F) << 6) | (c[1] & 0x3F);
+    if (*size == 3) return ((uint32_t)(c[0] & 0x0F) << 12) | ((uint32_t)(c[1] & 0x3F) << 6) | (c[2] & 0x3F);
+    return ((uint32_t)(c[0] & 0x07) << 18) | ((uint32_t)(c[1] & 0x3F) << 12) | ((uint32_t)(c[2] & 0x3F) << 6) | (c[3] & 0x3F);
+}
+
+// Builds the review lines: Markdown emphasis, code ticks and line leaders are
+// dropped, blank lines collapse, and text wraps at the strip's pixel width so
+// each up/down press shows exactly one readable line.
+static void voice_wrap_lines(void)
+{
+    free(s_voice_display);
+    s_voice_display = NULL;
+    s_voice_line_count = 0;
+    const size_t length = strlen(s_voice_reply);
+    char *display = malloc(length + 1);
+    if (display == NULL) return;
+    size_t used = 0;
+    bool line_start = true;
+    for (size_t i = 0; i < length;) {
+        if (line_start) {
+            while (i < length && (s_voice_reply[i] == ' ' || s_voice_reply[i] == '#')) i++;
+            if (i + 1 < length && strchr("-*>", s_voice_reply[i]) && s_voice_reply[i + 1] == ' ') i += 2;
+            line_start = false;
+            continue;
+        }
+        const char c = s_voice_reply[i];
+        if ((c == '*' && s_voice_reply[i + 1] == '*') || (c == '_' && s_voice_reply[i + 1] == '_')) { i += 2; continue; }
+        if (c == '`') { i++; continue; }
+        if (c == '\n') {
+            if (used > 0 && display[used - 1] != '\n') display[used++] = '\n';
+            line_start = true;
+            i++;
+            continue;
+        }
+        display[used++] = s_voice_reply[i++];
+    }
+    display[used] = '\0';
+    s_voice_display = display;
+    const lv_font_t *font = memo_font_label();
+    const int32_t width = VOICE_STRIP_W - 28;
+    size_t at = 0;
+    while (at < used && s_voice_line_count < VOICE_MAX_LINES) {
+        s_voice_lines[s_voice_line_count++] = (uint16_t)at;
+        int32_t line = 0;
+        while (at < used && display[at] != '\n') {
+            size_t size;
+            const uint32_t letter = utf8_codepoint(display, at, &size);
+            const int32_t glyph = lv_font_get_glyph_width(font, letter, 0);
+            // Closing punctuation never starts a line; it stays at the end of this one.
+            static const char closers[] = "，。！？；：、）」』”’》】,.!?;:)";
+            const bool closer = size > 1 ? strstr(closers, (char[5]){display[at], display[at + 1],
+                                                    size > 2 ? display[at + 2] : 0, size > 3 ? display[at + 3] : 0, 0}) != NULL
+                                         : strchr(",.!?;:)", display[at]) != NULL;
+            if (line > 0 && line + glyph > width && !closer) break;
+            line += glyph;
+            at += size;
+        }
+        if (at < used && display[at] == '\n') at++;
+        if (at > UINT16_MAX) break;
+    }
+    s_voice_lines[s_voice_line_count] = (uint16_t)(at < UINT16_MAX ? at : UINT16_MAX);
+}
+
 // Keeps a copy of the newest reply and its sentence ranges for the strip.
 static void voice_reply_cache(bool streaming)
 {
@@ -726,7 +805,8 @@ static void voice_reply_cache(bool streaming)
     s_voice_reply = reply;
     agent_copy_text(s_voice_reply_key, sizeof(s_voice_reply_key), key);
     s_voice_sentences = agent_sentence_split(s_voice_reply, s_voice_starts, s_voice_ends, AGENT_VOICE_MAX_SENTENCES);
-    if (s_voice_review >= s_voice_sentences) s_voice_review = -1;
+    voice_wrap_lines();
+    if (s_voice_review >= s_voice_line_count) s_voice_review = -1;
 }
 
 static void render_voice(void)
@@ -807,7 +887,11 @@ static void render_voice(void)
     case AGENT_VOICE_REPLYING: status = "正在回复"; break;
     case AGENT_VOICE_FAILED: status = message_status(s_view.message.state); tone = UI_RECORDING; break;
     case AGENT_VOICE_IDLE:
-        if (s_voice_review >= 0) { status = "上一轮回复"; tone = UI_DIM; }
+        if (s_voice_review >= 0) {
+            snprintf(line, sizeof(line), "上一轮回复 %d/%d", s_voice_review + 1, s_voice_line_count);
+            status = line;
+            tone = UI_DIM;
+        }
         else status = s_view.turn.present ? "按住 OK 继续说" : "按住 OK 说话";
         break;
     }
@@ -855,19 +939,19 @@ static void render_voice(void)
         memo_font_filter_text(line, false);
         circular = true;
         border = UI_ACCENT;
+    } else if (s_voice_review >= 0 && s_voice_display != NULL && s_voice_review < s_voice_line_count) {
+        size_t start = s_voice_lines[s_voice_review], end = s_voice_lines[s_voice_review + 1];
+        while (end > start && s_voice_display[end - 1] == '\n') end--;
+        const size_t size = end - start < sizeof(line) - 1 ? end - start : sizeof(line) - 1;
+        memcpy(line, s_voice_display + start, size);
+        line[size] = '\0';
+        strip = true;
     } else if ((mode == AGENT_VOICE_IDLE || mode == AGENT_VOICE_FAILED || mode == AGENT_VOICE_REPLYING) &&
                s_view.turn.present && s_voice_sentences > 0) {
-        const int index = s_voice_review >= 0 ? s_voice_review : s_voice_sentences - 1;
+        const int index = s_voice_sentences - 1;
         sentence_text(s_voice_reply, s_voice_starts[index], s_voice_ends[index], line, sizeof(line));
         strip = line[0] != '\0';
-        strip_tone = s_voice_review >= 0 ? UI_FG : UI_DIM;
-        circular = s_voice_review >= 0;
-        tag = s_voice_review >= 0;
-        if (tag) {
-            char count[16];
-            snprintf(count, sizeof(count), "%d/%d", index + 1, s_voice_sentences);
-            set_text(s_voice_strip_tag, count, false);
-        }
+        strip_tone = UI_DIM;
     }
     reveal(s_voice_strip, strip);
     if (strip) {
@@ -906,7 +990,7 @@ static void render_voice(void)
 
     // Key hints for what the keys do right now.
     static const voice_hint_t idle[] = {{"OK", false, "文字"}, {"OK", true, "说话"}};
-    static const voice_hint_t review[] = {{"↑↓", false, "逐句"}, {"OK", true, "说话"}};
+    static const voice_hint_t review[] = {{"↑↓", false, "逐行"}, {"OK", true, "说话"}};
     static const voice_hint_t failed[] = {{"OK", false, "重试"}, {"OK", true, "说话"}};
     static const voice_hint_t draft[] = {{"OK", false, "发送"}, {"OK", true, "重录"}};
     static const voice_hint_t recording[] = {{"OK", true, "松开结束"}};
@@ -1041,37 +1125,49 @@ static void exit_page(void)
     } else if (s_page != target) show_page(target);
 }
 
+// Text card: up/down scroll the message; at its edge a second press of the same
+// key within half a second moves to the neighbouring message, which always
+// opens at its top.
+static bsp_btn_t s_edge_button;
+static int64_t s_edge_at;
+
+static void chat_hint(const char *text)
+{
+    agent_copy_text(s_local_notice, sizeof(s_local_notice), text);
+    s_notice_until = text[0] ? esp_timer_get_time() + 1200000 : 0;
+    agent_copy_text(s_view.notice, sizeof(s_view.notice), text);
+    if (s_page == AGENT_PAGE_CHAT) chat_status(text);
+}
+
 static void scroll_chat(bsp_btn_t button)
 {
     if (!bsp_lvgl_lock(1000)) return;
     const int direction = button == BSP_BTN_UP ? -1 : 1;
     const bool input = s_view.text_kind == AGENT_TEXT_INPUT;
     const bool draft = s_view.text_kind == AGENT_TEXT_DRAFT;
-    if (!input && !draft && agent_message_active(s_view.message.state)) {
-        if (direction < 0 && !s_view.chat_loading && !s_view.text_loading) {
-            s_chat_open_bottom = true;
-            agent_client_message_select(true);
-        }
-        bsp_lvgl_unlock();
-        return;
-    }
     lv_obj_update_layout(s_scroll);
     const int32_t position = lv_obj_get_scroll_y(s_scroll);
     const int32_t remaining = lv_obj_get_scroll_bottom(s_scroll);
+    const int32_t step = 2 * memo_font_label()->line_height + 2 * AGENT_CHAT_LINE_SPACE;
     if (direction < 0 && position > 0) {
-        lv_obj_scroll_to_y(s_scroll, position > 46 ? position - 46 : 0, LV_ANIM_OFF);
+        lv_obj_scroll_to_y(s_scroll, position > step ? position - step : 0, LV_ANIM_OFF);
+        s_edge_at = 0;
     } else if (direction > 0 && remaining > 0) {
-        const int32_t step = remaining > 46 ? 46 : remaining;
-        lv_obj_scroll_to_y(s_scroll, position + step, LV_ANIM_OFF);
+        lv_obj_scroll_to_y(s_scroll, position + (remaining > step ? step : remaining), LV_ANIM_OFF);
+        s_edge_at = 0;
     } else if (!draft && !s_view.chat_loading && !s_view.text_loading) {
-        if (direction < 0 && !input) {
-            s_chat_open_bottom = true;
-            agent_client_message_select(true);
-        } else if (direction > 0 && input) {
+        const int64_t now = esp_timer_get_time();
+        if (s_edge_button != button || s_edge_at == 0 || now - s_edge_at > 500000) {
+            s_edge_button = button;
+            s_edge_at = now;
+            chat_hint(direction < 0 ? "再按 ↑ 看上一条" : "再按 ↓ 看下一条");
+        } else {
+            s_edge_at = 0;
+            chat_hint("");
             s_chat_open_bottom = false;
-            agent_client_message_select(false);
-        } else if (agent_client_history(direction) == ESP_OK) {
-            s_chat_open_bottom = direction < 0;
+            if (direction < 0 && !input) agent_client_message_select(true);
+            else if (direction > 0 && input) agent_client_message_select(false);
+            else agent_client_history(direction);
         }
     }
     bsp_lvgl_unlock();
@@ -1113,12 +1209,14 @@ static void voice_key(bsp_btn_t button)
         if (target > bottom) target = bottom;
         if (target < 0) target = 0;
         lv_obj_scroll_to_y(s_voice_panel_scroll, target, LV_ANIM_OFF);
-    } else if ((mode == AGENT_VOICE_IDLE || mode == AGENT_VOICE_FAILED) && s_voice_sentences > 1) {
-        // Review the last reply sentence by sentence; past the end returns to the latest.
-        int index = s_voice_review >= 0 ? s_voice_review : s_voice_sentences - 1;
-        index += direction;
-        if (index < 0) index = 0;
-        s_voice_review = index >= s_voice_sentences - 1 ? -1 : index;
+    } else if ((mode == AGENT_VOICE_IDLE || mode == AGENT_VOICE_FAILED) && s_voice_line_count > 0) {
+        // Read the last reply one line at a time from its first line; past the
+        // last line, review ends and the strip shows the closing sentence again.
+        if (s_voice_review < 0) s_voice_review = 0;
+        else {
+            const int index = s_voice_review + direction;
+            s_voice_review = index < 0 ? 0 : index >= s_voice_line_count ? -1 : index;
+        }
         render();
     }
     bsp_lvgl_unlock();
