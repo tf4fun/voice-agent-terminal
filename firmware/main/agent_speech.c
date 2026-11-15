@@ -47,6 +47,7 @@ static StackType_t s_writer_stack[WRITER_STACK / sizeof(StackType_t)];
 static SemaphoreHandle_t s_writer_done;
 static StaticSemaphore_t s_writer_done_control;
 static atomic_bool s_ended, s_stop;
+static atomic_uint s_underruns; // Times the speaker ran dry mid-stream (diagnostics).
 static uint8_t s_chunk[1024];
 static agent_speech_parser_t s_parser;
 
@@ -107,7 +108,11 @@ static void writer_task(void *arg)
             if (got == 0) {
                 if (atomic_load(&s_ended)) break;
                 // Ran dry: refill a little before speaking again rather than stutter.
-                if (xStreamBufferBytesAvailable(s_pcm) < (size_t)PLAY_RESUME) { primed = false; publish_level(0); }
+                if (xStreamBufferBytesAvailable(s_pcm) < (size_t)PLAY_RESUME) {
+                    primed = false;
+                    publish_level(0);
+                    ESP_LOGI(TAG, "speech underrun %u", atomic_fetch_add(&s_underruns, 1) + 1);
+                }
                 continue;
             }
             const size_t total = carry + got, even = total & ~(size_t)1;
@@ -163,6 +168,7 @@ static void play(unsigned request, const char *session, const char *message)
     if (client != NULL && bsp_audio_set_format(16000, 16, 1) == ESP_OK) {
         // The writer is idle here, so the buffer can be emptied safely.
         xStreamBufferReset(s_pcm);
+        atomic_store(&s_underruns, 0);
         atomic_store(&s_ended, false);
         atomic_store(&s_stop, false);
         xTaskNotifyGive(s_writer);
@@ -220,7 +226,10 @@ static void play(unsigned request, const char *session, const char *message)
         esp_http_client_close(client);
         esp_http_client_cleanup(client);
     }
-    agent_trace(TRACE_SPEECH, status, index, NULL);
+    char underruns[AGENT_TRACE_TAG_BYTES];
+    snprintf(underruns, sizeof(underruns), "dry %u", atomic_load(&s_underruns));
+    agent_trace(TRACE_SPEECH, status, index, underruns);
+    ESP_LOGI(TAG, "speech end status=%u sentences=%u underruns=%u", status, index + 1, atomic_load(&s_underruns));
     publish(false, false, index, NULL, NULL);
 }
 
@@ -257,7 +266,8 @@ esp_err_t agent_speech_init(void)
     s_writer = xTaskCreateStatic(writer_task, "agent_play", WRITER_STACK / sizeof(StackType_t), NULL, 6,
                                  s_writer_stack, &s_writer_tcb);
     if (s_writer == NULL) return ESP_ERR_NO_MEM;
-    return xTaskCreate(speech_task, "agent_speech", 4096, NULL, 5, &s_task) == pdPASS ? ESP_OK : ESP_ERR_NO_MEM;
+    // Above LVGL and the input task so reads keep the playback buffer filled.
+    return xTaskCreate(speech_task, "agent_speech", 4096, NULL, 6, &s_task) == pdPASS ? ESP_OK : ESP_ERR_NO_MEM;
 }
 
 void agent_speech_play(const char *session_id, const char *message_id)

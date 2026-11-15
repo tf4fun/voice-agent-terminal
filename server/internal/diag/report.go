@@ -229,7 +229,12 @@ func describe(e Event) string {
 		}
 		return fmt.Sprintf("诊断上报（%s）%s", TriggerLabel(triggerName(int(e.A))), result)
 	case typeSpeech:
-		return fmt.Sprintf("朗读结束：%s（到第 %d 句）", pick(speechEnds, int(e.A)), e.B+1)
+		text := fmt.Sprintf("朗读结束：%s（到第 %d 句）", pick(speechEnds, int(e.A)), e.B+1)
+		var dry int
+		if _, err := fmt.Sscanf(e.Tag, "dry %d", &dry); err == nil {
+			text += fmt.Sprintf("，断流 %d 次", dry)
+		}
+		return text
 	case typeVoice:
 		return "语音页 → " + pick(voiceModes, int(e.A))
 	case typeCaptureError:

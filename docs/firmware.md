@@ -17,7 +17,9 @@ transcript. After release the strip spins while the transcript settles (no key
 acts in that moment), then expands into the draft panel. Sending collapses it
 to one line with the question while Hermes thinks: a comet arc orbits the orb,
 the bars rise in turn and the status counts the seconds waited. While a reply
-is spoken the strip shows the sentence being read and scrolls long ones; when
+is spoken the strip shows the sentence being read one whole line at a time,
+advancing at about 3.8 characters per second, the measured rate of the reader
+voice; when
 it ends the strip becomes a vertical ticker over the reply: Markdown marks are
 dropped, every sentence starts a line, a sentence wider than the strip
 continues on further lines, and closing punctuation never starts one. Each
@@ -39,7 +41,9 @@ either view; leaving the session stops it. The I2S DMA ring holds only 90 ms,
 so playback is split: the stream reader passes audio straight from the HTTP
 reads into an 8 KiB buffer (about 256 ms) and a writer task at the capture
 task's priority feeds the codec after 200 ms of prebuffer, refilling 100 ms
-after running dry. The buffer and the writer are reserved once at boot:
+after running dry; the stream reader runs above the UI tasks, and each
+underrun is logged and counted in the speech trace event. The buffer and the
+writer are reserved once at boot:
 allocating them per reply fragmented the heap (after one spoken reply the
 largest free block fell from 59 KiB to 35 KiB while the minimum free heap
 reached 26.7 KiB).

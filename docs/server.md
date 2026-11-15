@@ -330,7 +330,9 @@ stream with a status byte (0 done, 1 failed, 2 cancelled, 3 size limit). Kind
 4 is an empty keepalive sent every 5 s while no other frame is ready, so a
 device's read timeout survives a long think.
 
-Synthesis starts on the first request for a reply and is shared: later
+The first sentence's audio is released once 0.8 s is ready (or the sentence
+is complete) so a device starts with a lead while the realtime model warms
+up. Synthesis starts on the first request for a reply and is shared: later
 listeners replay from the beginning. Ten seconds after the last listener
 leaves an unfinished stream, synthesis stops; a later request redoes it.
 Finished streams stay replayable for ten minutes, up to eight streams, and

@@ -100,6 +100,12 @@ static int64_t s_voice_review_at; // Last review key; review ends after 15 s wit
 // At rest the strip shows the last reply one line at a time, advancing on its
 // own (a vertical ticker); the first key press holds the line in view.
 static const char *s_ticker_source;
+// The sentence being spoken, shown one line at a time at about the speech rate.
+enum { SPEAK_RUNE_US = 260000 }; // ~3.8 characters per second, measured on the reader voice.
+static char s_speak_text[AGENT_SPEECH_SENTENCE_BYTES];
+static uint16_t s_speak_index;
+static int64_t s_speak_at;
+static int s_speak_line;
 static int s_ticker_line = -1;
 static int64_t s_ticker_next;
 static char s_think_id[37];
@@ -162,6 +168,7 @@ static void delete_screen(void)
     s_voice_panel = s_voice_panel_count = s_voice_panel_scroll = s_voice_panel_body = s_voice_hints = NULL;
     s_ticker_source = NULL;
     s_ticker_line = -1;
+    s_speak_text[0] = '\0';
     s_voice_review = -1; // Line offsets belong to the reply being left.
     s_voice_mode = s_voice_hint_set = -1;
     s_voice_small = s_voice_arc_spinning = s_voice_spin_spinning = false;
@@ -743,6 +750,27 @@ static uint32_t utf8_codepoint(const char *text, size_t at, size_t *size)
     return ((uint32_t)(c[0] & 0x07) << 18) | ((uint32_t)(c[1] & 0x3F) << 12) | ((uint32_t)(c[2] & 0x3F) << 6) | (c[3] & 0x3F);
 }
 
+// End of the line starting at `start`: as much as fits the strip, keeping
+// closing punctuation off the start of the next line.
+static size_t wrap_end(const char *text, size_t start)
+{
+    static const char closers[] = "，。！？；：、）」』”’》】,.!?;:)\"'";
+    const int32_t width = VOICE_STRIP_W - 28;
+    int32_t line = 0;
+    size_t at = start;
+    while (text[at] && text[at] != '\n') {
+        size_t size;
+        const uint32_t letter = utf8_codepoint(text, at, &size);
+        const int32_t glyph = lv_font_get_glyph_width(memo_font_label(), letter, 0);
+        char piece[5] = {0};
+        memcpy(piece, text + at, size);
+        if (line > 0 && line + glyph > width && strstr(closers, piece) == NULL) break;
+        line += glyph;
+        at += size;
+    }
+    return at;
+}
+
 // Builds the review units: Markdown emphasis, code ticks and line leaders are
 // dropped and blank lines collapse. Every sentence starts a unit, and a
 // sentence wider than the strip continues in further units, so each up/down
@@ -1023,10 +1051,33 @@ static void render_voice(void)
         if (strip) agent_copy_text(line, sizeof(line), s_voice_question);
         strip_tone = UI_DIM;
     } else if (mode == AGENT_VOICE_SPEAKING) {
-        strip = s_speech.sentence[0] != '\0';
-        agent_copy_text(line, sizeof(line), s_speech.sentence);
-        memo_font_filter_text(line, false);
-        circular = true;
+        // Like the resting ticker, a long sentence shows one whole line at a
+        // time; lines advance at the estimated speech rate.
+        if (s_speech.index != s_speak_index || strcmp(s_speech.sentence, s_speak_text) != 0) {
+            if (s_speak_text[0] != '\0') line_slide(1); // The next sentence rises in.
+            agent_copy_text(s_speak_text, sizeof(s_speak_text), s_speech.sentence);
+            memo_font_filter_text(s_speak_text, false);
+            s_speak_index = s_speech.index;
+            s_speak_at = now;
+            s_speak_line = 0;
+        }
+        size_t start = 0, end = wrap_end(s_speak_text, 0), spoken = 0;
+        int index = 0;
+        for (;;) {
+            size_t runes = 0;
+            for (size_t at = start; at < end; at++) if (((unsigned char)s_speak_text[at] & 0xC0) != 0x80) runes++;
+            if (s_speak_text[end] == '\0' || (int64_t)(spoken + runes) * SPEAK_RUNE_US > now - s_speak_at) break;
+            spoken += runes;
+            start = end;
+            while (s_speak_text[start] == ' ' || s_speak_text[start] == '\n') start++;
+            end = wrap_end(s_speak_text, start);
+            index++;
+        }
+        if (index != s_speak_line) { s_speak_line = index; line_slide(1); }
+        const size_t size = end - start < sizeof(line) - 1 ? end - start : sizeof(line) - 1;
+        memcpy(line, s_speak_text + start, size);
+        line[size] = '\0';
+        strip = line[0] != '\0';
         border = UI_ACCENT;
     } else if ((mode == AGENT_VOICE_IDLE || mode == AGENT_VOICE_FAILED) && s_view.turn.present &&
                s_voice_display != NULL && s_voice_line_count > 0) {

@@ -30,6 +30,10 @@ const (
 	speechMaxStreams = 8
 	speechKeep       = 10 * time.Minute // Finished streams stay replayable.
 	speechIdleCancel = 10 * time.Second // Synthesis stops this long after the last listener leaves.
+	// The first sentence is released once this much audio is ready (or it is
+	// complete), so the device starts with a lead instead of draining its
+	// small buffer while the realtime model warms up.
+	speechLeadBytes = 25600 // 0.8 s of 16 kHz PCM16
 )
 
 var ErrSpeechUnavailable = errors.New("speech_unavailable")
@@ -254,13 +258,32 @@ func (s *Service) synthesize(ctx context.Context, stream *speechStream, sessionI
 			return
 		}
 		pending := make([]byte, 0, speechFrameAudio)
+		var held [][]byte // First-sentence frames waiting for the lead.
+		heldBytes, holding := 0, index == 0
+		release := func() bool {
+			for _, f := range held {
+				if !stream.append(f) {
+					return false
+				}
+			}
+			held, holding = nil, false
+			return true
+		}
 		flush := func() bool {
 			if len(pending) == 0 {
 				return true
 			}
-			ok := stream.append(frame(FrameAudio, pending))
+			f := frame(FrameAudio, pending)
 			pending = make([]byte, 0, speechFrameAudio)
-			return ok
+			if holding {
+				held = append(held, f)
+				heldBytes += len(f)
+				if heldBytes < speechLeadBytes {
+					return true
+				}
+				return release()
+			}
+			return stream.append(f)
 		}
 		limited := false
 		err = s.TTS.Speak(ctx, sentence, func(pcm []byte) error {
@@ -280,7 +303,7 @@ func (s *Service) synthesize(ctx context.Context, stream *speechStream, sessionI
 			}
 			return nil
 		})
-		if err == nil && !flush() {
+		if err == nil && (!flush() || !release()) {
 			return
 		}
 		switch {

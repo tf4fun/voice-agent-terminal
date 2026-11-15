@@ -49,6 +49,9 @@ func TestVoiceAndSpeechEventsRender(t *testing.T) {
 	if got := describe(Event{Type: typeVoice, A: 5}); got != "语音页 → 思考中" {
 		t.Fatal(got)
 	}
+	if got := describe(Event{Type: typeSpeech, A: 0, B: 3, Tag: "dry 2"}); got != "朗读结束：读完（到第 4 句），断流 2 次" {
+		t.Fatal(got)
+	}
 	if got := describe(Event{Type: typeSpeech, A: 2, B: 3}); got != "朗读结束：被停止（到第 4 句）" {
 		t.Fatal(got)
 	}
