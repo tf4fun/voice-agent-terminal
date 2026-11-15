@@ -9,8 +9,10 @@
 
 // Background, foreground, secondary, border, surface, selected, recording,
 // accent, accent tint. Values stay unique per palette for live recoloring.
+// The light palette stays warm and never uses pure white, which glares on the
+// small backlit panel.
 static const uint32_t s_palettes[2][UI_COLOR_COUNT] = {
-    {0xF0F4F8, 0x15171C, 0x6B7180, 0xDDE0E8, 0xFFFFFF, 0xE7E9EF, 0xE5484D, 0x5B4BE8, 0xE8E5FD},
+    {0xECE6DC, 0x26231E, 0x716A5F, 0xD8CFBF, 0xF6F1E8, 0xE3DBCD, 0xC8463D, 0x5A4AD0, 0xE4DDEC},
     {0x0B0C10, 0xF2F3F5, 0x8A91A0, 0x2A2E38, 0x17191F, 0x21242C, 0xFF5964, 0x8F82FF, 0x24203D},
 };
 static bool s_dark = true;

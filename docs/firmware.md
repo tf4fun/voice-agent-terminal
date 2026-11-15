@@ -49,11 +49,12 @@ old title suffix handling and the v1 database migration were removed.
 
 ## Visual refresh
 
-The refreshed interface keeps every key interaction. Neutral light and dark
+The refreshed interface keeps every key interaction. Warm paper-toned light and neutral dark
 palettes share a violet accent for selection, progress and icons; failures use
 the recording red. Session rows are rounded cards with a title-initial badge,
 and today's sessions show only the time. A two-dot indicator under the header
-marks the Sessions/Settings root cycle. The recording page shows a large timer,
+marks the Sessions/Settings root cycle. The light palette avoids pure white,
+which glares on the small backlit panel. The recording page shows a large timer,
 a status pill, sixteen rounded level bars and a transcript card. Empty states,
 provisioning and settings use accent-tinted circular icon badges, and numeric
 setting values use large figures with a pill meter. The design adds no shadows,
