@@ -55,19 +55,32 @@ func (s *Store) initialize() error {
 	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		return err
 	}
-	if version != 0 && version != 2 {
-		return fmt.Errorf("unsupported database schema %d, expected 2", version)
-	}
-	if version == 2 {
+	switch version {
+	case 3:
 		return nil
-	}
-	return s.transaction(context.Background(), func(tx *sql.Tx) error {
-		if _, err := tx.Exec(schema); err != nil {
+	case 2:
+		// v3 only adds the device diagnostic report table.
+		return s.transaction(context.Background(), func(tx *sql.Tx) error {
+			if _, err := tx.Exec(deviceReportsSchema); err != nil {
+				return err
+			}
+			_, err := tx.Exec("PRAGMA user_version=3")
 			return err
-		}
-		_, err := tx.Exec("PRAGMA user_version=2")
-		return err
-	})
+		})
+	case 0:
+		return s.transaction(context.Background(), func(tx *sql.Tx) error {
+			if _, err := tx.Exec(schema); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(deviceReportsSchema); err != nil {
+				return err
+			}
+			_, err := tx.Exec("PRAGMA user_version=3")
+			return err
+		})
+	default:
+		return fmt.Errorf("unsupported database schema %d, expected 3", version)
+	}
 }
 
 func (s *Store) Close() error                   { return s.db.Close() }

@@ -201,7 +201,7 @@ Uncommitted staged text is excluded from the joined draft and discarded after a
 restart or expiry. A separate cleanup worker checks every 10 seconds for staged
 results ready for at least 60 seconds, with up to 64 sessions per pass. Append
 mode preserves its failed partial transcripts for review. Recording modes and
-commit identities are persisted in SQLite schema v2. New stores are created directly at v2. The prototype v1 migration was removed
+commit identities are persisted in SQLite. Schema v3 adds device diagnostic reports; v2 stores migrate in place and new stores are created directly at v3. The prototype v1 migration was removed
 after the user authorized deleting old sessions. Unsupported schema versions
 are rejected explicitly.
 
@@ -308,6 +308,22 @@ Slow consumers are disconnected and reconcile on reconnect. The persisted
 metadata and complete message snapshots support recovery after an event gap. SSE delivery itself
 is transient. Approval prompts are surfaced as attention states; detailed
 approval controls remain a subsequent product decision.
+
+## Device diagnostic reports
+
+`POST /api/v1/device/logs` accepts one JSON report of at most 64 KiB from a
+terminal, with the device bearer key. It carries firmware version and build,
+trigger, boot count, reset reason, uptime, heap figures, up to 1024 events
+`[boot, ms, type, a, b, tag]` and up to 16 KiB of warning/error log lines. Malformed
+reports return 400. The raw report is stored in SQLite (the newest 100 are
+kept) and one warning line with the report ID and a summary is logged.
+`GET /api/v1/device/logs` lists report metadata; `GET /api/v1/device/logs/{id}`
+renders a Chinese text timeline, with `format=json` returning the raw upload.
+Events from the reporting boot get wall-clock times derived from the gateway's
+receive time. The web page opens the same list from the sidebar. Reports hold
+event codes and log lines only, never audio, transcripts or credentials.
+`internal/diag/testdata/report.json` is produced by the firmware encoder and
+pins the wire format.
 
 ## Tests and build artifacts
 

@@ -37,6 +37,9 @@
           <span id="connection" role="status">正在连接</span>
         </div>
         <div class="side-actions">
+          <button id="device-logs" class="icon-button" type="button" aria-label="设备日志" title="设备诊断日志">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4h7l4 4v12H7zM14 4v4h4M10 12h5M10 16h5"/></svg>
+          </button>
           <button id="theme" class="icon-button" type="button" aria-label="切换主题" title="主题：跟随系统">
             <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 0 1 0 16z" class="fill"/></svg>
           </button>
@@ -118,6 +121,21 @@
       <button id="delete-cancel" type="button" autofocus>取消</button>
       <button id="delete-confirm" class="danger-fill" type="button">删除</button>
     </div>
+  </dialog>
+
+  <dialog id="logs-dialog" class="logs-dialog" aria-labelledby="logs-title">
+    <div class="logs-head">
+      <button id="logs-back" class="icon-button" type="button" aria-label="返回列表" hidden>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg>
+      </button>
+      <h2 id="logs-title">设备诊断日志</h2>
+      <button id="logs-close" class="icon-button" type="button" aria-label="关闭">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </div>
+    <p id="logs-note" class="muted logs-note">设备在录音失败、异常重启等情况下会自动上报最近的事件与日志。</p>
+    <div id="logs-list" class="logs-list"></div>
+    <pre id="logs-text" class="logs-text" hidden></pre>
   </dialog>
 
   <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>

@@ -72,6 +72,9 @@ func New(service *gateway.Service) http.Handler {
 	handle("GET /api/v1/sessions/{session}/messages/{message}", s.message)
 	handle("GET /api/v1/sessions/{session}/messages/{message}/text", s.messageText)
 	handle("POST /api/v1/sessions/{session}/messages/{message}/retry", s.retry)
+	handle("POST /api/v1/device/logs", s.addDeviceReport)
+	handle("GET /api/v1/device/logs", s.deviceReports)
+	handle("GET /api/v1/device/logs/{report}", s.deviceReport)
 	protected := http.NewCrossOriginProtection().Handler(mux)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
@@ -181,7 +184,7 @@ func (s *Server) capabilities(w http.ResponseWriter, r *http.Request) {
 		"draft_text": true, "replace_recording": true, "staged_recording": true, "replacement_reservation": true, "conversation_windows": true, "whole_messages": true, "reply_sse": true,
 		"max_draft_bytes": model.MaxDraftBytes, "max_segments": model.MaxSegments,
 		"max_text_window_bytes": model.WindowBytes, "max_event_bytes": 1024,
-		"max_audio_ms": s.service.Config.CaptureTimeout.Milliseconds(),
+		"max_audio_ms": s.service.Config.CaptureTimeout.Milliseconds(), "device_logs": true,
 	})
 }
 

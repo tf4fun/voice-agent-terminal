@@ -11,7 +11,8 @@ for (const id of [
   "thread", "thread-inner", "live", "live-text", "composer", "input", "send", "draft-note",
   "auth", "auth-form", "api-key", "remember", "auth-error", "rename-dialog", "rename-form",
   "rename-input", "rename-cancel", "rename-confirm", "delete-dialog", "delete-name", "delete-cancel",
-  "delete-confirm", "toast",
+  "delete-confirm", "toast", "device-logs", "logs-dialog", "logs-back", "logs-close", "logs-title",
+  "logs-note", "logs-list", "logs-text",
 ]) ui[id] = $(id);
 
 const KEY_STORE = "voice-agent.key";
@@ -1166,6 +1167,50 @@ async function confirmDelete() {
   }
 }
 
+/* ---------- device diagnostic reports ---------- */
+
+async function openLogs() {
+  if (!ui["logs-dialog"].open) ui["logs-dialog"].showModal();
+  ui["logs-back"].hidden = true;
+  ui["logs-text"].hidden = true;
+  ui["logs-list"].hidden = false;
+  ui["logs-note"].hidden = false;
+  ui["logs-title"].textContent = "设备诊断日志";
+  ui["logs-list"].replaceChildren(el("p", "muted", "正在载入…"));
+  try {
+    const page = await request(`/device/logs?limit=${PAGE}`);
+    const fragment = document.createDocumentFragment();
+    for (const item of page.items) {
+      const row = el("button", "log-row");
+      row.type = "button";
+      row.append(el("strong", "", `${fullFormat.format(item.received_at)} · ${item.summary}`),
+        el("span", "", `固件 ${item.firmware} · 本次复位：${item.reset_reason}`));
+      row.addEventListener("click", () => showLog(item));
+      fragment.append(row);
+    }
+    if (!page.items.length) fragment.append(el("p", "muted", "还没有设备上报的诊断日志。"));
+    ui["logs-list"].replaceChildren(fragment);
+  } catch (error) {
+    ui["logs-list"].replaceChildren(el("p", "state-line error", "读取失败"));
+    report(error);
+  }
+}
+
+async function showLog(item) {
+  ui["logs-list"].hidden = true;
+  ui["logs-note"].hidden = true;
+  ui["logs-back"].hidden = false;
+  ui["logs-text"].hidden = false;
+  ui["logs-title"].textContent = fullFormat.format(item.received_at);
+  ui["logs-text"].textContent = "正在载入…";
+  try {
+    ui["logs-text"].textContent = await request(`/device/logs/${item.id}`);
+  } catch (error) {
+    ui["logs-text"].textContent = "读取失败";
+    report(error);
+  }
+}
+
 /* ---------- Markdown (DOM-built, never innerHTML) ---------- */
 
 const FENCE = /^ {0,3}(`{3,}|~{3,})\s*([^`\s]*)/;
@@ -1441,6 +1486,9 @@ ui["sign-out"].addEventListener("click", () => {
   requireKey("");
 });
 
+ui["device-logs"].addEventListener("click", () => { if (state.authed) openLogs(); });
+ui["logs-back"].addEventListener("click", openLogs);
+ui["logs-close"].addEventListener("click", () => ui["logs-dialog"].close());
 ui["new-chat"].addEventListener("click", () => { showWelcome(); closeSidebar(); ui.input.focus(); });
 ui.search.addEventListener("input", renderSessions);
 ui["session-list"].addEventListener("scroll", () => {
