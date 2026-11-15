@@ -99,12 +99,25 @@ An upstream session's API source is verified before deletion.
 
 ## Drafts and audio
 
-Creating a recording segment (an empty or replacement segment) opens and
-configures the OpenAI realtime session before the `201` response, waiting at
-most 3 s, below the device's 4 s request timeout. The device keeps its preparing
+The gateway keeps one configured OpenAI realtime transcription session warm.
+OpenAI's realtime transcription guide sends many audio turns over one session:
+commit at the end of each turn and match transcription events by `item_id`,
+because completion order across turns is not guaranteed. Each recording sends
+`input_audio_buffer.clear`, appends its audio, commits once and accepts only the
+first item after its clear. A cleanly finished session returns to the pool; a
+failed or cancelled turn discards its session, because buffered audio or an
+in-flight item may remain. A dedicated reader per connection answers keepalive
+pings sent every 20 s, detects drops at once and triggers a reconnect with
+exponential backoff up to 60 s. Sessions are replaced after 50 minutes, inside
+the documented realtime session limit. A second concurrent recording opens its
+own session.
+
+Creating a recording segment (an empty or replacement segment) reserves the
+warm session, or opens one, before the `201` response, waiting at most 3 s,
+below the device's 4 s request timeout. The device keeps its preparing
 animation until that response, so capture starts against a ready transcriber.
-The prepared session belongs to that segment ID, is handed to exactly one
-upload, and closes after 30 s unused or when the gateway stops. Logs record the
+The reserved session belongs to that segment ID, is handed to exactly one
+upload, and returns to the pool after 30 s unused or when the gateway stops. Logs record the
 preparation time and any transcription failure code without credentials.
 
 Audio uploads are also drained from the first byte, covering a handshake slower

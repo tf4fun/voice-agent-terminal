@@ -72,7 +72,7 @@ func run(arguments []string) error {
 	if err := st.Recover(context.Background()); err != nil {
 		return err
 	}
-	var transcriber asr.Transcriber = &asr.OpenAI{URL: cfg.OpenAIURL, APIKey: cfg.OpenAIKey, Model: cfg.OpenAIModel}
+	var transcriber asr.Transcriber = &asr.OpenAI{URL: cfg.OpenAIURL, APIKey: cfg.OpenAIKey, Model: cfg.OpenAIModel, Log: logger}
 	if cfg.ASRProvider == "fake" {
 		transcriber = &asr.Fake{}
 	}

@@ -62,6 +62,11 @@ func New(st *store.Store, cfg config.Config, client *hermes.Client, transcriber 
 func (s *Service) Start(parent context.Context) {
 	ctx, cancel := context.WithCancel(parent)
 	s.cancel = cancel
+	// Keep a configured transcription session warm for the next recording.
+	if warm, ok := s.ASR.(interface{ Run(context.Context) }); ok && s.ASR.Enabled() {
+		s.workers.Add(1)
+		go func() { defer s.workers.Done(); warm.Run(ctx) }()
+	}
 	for index := 0; index < s.Config.Workers; index++ {
 		s.workers.Add(1)
 		go func() { defer s.workers.Done(); s.runMessages(ctx) }()
