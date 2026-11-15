@@ -135,12 +135,16 @@ const (
 	typeHeap
 	typeReport
 	typeCaptureError
+	typeSpeech
+	typeVoice
 )
 
 var (
 	buttons    = []string{"上", "下", "OK"}
 	keyEvents  = []string{"按下", "单击", "双击", "长按（驱动）", "松开"}
-	pages      = []string{"会话列表", "对话", "设置", "配网", "准备录音", "录音"}
+	pages      = []string{"会话列表", "文字卡片", "设置", "配网", "准备录音", "录音", "语音"}
+	voiceModes = []string{"待机", "准备录音", "录音中", "转写中", "草稿", "思考中", "回复中", "朗读中", "回复失败"}
+	speechEnds = []string{"读完", "失败", "被停止", "超出上限"}
 	captures   = []string{"空闲", "准备中", "录音中", "结束中", "提交中"}
 	httpMethod = map[byte]string{'G': "GET", 'P': "POST", 'U': "PATCH", 'D': "DELETE"}
 )
@@ -224,6 +228,10 @@ func describe(e Event) string {
 			result = "成功"
 		}
 		return fmt.Sprintf("诊断上报（%s）%s", TriggerLabel(triggerName(int(e.A))), result)
+	case typeSpeech:
+		return fmt.Sprintf("朗读结束：%s（到第 %d 句）", pick(speechEnds, int(e.A)), e.B+1)
+	case typeVoice:
+		return "语音页 → " + pick(voiceModes, int(e.A))
 	case typeCaptureError:
 		if e.A == 1 {
 			return fmt.Sprintf("麦克风读取失败（错误 0x%x）", e.B)

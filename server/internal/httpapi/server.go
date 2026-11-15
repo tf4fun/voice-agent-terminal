@@ -57,6 +57,7 @@ func New(service *gateway.Service) http.Handler {
 	handle("GET /api/v1/sessions/{session}/draft", s.draft)
 	handle("GET /api/v1/sessions/{session}/draft/text", s.draftText)
 	handle("GET /api/v1/sessions/{session}/draft/content", s.draftContent)
+	handle("DELETE /api/v1/sessions/{session}/draft", s.clearDraft)
 	handle("POST /api/v1/sessions/{session}/segments", s.addSegment)
 	handle("PATCH /api/v1/sessions/{session}/segments/{segment}", s.editSegment)
 	handle("DELETE /api/v1/sessions/{session}/segments/{segment}", s.editSegment)
@@ -185,7 +186,7 @@ func (s *Server) capabilities(w http.ResponseWriter, r *http.Request) {
 		"draft_text": true, "replace_recording": true, "staged_recording": true, "replacement_reservation": true, "conversation_windows": true, "whole_messages": true, "reply_sse": true,
 		"max_draft_bytes": model.MaxDraftBytes, "max_segments": model.MaxSegments,
 		"max_text_window_bytes": model.WindowBytes, "max_event_bytes": 1024,
-		"max_audio_ms": s.service.Config.CaptureTimeout.Milliseconds(), "device_logs": true,
+		"max_audio_ms": s.service.Config.CaptureTimeout.Milliseconds(), "device_logs": true, "draft_clear": true,
 		"speech": s.service.SpeechEnabled(), "speech_format": "pcm_s16le", "speech_rate": 16000,
 	})
 }
@@ -346,6 +347,23 @@ func (s *Server) addSegment(w http.ResponseWriter, r *http.Request) {
 		s.service.PrepareCapture(body.ID, prepareWait)
 	}
 	writeJSON(w, 201, map[string]any{"id": body.ID, "revision": revision})
+}
+
+// clearDraft discards the whole reviewed draft (the device's long-press Down).
+func (s *Server) clearDraft(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Revision int64 `json:"revision"`
+	}
+	if !readJSON(w, r, &body) {
+		return
+	}
+	revision, err := s.service.Store.ClearDraft(r.Context(), r.PathValue("session"), body.Revision)
+	if err != nil {
+		storeError(w, err)
+		return
+	}
+	s.service.Events.Publish(events.Event{Type: "draft.updated", SessionID: r.PathValue("session"), Revision: revision})
+	writeJSON(w, 200, map[string]any{"revision": revision})
 }
 
 func (s *Server) editSegment(w http.ResponseWriter, r *http.Request) {

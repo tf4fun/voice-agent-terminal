@@ -15,9 +15,10 @@ import (
 // Speech stream framing, shared with the device: one byte kind, a
 // little-endian uint16 payload length, then the payload.
 const (
-	FrameSentence = 1 // uint16 sentence index, then the UTF-8 sentence text.
-	FrameAudio    = 2 // 16 kHz PCM16LE mono.
-	FrameEnd      = 3 // One status byte.
+	FrameSentence  = 1 // uint16 sentence index, then the UTF-8 sentence text.
+	FrameAudio     = 2 // 16 kHz PCM16LE mono.
+	FrameEnd       = 3 // One status byte.
+	FrameKeepalive = 4 // Empty; sent while the reply is still being thought about.
 
 	SpeechDone      = 0
 	SpeechFailed    = 1

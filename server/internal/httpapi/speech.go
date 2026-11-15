@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"time"
@@ -29,8 +30,16 @@ func (s *Server) speech(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Speech-Format", "pcm_s16le;rate=16000;channels=1")
 	w.WriteHeader(http.StatusOK)
 	_ = controller.Flush()
+	keepalive := []byte{gateway.FrameKeepalive, 0, 0}
 	for {
-		frame, ok, err := reader.Next(r.Context())
+		// Hermes may think for a long time before the first sentence; an empty
+		// frame every 5 s keeps the device's read timeout from firing.
+		wait, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		frame, ok, err := reader.Next(wait)
+		cancel()
+		if err != nil && r.Context().Err() == nil && errors.Is(err, context.DeadlineExceeded) {
+			frame, ok, err = keepalive, true, nil
+		}
 		if err != nil || !ok {
 			return
 		}

@@ -150,6 +150,10 @@ backpressure overflowed the device's 8 KiB PCM queue at 2.8-2.9 s. The prefetch
 holds up to 16 MiB per capture, more than a full 300 s 16 kHz recording, and
 allocates chunks only as audio arrives. The request's byte limit stays in force.
 
+`DELETE /api/v1/sessions/{id}/draft` with `{"revision":<n>}` retires every pending
+segment of the reviewed draft in one revision; a stale revision returns 409 and a
+recording or pending replacement returns busy. `/api/v1/server` reports `draft_clear`.
+
 `GET /api/v1/sessions/{id}/draft` returns one consistent draft revision and a
 metadata page. Each item includes segment identity, state, size and a preview.
 `GET /api/v1/sessions/{id}/draft/text` reads the joined draft text and its
@@ -321,7 +325,9 @@ markup, code blocks and link targets, and synthesizes each sentence in order.
 The response is framed binary: one kind byte, a little-endian uint16 length,
 then the payload. Kind 1 starts a sentence (uint16 index and its UTF-8 text),
 kind 2 carries 16 kHz PCM16LE mono audio in 128 ms frames, and kind 3 ends the
-stream with a status byte (0 done, 1 failed, 2 cancelled, 3 size limit).
+stream with a status byte (0 done, 1 failed, 2 cancelled, 3 size limit). Kind
+4 is an empty keepalive sent every 5 s while no other frame is ready, so a
+device's read timeout survives a long think.
 
 Synthesis starts on the first request for a reply and is shared: later
 listeners replay from the beginning. Ten seconds after the last listener

@@ -28,11 +28,11 @@ func TestFirmwareReportParsesAndRenders(t *testing.T) {
 		"触发：录音失败后发送了草稿",
 		"上次启动 #3",
 		"17:00:12.000  +  12.000s  按键 OK 按下", // 5 s before the 17 s uptime at receipt.
-		"手势 OK 长按（页面=对话，录音=空闲）",
+		"手势 OK 长按（页面=文字卡片，录音=空闲）",
 		"HTTP POST segments → 201（240 ms）",
 		"PCM 队列已满",
 		"录音结果 saved=0 resolved=1 started=1 cancelled=0 capture_error=257",
-		"手势 OK 短按（页面=对话，录音=空闲）",
+		"手势 OK 短按（页面=文字卡片，录音=空闲）",
 		"发送草稿（修订 191）",
 		"W (15700) agent_capture: PCM queue full",
 	} {
@@ -42,6 +42,18 @@ func TestFirmwareReportParsesAndRenders(t *testing.T) {
 	}
 	if summary := Summary(report); !strings.Contains(summary, "录音失败后发送了草稿") || !strings.Contains(summary, "saved=0") {
 		t.Fatal(summary)
+	}
+}
+
+func TestVoiceAndSpeechEventsRender(t *testing.T) {
+	if got := describe(Event{Type: typeVoice, A: 5}); got != "语音页 → 思考中" {
+		t.Fatal(got)
+	}
+	if got := describe(Event{Type: typeSpeech, A: 2, B: 3}); got != "朗读结束：被停止（到第 4 句）" {
+		t.Fatal(got)
+	}
+	if got := describe(Event{Type: typePage, A: 6}); got != "页面 → 语音" {
+		t.Fatal(got)
 	}
 }
 

@@ -70,6 +70,10 @@ func TestReplySpeechStreamsSentencesAndAudio(t *testing.T) {
 			sentences++
 		case gateway.FrameAudio:
 			audio += len(f.payload)
+		case gateway.FrameKeepalive:
+			if len(f.payload) != 0 {
+				t.Fatal("keepalive with payload")
+			}
 		}
 	}
 	end := frames[len(frames)-1]
@@ -85,4 +89,18 @@ func TestReplySpeechStreamsSentencesAndAudio(t *testing.T) {
 		t.Fatalf("replay has %d frames, first had %d", len(again), len(frames))
 	}
 	e.request(t, "GET", base+"/messages/"+model.NewID()+"/speech", nil, 404)
+}
+
+func TestClearDraftRetiresAllSegmentsAtTheReviewedRevision(t *testing.T) {
+	e := setup(t)
+	session := model.NewID()
+	base := "/api/v1/sessions/" + session
+	e.request(t, "POST", "/api/v1/sessions", map[string]string{"id": session, "title": "清空"}, 201)
+	e.request(t, "POST", base+"/segments", map[string]any{"id": model.NewID(), "revision": 1, "text": "第一段"}, 201)
+	e.request(t, "POST", base+"/segments", map[string]any{"id": model.NewID(), "revision": 2, "text": "第二段"}, 201)
+	e.request(t, "DELETE", base+"/draft", map[string]any{"revision": 2}, 409) // Stale review.
+	e.request(t, "DELETE", base+"/draft", map[string]any{"revision": 3}, 200)
+	if text := string(e.request(t, "GET", base+"/draft/content", nil, 200)); text != "" {
+		t.Fatalf("draft after clear: %q", text)
+	}
 }

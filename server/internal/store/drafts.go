@@ -259,6 +259,30 @@ func (s *Store) EditSegmentWithGeneration(ctx context.Context, sessionID, id, te
 	return next, retiredGeneration, err
 }
 
+// ClearDraft retires every pending segment of the reviewed draft in one
+// revision. A recording or pending replacement keeps the draft busy.
+func (s *Store) ClearDraft(ctx context.Context, sessionID string, revision int64) (int64, error) {
+	var next int64
+	err := s.transaction(ctx, func(tx *sql.Tx) error {
+		if err := checkDraft(ctx, tx, sessionID, revision); err != nil {
+			return err
+		}
+		if err := checkNoReplacement(ctx, tx, sessionID, ""); err != nil {
+			return err
+		}
+		if err := checkOtherCaptures(ctx, tx, sessionID, ""); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, "UPDATE segments SET text='',state='deleted',generation=generation+1 WHERE session_id=? AND message_id IS NULL AND state!='deleted' AND capture_mode=0", sessionID); err != nil {
+			return err
+		}
+		var err error
+		next, err = bumpDraft(ctx, tx, sessionID)
+		return err
+	})
+	return next, err
+}
+
 // A recognition update may only change the generation that started it.
 func (s *Store) UpdateTranscript(ctx context.Context, sessionID, id string, generation int64, text, state string) (int64, error) {
 	if !utf8.ValidString(text) || len(text) > model.MaxDraftBytes {
