@@ -162,6 +162,7 @@ static void delete_screen(void)
     s_voice_panel = s_voice_panel_count = s_voice_panel_scroll = s_voice_panel_body = s_voice_hints = NULL;
     s_ticker_source = NULL;
     s_ticker_line = -1;
+    s_voice_review = -1; // Line offsets belong to the reply being left.
     s_voice_mode = s_voice_hint_set = -1;
     s_voice_small = s_voice_arc_spinning = s_voice_spin_spinning = false;
     free(s_voice_reply);
@@ -839,6 +840,7 @@ static void line_slide(int direction)
 // Time a line stays before the next: long enough to read it.
 static int64_t line_dwell(int index)
 {
+    if (s_voice_display == NULL || index < 0 || index >= s_voice_line_count) return (int64_t)TICKER_MIN_MS * 1000;
     size_t runes = 0;
     for (size_t at = s_voice_lines[index]; at < s_voice_lines[index + 1]; at++)
         if (((unsigned char)s_voice_display[at] & 0xC0) != 0x80) runes++;
@@ -908,6 +910,7 @@ static void render_voice(void)
     }
     s_voice_mode = (int)mode;
     const int64_t now = esp_timer_get_time();
+    if (s_voice_review >= s_voice_line_count) s_voice_review = -1; // The reply changed under the review.
     if (s_voice_review >= 0 && now - s_voice_review_at > 15000000) { // Resume ticking from this line.
         s_ticker_line = s_voice_review;
         s_ticker_next = now + line_dwell(s_voice_review);
