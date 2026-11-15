@@ -60,8 +60,18 @@ and a transcript card. Empty states,
 provisioning and settings use accent-tinted circular icon badges, and numeric
 setting values use large figures with a pill meter. The design adds no shadows,
 gradients or translucent layers, and its animations are the two existing
-spinners. Heap and largest-block margins for this layout await device
-measurement.
+spinners.
+
+On 2026-11-15 the user authorized segmented flashing of `e1bc3c5` (full image
+SHA-256 `39b58fd51b3c1def819678183629c5b96bb9c57939a5ec183744e6b510bc1394`,
+application 5,991,296 bytes); all three writes verified and NVS was retained.
+Application-ready free heap was 82,752 bytes with a 69,632-byte largest block.
+A three-minute observation covered two successful recordings (0.9 s and 5.8 s,
+both `audio response=200`) without a PCM queue overflow. Minimum free heap was
+71,060 bytes and the lowest sampled largest block was 65,536 bytes. The earlier
+sixteen-bar build `fcc93bb` overflowed the PCM queue once in two recordings,
+which led to the three-bar meter. More recordings are needed before treating
+capture headroom as settled.
 
 `tools/ui-preview.sh` renders every screen on the host in both themes with the
 locked LVGL version and the production `agent_app.c`, writing PNG frames and
