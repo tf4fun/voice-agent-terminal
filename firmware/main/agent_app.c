@@ -97,6 +97,12 @@ static char *s_voice_display, *s_voice_marquee;
 static uint16_t s_voice_lines[VOICE_MAX_LINES + 1];
 static int s_voice_line_count;
 static int64_t s_voice_review_at; // Last review key; review ends after 15 s without one.
+// The rest-state marquee is driven here (not by LVGL) so a key press can stop
+// it on the sentence being shown.
+static lv_obj_t *s_voice_marquee_box, *s_voice_marquee_label;
+static const char *s_marquee_source;
+static int32_t s_marquee_width;
+static int64_t s_marquee_start;
 static char s_think_id[37];
 static int64_t s_think_since;
 static agent_speech_view_t s_speech;
@@ -155,6 +161,8 @@ static void delete_screen(void)
     s_voice_orb = s_voice_arc = s_voice_status = s_voice_timer = s_voice_side = s_voice_side_sub = NULL;
     s_voice_strip = s_voice_strip_text = s_voice_strip_spin = s_voice_strip_tag = NULL;
     s_voice_panel = s_voice_panel_count = s_voice_panel_scroll = s_voice_panel_body = s_voice_hints = NULL;
+    s_voice_marquee_box = s_voice_marquee_label = NULL;
+    s_marquee_source = NULL;
     s_voice_mode = s_voice_hint_set = -1;
     s_voice_small = s_voice_arc_spinning = s_voice_spin_spinning = false;
     free(s_voice_reply);
@@ -282,6 +290,13 @@ static void build_voice(void)
     s_voice_strip_text = label(s_voice_strip, 14, (VOICE_STRIP_H - memo_font_label()->line_height) / 2 - 1, VOICE_STRIP_W - 28, false, UI_FG);
     lv_obj_set_height(s_voice_strip_text, memo_font_label()->line_height);
     lv_label_set_long_mode(s_voice_strip_text, LV_LABEL_LONG_DOT);
+    s_voice_marquee_box = bare(s_voice_strip); // Clips the moving text to the strip's inner width.
+    lv_obj_set_pos(s_voice_marquee_box, 14, (VOICE_STRIP_H - memo_font_label()->line_height) / 2 - 1);
+    lv_obj_set_size(s_voice_marquee_box, VOICE_STRIP_W - 28, memo_font_label()->line_height);
+    s_voice_marquee_label = memo_ui_label(s_voice_marquee_box, memo_font_label(), UI_DIM);
+    lv_label_set_long_mode(s_voice_marquee_label, LV_LABEL_LONG_CLIP);
+    lv_obj_set_size(s_voice_marquee_label, LV_SIZE_CONTENT, memo_font_label()->line_height);
+    lv_obj_set_hidden(s_voice_marquee_box, true);
     s_voice_strip_tag = memo_ui_label(s_voice_strip, memo_font_meta(), UI_DIM);
     lv_obj_set_pos(s_voice_strip_tag, VOICE_STRIP_W - 48, (VOICE_STRIP_H - memo_font_meta()->line_height) / 2 - 1);
     lv_obj_set_width(s_voice_strip_tag, 36);
@@ -641,8 +656,9 @@ static void voice_hints(int set, const voice_hint_t *items, int count)
         lv_obj_set_style_border_color(chip, lv_color_hex(items[i].hold ? UI_FG : UI_DIM), 0);
         lv_obj_set_style_bg_color(chip, lv_color_hex(UI_FG), 0);
         lv_obj_set_style_bg_opa(chip, items[i].hold ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
-        const bool latin = strcmp(items[i].key, "OK") == 0;
-        lv_obj_t *key = memo_ui_label(chip, latin ? &lv_font_montserrat_14 : memo_font_label(), items[i].hold ? UI_BG : UI_FG);
+        // Every key uses the same face and size; arrows are Montserrat's chevrons.
+        lv_obj_t *key = memo_ui_label(chip, &lv_font_montserrat_14, items[i].hold ? UI_BG : UI_FG);
+        if (strcmp(items[i].key, "OK") != 0) lv_obj_set_style_text_letter_space(key, 2, 0);
         lv_label_set_text_static(key, items[i].key);
         lv_obj_t *text = memo_ui_label(item, memo_font_label(), UI_DIM);
         lv_label_set_text_static(text, items[i].text);
@@ -811,6 +827,70 @@ static void voice_wrap_lines(void)
     s_voice_lines[s_voice_line_count] = (uint16_t)(at < UINT16_MAX ? at : UINT16_MAX);
 }
 
+
+enum { MARQUEE_PAUSE_MS = 1200, MARQUEE_SPEED = 40, MARQUEE_GAP = 48 }; // px/s, gap between loops
+
+static int32_t text_width(const char *text, size_t length)
+{
+    int32_t width = 0;
+    for (size_t at = 0; at < length && text[at];) {
+        size_t size;
+        width += lv_font_get_glyph_width(memo_font_label(), utf8_codepoint(text, at, &size), 0);
+        at += size;
+    }
+    return width;
+}
+
+// Pixels the marquee has moved at time now (0 while it rests at the start).
+static int32_t marquee_offset(int64_t now)
+{
+    const int32_t span = s_marquee_width + MARQUEE_GAP;
+    if (s_marquee_width <= VOICE_STRIP_W - 28 || span <= 0) return 0;
+    const int64_t moving = (now - s_marquee_start) / 1000 - MARQUEE_PAUSE_MS;
+    if (moving <= 0) return 0;
+    return (int32_t)((moving * MARQUEE_SPEED / 1000) % span);
+}
+
+// The review unit holding the text at the marquee's left edge.
+static int marquee_unit(int64_t now)
+{
+    const int32_t offset = marquee_offset(now) + 8;
+    int32_t width = 0;
+    size_t at = 0;
+    while (s_voice_marquee != NULL && s_voice_marquee[at] && width < offset) {
+        size_t size;
+        width += lv_font_get_glyph_width(memo_font_label(), utf8_codepoint(s_voice_marquee, at, &size), 0);
+        at += size;
+    }
+    int unit = 0;
+    while (unit + 1 < s_voice_line_count && s_voice_lines[unit + 1] <= at) unit++;
+    return unit;
+}
+
+static void marquee_show(bool visible, int64_t now)
+{
+    reveal(s_voice_marquee_box, visible);
+    reveal(s_voice_strip_text, !visible);
+    if (!visible) { s_marquee_source = NULL; return; }
+    if (s_marquee_source != s_voice_marquee) {
+        s_marquee_source = s_voice_marquee;
+        s_marquee_width = text_width(s_voice_marquee, strlen(s_voice_marquee));
+        s_marquee_start = now;
+        const size_t length = strlen(s_voice_marquee);
+        char *loop = malloc(2 * length + 8);
+        if (loop != NULL) {
+            // Two copies separated by a gap make the loop seamless.
+            memcpy(loop, s_voice_marquee, length);
+            memcpy(loop + length, "　　　", 9);
+            memcpy(loop + length + 9, s_voice_marquee, length + 1);
+            memo_font_label_text(s_voice_marquee_label, s_marquee_width > VOICE_STRIP_W - 28 ? loop : s_voice_marquee, false);
+            free(loop);
+        }
+    }
+    const int32_t x = -marquee_offset(now);
+    if (lv_obj_get_x(s_voice_marquee_label) != x) lv_obj_set_x(s_voice_marquee_label, x);
+}
+
 // Keeps a copy of the newest reply and its sentence ranges for the strip.
 static void voice_reply_cache(bool streaming)
 {
@@ -975,9 +1055,8 @@ static void render_voice(void)
     } else if ((mode == AGENT_VOICE_IDLE || mode == AGENT_VOICE_FAILED) && s_view.turn.present &&
                s_voice_marquee != NULL && s_voice_marquee[0] != '\0') {
         // At rest the strip scrolls through the whole last reply.
-        agent_copy_text(line, sizeof(line), "");
+        line[0] = '\0';
         strip = true;
-        circular = true;
         strip_tone = UI_DIM;
     } else if (mode == AGENT_VOICE_REPLYING && s_voice_sentences > 0) {
         const int index = s_voice_sentences - 1;
@@ -993,9 +1072,10 @@ static void render_voice(void)
         if (lv_obj_get_x(s_voice_strip_text) != text_x) lv_obj_set_x(s_voice_strip_text, text_x);
         if (lv_obj_get_width(s_voice_strip_text) != text_w) lv_obj_set_width(s_voice_strip_text, text_w);
         set_long_mode(s_voice_strip_text, circular ? LV_LABEL_LONG_SCROLL_CIRCULAR : LV_LABEL_LONG_DOT);
-        const char *shown = line[0] == '\0' && s_voice_marquee != NULL && s_voice_review < 0 &&
-                            (mode == AGENT_VOICE_IDLE || mode == AGENT_VOICE_FAILED) ? s_voice_marquee : line;
-        if (strcmp(lv_label_get_text(s_voice_strip_text), shown) != 0) set_text(s_voice_strip_text, shown, false);
+        const bool marquee = line[0] == '\0' && s_voice_marquee != NULL && s_voice_review < 0 &&
+                             (mode == AGENT_VOICE_IDLE || mode == AGENT_VOICE_FAILED);
+        marquee_show(marquee, now);
+        if (!marquee && strcmp(lv_label_get_text(s_voice_strip_text), line) != 0) set_text(s_voice_strip_text, line, false);
         set_text_color(s_voice_strip_text, strip_tone);
         if ((lv_color_to_u32(lv_obj_get_style_border_color(s_voice_strip, 0)) & 0xFFFFFF) != border)
             lv_obj_set_style_border_color(s_voice_strip, lv_color_hex(border), 0);
@@ -1024,11 +1104,11 @@ static void render_voice(void)
 
     // Key hints for what the keys do right now.
     static const voice_hint_t idle[] = {{"OK", false, "文字"}, {"OK", true, "说话"}};
-    static const voice_hint_t review[] = {{"↑↓", false, "逐句"}, {"OK", true, "说话"}};
+    static const voice_hint_t review[] = {{LV_SYMBOL_UP LV_SYMBOL_DOWN, false, "逐句"}, {"OK", true, "说话"}};
     static const voice_hint_t failed[] = {{"OK", false, "重试"}, {"OK", true, "说话"}};
     static const voice_hint_t draft[] = {{"OK", false, "发送"}, {"OK", true, "重录"}};
     static const voice_hint_t recording[] = {{"OK", true, "松开结束"}};
-    static const voice_hint_t speaking_hints[] = {{"OK", false, "文字"}, {"↓", true, "停止"}};
+    static const voice_hint_t speaking_hints[] = {{"OK", false, "文字"}, {LV_SYMBOL_DOWN, true, "停止"}};
     switch (mode) {
     case AGENT_VOICE_PREPARING:
     case AGENT_VOICE_RECORDING: voice_hints(1, recording, 1); break;
@@ -1244,11 +1324,11 @@ static void voice_key(bsp_btn_t button)
         if (target < 0) target = 0;
         lv_obj_scroll_to_y(s_voice_panel_scroll, target, LV_ANIM_OFF);
     } else if ((mode == AGENT_VOICE_IDLE || mode == AGENT_VOICE_FAILED) && s_voice_line_count > 0) {
-        // Step through the last reply one sentence (or one strip-wide piece of a
-        // long sentence) per press from the start; past the end, the strip
-        // returns to scrolling the whole reply.
+        // Then each press steps one sentence (or one strip-wide piece of a long
+        // sentence); past the end, the strip returns to scrolling the reply.
         s_voice_review_at = esp_timer_get_time();
-        if (s_voice_review < 0) s_voice_review = 0;
+        // The first press only stops the scrolling, on the sentence in view.
+        if (s_voice_review < 0) s_voice_review = marquee_unit(s_voice_review_at);
         else {
             const int index = s_voice_review + direction;
             s_voice_review = index < 0 ? 0 : index >= s_voice_line_count ? -1 : index;
