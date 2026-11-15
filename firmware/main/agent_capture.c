@@ -1,4 +1,5 @@
 #include "agent_capture.h"
+#include "agent_trace.h"
 
 #include <stdatomic.h>
 #include "bsp_audio.h"
@@ -30,7 +31,7 @@ static void capture_task(void *arg)
                  (unsigned)uxTaskGetStackHighWaterMark(NULL));
         while (s_requested) {
             esp_err_t err = bsp_audio_read(s_samples, sizeof(s_samples));
-            if (err != ESP_OK) { s_error = err; break; }
+            if (err != ESP_OK) { s_error = err; agent_trace(TRACE_CAPTURE_ERROR, 1, (int32_t)err, NULL); agent_trace_request(TRACE_TRIGGER_CAPTURE_ERROR); break; }
             uint32_t level = 0;
             for (size_t i = 0; i < 320; i++) level += s_samples[i] < 0 ? -(int32_t)s_samples[i] : s_samples[i];
             level = level / 320 / 128;
@@ -38,6 +39,8 @@ static void capture_task(void *arg)
             if (xStreamBufferSend(s_pcm, s_samples, sizeof(s_samples), 0) != sizeof(s_samples)) {
                 s_error = ESP_ERR_NO_MEM;
                 ESP_LOGW(TAG, "PCM queue full; network consumer is behind capture");
+                agent_trace(TRACE_CAPTURE_ERROR, 0, (int32_t)ESP_ERR_NO_MEM, NULL);
+                agent_trace_request(TRACE_TRIGGER_CAPTURE_ERROR);
                 break;
             }
             captured_samples += sizeof(s_samples) / sizeof(s_samples[0]);

@@ -8,6 +8,7 @@
 #include <errno.h>
 #include <limits.h>
 #include "agent_sse.h"
+#include "agent_trace.h"
 #include "memo_text.h"
 #include "agent_capture.h"
 #include "cJSON.h"
@@ -46,6 +47,8 @@ static atomic_bool s_resync;
 static char s_operation_body[4096], s_sync_body[8192];
 static uint8_t s_audio_chunk[1280];
 static bool s_audio_started;
+// When the last recording failed; a send shortly after one is reported.
+static _Atomic uint32_t s_record_failed_ms; // 0 = none; 32-bit for single-word atomics.
 static char s_pending_message[37];
 static uint32_t s_pending_revision;
 static int s_draft_total;
@@ -201,12 +204,33 @@ static int read_response(esp_http_client_handle_t client, char *body, size_t cap
     return esp_http_client_get_status_code(client);
 }
 
+static const char *method_name(esp_http_client_method_t method)
+{
+    switch (method) {
+    case HTTP_METHOD_GET: return "G";
+    case HTTP_METHOD_POST: return "P";
+    case HTTP_METHOD_PATCH: return "U"; // Update; distinct from POST in the one-letter tag.
+    case HTTP_METHOD_DELETE: return "D";
+    default: return "?";
+    }
+}
+
+// Mutations and failures only; the sync task's routine reads would flood the ring.
+static void trace_request(esp_http_client_method_t method, const char *path, int status, int64_t started_us)
+{
+    if (method == HTTP_METHOD_GET && status >= 200 && status < 300) return;
+    char tag[AGENT_TRACE_TAG_BYTES];
+    agent_trace_path_tag(method_name(method), path, tag);
+    agent_trace(TRACE_HTTP, (uint16_t)status, (int32_t)((esp_timer_get_time() - started_us) / 1000), tag);
+}
+
 static int request(esp_http_client_method_t method, const char *path, const char *payload,
                    char *body, size_t capacity)
 {
     body[0] = '\0';
+    const int64_t started = esp_timer_get_time();
     esp_http_client_handle_t client = http_client(path, method);
-    if (client == NULL) return 0;
+    if (client == NULL) { trace_request(method, path, 0, started); return 0; }
     const size_t size = payload == NULL ? 0 : strlen(payload);
     if (payload != NULL) esp_http_client_set_header(client, "Content-Type", "application/json");
     int status = 0;
@@ -214,6 +238,7 @@ static int request(esp_http_client_method_t method, const char *path, const char
         status = read_response(client, body, capacity);
     esp_http_client_close(client);
     esp_http_client_cleanup(client);
+    trace_request(method, path, status, started);
     return status;
 }
 
@@ -916,6 +941,7 @@ static bool upload_audio(const char *session, const char *segment, uint32_t revi
             status = read_response(client, s_operation_body, sizeof(s_operation_body));
         ESP_LOGI(TAG, "audio response=%d bytes=%u network_stack=%u", status, (unsigned)sent,
                  (unsigned)uxTaskGetStackHighWaterMark(NULL));
+        agent_trace(TRACE_AUDIO, (uint16_t)status, (int32_t)sent, NULL);
         ok = status == 200 && agent_parse_revision(s_operation_body, &commit_revision) && commit_revision > 0;
     }
     // Release the upload client before allocating the commit request client.
@@ -1057,6 +1083,12 @@ static void record(const command_t *command)
     ESP_LOGI(TAG, "record result saved=%d resolved=%d started=%d cancelled=%d capture_error=%d network_stack=%u",
              saved, resolved, s_audio_started, (bool)s_cancelled, (int)agent_capture_error(),
              (unsigned)uxTaskGetStackHighWaterMark(NULL));
+    agent_trace(TRACE_RECORD, (uint16_t)((saved ? 1 : 0) | (resolved ? 2 : 0) | (s_audio_started ? 4 : 0) |
+                (s_cancelled ? 8 : 0)), (int32_t)agent_capture_error(), NULL);
+    if (!saved && !s_cancelled && (s_audio_started || s_held)) {
+        s_record_failed_ms = (uint32_t)(esp_timer_get_time() / 1000) | 1;
+        agent_trace_request(TRACE_TRIGGER_RECORD_FAILED);
+    }
     if (saved) {
         audio_kept = true;
         if (create || strcmp(command->title, "新会话") == 0) name_session(session, segment);
@@ -1276,6 +1308,66 @@ static void execute(const command_t *command)
     s_resync = true;
 }
 
+typedef struct {
+    esp_http_client_handle_t client;
+} trace_upload_t;
+
+static bool trace_chunk(void *context, const char *data, size_t length)
+{
+    trace_upload_t *upload = context;
+    char prefix[16];
+    const int size = snprintf(prefix, sizeof(prefix), "%x\r\n", (unsigned)length);
+    return write_all(upload->client, prefix, (size_t)size) && write_all(upload->client, data, length) &&
+           write_all(upload->client, "\r\n", 2);
+}
+
+// Streams the diagnostic ring as chunked JSON; a 5 KiB snapshot is held only
+// for the duration of the upload.
+static bool upload_trace(agent_trace_trigger_t trigger)
+{
+    agent_trace_store_t *snapshot = malloc(sizeof(*snapshot));
+    if (snapshot == NULL) return false;
+    agent_trace_snapshot(snapshot);
+    agent_trace_meta_t meta;
+    agent_trace_meta(&meta, trigger);
+    bool ok = false;
+    esp_http_client_handle_t client = http_client("/device/logs", HTTP_METHOD_POST);
+    if (client != NULL) {
+        esp_http_client_set_header(client, "Content-Type", "application/json");
+        trace_upload_t upload = {.client = client};
+        if (esp_http_client_open(client, -1) == ESP_OK && agent_trace_core_encode(snapshot, &meta, trace_chunk, &upload) &&
+            write_all(client, "0\r\n\r\n", 5)) {
+            char body[96];
+            const int status = read_response(client, body, sizeof(body));
+            ok = status == 201;
+            if (!ok) ESP_LOGW(TAG, "diagnostic upload status=%d", status);
+        }
+        esp_http_client_close(client);
+        esp_http_client_cleanup(client);
+    }
+    free(snapshot);
+    return ok;
+}
+
+static void report_trace(void)
+{
+    static int64_t last_us;
+    static unsigned uploads;
+    const agent_trace_trigger_t trigger = agent_trace_pending();
+    if (trigger == TRACE_TRIGGER_NONE) return;
+    lock();
+    const bool idle = s_view.capture == AGENT_IDLE;
+    unlock();
+    const int64_t now = esp_timer_get_time();
+    if (!idle || (last_us != 0 && now - last_us < 15000000)) return;
+    last_us = now;
+    if (uploads >= 30) { agent_trace_reported(trigger, false, true); return; } // Bounded per boot.
+    uploads++;
+    const bool ok = upload_trace(trigger);
+    agent_trace_reported(trigger, ok, ok); // A failed upload stays pending for a later retry.
+    ESP_LOGI(TAG, "diagnostic report trigger=%s uploaded=%d", agent_trace_trigger_name(trigger), ok);
+}
+
 static void network_task(void *arg)
 {
     (void)arg;
@@ -1292,6 +1384,7 @@ static void network_task(void *arg)
         lock();
         if (s_view.connected != online) { s_view.connected = online; changed(); }
         unlock();
+        if (online && !s_paused) report_trace();
         const int64_t now = esp_timer_get_time();
         if (!s_paused && !online && memo_net_has_ip() && now - last_search > 10000000) {
             discover_server();
@@ -1453,7 +1546,10 @@ esp_err_t agent_client_send(uint32_t revision, uint32_t selection)
         s_view.text_kind == AGENT_TEXT_DRAFT && s_view.text.revision == revision &&
         s_view.draft_revision == revision && s_view.text.total > 0;
     unlock();
+    agent_trace(TRACE_SEND, ready ? 1 : 0, (int32_t)revision, NULL);
     if (!ready) return ESP_ERR_INVALID_STATE;
+    const uint32_t failed = s_record_failed_ms;
+    if (failed != 0 && (uint32_t)(esp_timer_get_time() / 1000) - failed < 5000) agent_trace_request(TRACE_TRIGGER_SEND_AFTER_FAILURE);
     command_t c = {.kind = CMD_SEND, .revision = revision, .selection = selection};
     return queue(&c);
 }

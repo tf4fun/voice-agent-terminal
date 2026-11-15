@@ -9,6 +9,10 @@ python3 tools/check-firmware.py
     firmware/tests/test_agent_protocol.c firmware/main/agent_protocol.c \
     firmware/main/memo_text.c firmware/tests/vendor/cjson/cJSON.c -lm -o "$test_dir/protocol"
 "$test_dir/protocol"
+"${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Ifirmware/main -Ifirmware/tests/vendor/cjson \
+    firmware/tests/test_agent_trace.c firmware/main/agent_trace.c firmware/tests/vendor/cjson/cJSON.c \
+    -lm -o "$test_dir/trace"
+"$test_dir/trace"
 for test in test_memo_key test_key_guard test_memo_power; do
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Ifirmware/main \
         "firmware/tests/$test.c" -o "$test_dir/$test"
@@ -20,7 +24,7 @@ done
 
 "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Ifirmware/main -Ifirmware/tests/client_stubs \
     -Ifirmware/tests/vendor/cjson firmware/tests/test_agent_client.c \
-    firmware/main/agent_protocol.c firmware/main/memo_text.c \
+    firmware/main/agent_protocol.c firmware/main/memo_text.c firmware/main/agent_trace.c \
     firmware/tests/vendor/cjson/cJSON.c -lm -o "$test_dir/client"
 "$test_dir/client"
 "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Ifirmware/main -Ifirmware/tests/discovery_stubs \

@@ -51,6 +51,10 @@ enum capture_case {
     CAPTURE_LOST_ACK_ONCE, CAPTURE_LOST_ACK_TWICE, CAPTURE_SHORT,
 };
 static bool capture_mode, capture_running, upload_closed, stage_ready, stage_exists;
+static char trace_body[16384];
+static size_t trace_written;
+static unsigned trace_uploads;
+static int trace_status = 201;
 static bool server_committed, cancel_accepted, audio_eof;
 static unsigned chunks_read, cancel_attempts, commit_requests, commit_applies, abort_requests;
 static enum capture_case capture_case;
@@ -171,6 +175,12 @@ esp_err_t esp_http_client_open(esp_http_client_handle_t client,int size)
 { (void)client;(void)size;return ESP_OK; }
 int esp_http_client_write(esp_http_client_handle_t client,const char *data,int size)
 {
+    if(strstr(client->url,"/device/logs")) {
+        assert(trace_written+(size_t)size<sizeof(trace_body));
+        memcpy(trace_body+trace_written,data,(size_t)size);
+        trace_written+=(size_t)size;
+        return size;
+    }
     if(capture_mode && strstr(client->url,"/audio?")) {
         if(size==5 && memcmp(data,"0\r\n\r\n",5)==0)audio_eof=true;
     } else if(capture_mode) {
@@ -183,6 +193,13 @@ int esp_http_client_write(esp_http_client_handle_t client,const char *data,int s
 }
 int64_t esp_http_client_fetch_headers(esp_http_client_handle_t client)
 {
+    if(strstr(client->url,"/device/logs")) {
+        trace_uploads++;
+        client->status=trace_status;
+        strcpy(client->response,"{\"id\":\"x\"}");
+        client->length=strlen(client->response);
+        return (int64_t)client->length;
+    }
     client->status=response_status;
     if(capture_mode) {
         client->status=200;
@@ -536,6 +553,56 @@ static void test_capture(enum capture_case test_case)
     capture_mode=false;
 }
 
+// Undo HTTP/1.1 chunked framing written by the trace upload.
+static size_t unchunk(const char *in, size_t length, char *out)
+{
+    size_t used = 0, i = 0;
+    while (i < length) {
+        char *end = NULL;
+        const unsigned long size = strtoul(in + i, &end, 16);
+        i = (size_t)(end - in) + 2;
+        if (size == 0) break;
+        memcpy(out + used, in + i, size);
+        used += size;
+        i += size + 2;
+    }
+    out[used] = 0;
+    return used;
+}
+
+static void test_failure_report_upload(void)
+{
+    setup();
+    s_view.capture = AGENT_IDLE;
+    trace_written = 0; trace_uploads = 0; trace_status = 503;
+    char ok_body[64];
+    request(HTTP_METHOD_POST, "/sessions/00000000-0000-4000-8000-000000000001/messages", "{}", ok_body, sizeof(ok_body));
+    agent_trace_request(TRACE_TRIGGER_RECORD_FAILED);
+    report_trace();
+    CHECK(trace_uploads == 1 && agent_trace_pending() == TRACE_TRIGGER_RECORD_FAILED); // Failed upload stays pending.
+    report_trace();
+    CHECK(trace_uploads == 1); // Rate limited.
+    trace_written = 0; trace_status = 201;
+    CHECK(upload_trace(TRACE_TRIGGER_RECORD_FAILED));
+    agent_trace_reported(TRACE_TRIGGER_RECORD_FAILED, true, true);
+    CHECK(agent_trace_pending() == TRACE_TRIGGER_NONE);
+    static char json[16384];
+    unchunk(trace_body, trace_written, json);
+    cJSON *root = cJSON_Parse(json);
+    CHECK(root != NULL);
+    if (root != NULL) {
+        CHECK(strcmp(cJSON_GetObjectItem(root, "trigger")->valuestring, "record_failed") == 0);
+        bool saw_post = false;
+        const cJSON *event;
+        cJSON_ArrayForEach(event, cJSON_GetObjectItem(root, "events")) {
+            if (cJSON_GetArrayItem(event, 2)->valueint == TRACE_HTTP &&
+                strcmp(cJSON_GetArrayItem(event, 5)->valuestring, "P messages") == 0) saw_post = true;
+        }
+        CHECK(saw_post);
+        cJSON_Delete(root);
+    }
+}
+
 int main(void)
 {
     assert(agent_client_init()==ESP_OK);
@@ -550,6 +617,7 @@ int main(void)
     test_reply_stream_uses_http_reader();
     test_retry_accepts_server_message();
     for(enum capture_case item=CAPTURE_NORMAL;item<=CAPTURE_SHORT;item++)test_capture(item);
+    test_failure_report_upload();
     clear_message_cache();
     printf("client regression assertions failed=%u\n",failed);
     return failed?1:0;

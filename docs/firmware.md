@@ -8,6 +8,24 @@ It adapts voice-memo's board support, Chinese fonts, settings,
 Wi-Fi and BLUFI lifecycle, immediate short-press detection and screen-off policy.
 The existing memo checkout remains the hardware reference.
 
+## Diagnostic reports
+
+The firmware keeps a diagnostic trace in RTC memory (`agent_trace.c`): the last
+160 events and about 1.5 KiB of warning/error log lines, 5.4 KiB in total. It
+survives software resets, panics and watchdog resets, and is cleared at power-on.
+Events cover button press/release, resolved gestures with page and capture
+state, page and capture transitions with heap figures, mutating HTTP requests
+and failed reads (status and elapsed time, no IDs or bodies), the audio upload
+result, the recording result flags, send requests and capture errors. Routine
+successful polls are not recorded, so they cannot flush the context.
+
+A report is uploaded to `POST /api/v1/device/logs` after a failed recording, a
+capture error, an abnormal reset (panic, watchdog, brownout, lockup) or a draft
+send within 5 s of a failed recording. The network task uploads while capture is
+idle, at most once per 15 s and 30 times per boot; a failed upload stays pending.
+The upload streams chunked JSON from a 5.4 KiB heap snapshot held only during the
+request. Reports never contain audio, transcripts or credentials.
+
 ## Screens and controls
 
 | Screen | Short press | Long press |

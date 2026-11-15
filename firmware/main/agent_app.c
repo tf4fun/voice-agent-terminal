@@ -7,6 +7,7 @@
 #include "agent_capture.h"
 #include "agent_chat_layout.h"
 #include "agent_client.h"
+#include "agent_trace.h"
 #include "agent_logic.h"
 #include "agent_ui_status.h"
 #include "bsp_audio.h"
@@ -693,6 +694,9 @@ static void confirm_chat(void)
 
 static void gesture(bsp_btn_t button, bool hold)
 {
+    char page[AGENT_TRACE_TAG_BYTES];
+    snprintf(page, sizeof(page), "p%d c%d", (int)s_page, (int)s_view.capture);
+    agent_trace(TRACE_GESTURE, (uint16_t)button, hold ? 1 : 0, page);
     if (s_sleep_requested) return;
     if (hold && button == BSP_BTN_DOWN) { exit_page(); return; }
     if (hold && button == BSP_BTN_UP && agent_page_is_root(s_page, s_edit.active)) {
@@ -798,18 +802,26 @@ static void input_task(void *arg)
                      (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
                      (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT),
                      (unsigned)uxTaskGetStackHighWaterMark(NULL));
+            if ((int)s_page != last_page) agent_trace(TRACE_PAGE, (uint16_t)s_page, 0, NULL);
+            if (s_view.capture != last_capture) {
+                agent_trace(TRACE_CAPTURE, (uint16_t)s_view.capture, 0, NULL);
+                agent_trace(TRACE_HEAP, (uint16_t)(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) / 1024),
+                            (int32_t)heap_caps_get_free_size(MALLOC_CAP_8BIT), NULL);
+            }
             last_memory = now;
             last_capture = s_view.capture;
             last_page = s_page;
         }
         const bool discard_input = atomic_exchange(&s_release_lost, false);
         if (discard_input) {
+            agent_trace(TRACE_KEY, 0xff, 0, "lost"); // A release was dropped; key state is reset.
             xQueueReset(s_input);
             agent_client_release_record();
             memset(s_keys, 0, sizeof(s_keys));
             s_wake_ok = false;
         }
         if (received && !discard_input) {
+            agent_trace(TRACE_KEY, (uint16_t)input.button, (int32_t)input.event, NULL);
             const bool release = input.event == BSP_BTN_RELEASE;
             const bool wake = s_power.blank && input.event == BSP_BTN_PRESS && input.button == BSP_BTN_OK;
             const bool consumed = memo_power_key(&s_power, now / 1000, input.event == BSP_BTN_PRESS, release) ||
@@ -841,6 +853,7 @@ static void input_task(void *arg)
 
 void app_main(void)
 {
+    agent_trace_init(); // First, so later warnings and the reset reason are retained.
     ESP_LOGI(TAG, "voice agent terminal starting");
     if (memo_settings_init() != ESP_OK || bsp_i2c_init() != ESP_OK || bsp_display_init() != ESP_OK || bsp_lvgl_init() == NULL) return;
     bsp_display_backlight(memo_settings_get()->brightness);
