@@ -18,11 +18,12 @@ acts in that moment), then expands into the draft panel. Sending collapses it
 to one line with the question while Hermes thinks: a comet arc orbits the orb,
 the bars rise in turn and the status counts the seconds waited. While a reply
 is spoken the strip shows the sentence being read and scrolls long ones; when
-it ends the strip scrolls through the whole reply. Up/down then step through
-it sentence by sentence without motion: Markdown marks are dropped, a sentence
-wider than the strip continues in further pieces, closing punctuation never
-starts a piece, the status shows the position, and 15 s without a key returns
-to scrolling. Notices replace the status line
+it ends the strip becomes a vertical ticker over the reply: Markdown marks are
+dropped, every sentence starts a line, a sentence wider than the strip
+continues on further lines, and closing punctuation never starts one. Each
+line stays 220 ms per character (1.8–5 s) and the next slides up in 0.25 s;
+after the last line it rests 3 s and starts over. Up/down hold and move lines,
+the status shows the position, and 15 s without a key resumes the ticker. Notices replace the status line
 instead of overlaying other elements. The text card is the previous
 conversation page; it now streams the reply as it arrives and shows
 "正在朗读" while speech plays. Two marks under the header tell the views apart.
@@ -41,11 +42,8 @@ the codec after 200 ms of prebuffer, refilling 100 ms after running dry. The
 4 KiB frame buffer, the playback buffer and the writer's stack exist only
 while a stream plays.
 
-The resting marquee is an LVGL animation in step with the display refresh;
-its label holds only a window of about 360 px around the visible text. The
-first up/down press stops it in place and eases (0.3 s) to the start of the
-sentence in view, after which a still label shows the piece; further pieces
-slide in (0.18 s). The orb sits 8 px below the mode marks so the thinking arc
+The resting ticker draws one still line and animates only the 0.25 s slide
+between lines, so it costs almost nothing to render. The orb sits 8 px below the mode marks so the thinking arc
 never touches the header. With a draft, long Down clears it through
 `DELETE /sessions/{id}/draft` at the reviewed revision.
 
@@ -79,7 +77,7 @@ streams its reply. Reading an older exchange is not interrupted.
 | Screen | Short press | Long press |
 | --- | --- | --- |
 | Sessions | Up/down select, crossing a page boundary loads four more sessions. OK opens the selected session. | OK creates a session and records while held. Up cycles to the next top-level page. Down sleeps. |
-| Voice (default in a session) | Without a draft: OK opens the text card; the strip scrolls the whole last reply; the first up/down press stops it where it is and glides (0.3 s, ease-out) to the start of the sentence in view, then each press glides one sentence (a sentence wider than the strip continues in further pieces); past the end, or after 15 s without a key, it scrolls again from where the text stands. With a draft: OK sends it; up/down scroll it. On a failed or unconfirmed reply OK retries. | OK records (and interrupts speech). Down leaves the current state: stops speech, else clears the draft, else returns to sessions. |
+| Voice (default in a session) | Without a draft: OK opens the text card; the strip shows the last reply one line at a time and advances on its own; the first up/down press holds the line in view, then each press moves one line; past the last line, or after 15 s without a key, it advances on its own again. With a draft: OK sends it; up/down scroll it. On a failed or unconfirmed reply OK retries. | OK records (and interrupts speech). Down leaves the current state: stops speech, else clears the draft, else returns to sessions. |
 | Text card | Up/down scroll about 70 % of the visible text per press, in whole lines. At an edge a double press (second press within 0.5 s, hinted on the first) opens the previous/next message (input/reply, then neighbouring exchanges), always at its top; at the first or last message it says so. The status shows the exchange position, e.g. 第 3/7 轮. OK returns to the voice view on the newest exchange. | OK records. Down stops speech, else returns to sessions. |
 | Recording | Release OK to finish. There is no cancel while recording or transcribing. | Keep OK held to record. |
 | Settings | Up/down select, OK enters an editor or saves it. Up increases and down decreases a numeric value. | In the settings list, Up cycles to the next top-level page and Down sleeps. In an editor, Down cancels the unsaved edit and returns to settings. |

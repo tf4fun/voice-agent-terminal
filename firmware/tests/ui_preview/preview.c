@@ -277,7 +277,6 @@ static void scene_voice(const char *out, const char *suffix)
     voice_session(true, "completed");
     show(AGENT_PAGE_VOICE);
     s_voice_review = 2;
-    s_marquee_gliding = false; // Settled after the glide.
     render();
     frame(out, "21-voice-review", suffix);
 
