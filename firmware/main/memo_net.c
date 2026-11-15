@@ -1,6 +1,7 @@
 // main/memo_net.c —— 常驻联网：STA 连接、重连退避、SNTP 对时。
 #include "memo_net.h"
 #include "memo_network_info_store.h"
+#include "agent_trace.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -96,18 +97,25 @@ static void start_sntp(void)
     ESP_LOGI(TAG, "SNTP started");
 }
 
+// Modem sleep saves power at idle but misses beacons under sustained
+// streaming; holders (spoken replies) keep the radio fully awake.
+static atomic_int s_awake_holds;
+
 static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     (void)arg;
     (void)base;
-    (void)data;
     uint32_t session;
     if (!event_session(&session)) return;
     if (id == WIFI_EVENT_STA_START) {
         if (publish_event(session, MEMO_NET_CONNECTING, NULL)) esp_wifi_connect();
     } else if (id == WIFI_EVENT_STA_DISCONNECTED) {
+        const wifi_event_sta_disconnected_t *event = data;
+        // The reason tells a beacon timeout (200) from an AP kick or auth failure.
+        agent_trace(TRACE_WIFI, event != NULL ? event->reason : 0, event != NULL ? event->rssi : 0, NULL);
         if (!publish_event(session, MEMO_NET_CONNECTING, NULL)) return;
-        ESP_LOGW(TAG, "disconnected, retry in %u ms", (unsigned)s_backoff_ms);
+        ESP_LOGW(TAG, "disconnected reason=%d rssi=%d, retry in %u ms", event != NULL ? event->reason : 0,
+                 event != NULL ? event->rssi : 0, (unsigned)s_backoff_ms);
         schedule_retry();
     }
 }
@@ -225,12 +233,21 @@ esp_err_t memo_net_start(void)
         ESP_LOGE(TAG, "wifi start: %s", esp_err_to_name(err));
         return start_failed(err);
     }
-    if (esp_wifi_set_ps(WIFI_PS_MIN_MODEM) != ESP_OK) {
+    if (esp_wifi_set_ps(atomic_load(&s_awake_holds) > 0 ? WIFI_PS_NONE : WIFI_PS_MIN_MODEM) != ESP_OK) {
         ESP_LOGW(TAG, "cannot enable modem sleep");
     }
 
     ESP_LOGI(TAG, "starting STA");
     return ESP_OK;
+}
+
+void memo_net_hold_awake(bool hold)
+{
+    const int holds = hold ? atomic_fetch_add(&s_awake_holds, 1) + 1 : atomic_fetch_sub(&s_awake_holds, 1) - 1;
+    if ((hold && holds == 1) || (!hold && holds == 0)) {
+        if (esp_wifi_set_ps(hold ? WIFI_PS_NONE : WIFI_PS_MIN_MODEM) != ESP_OK)
+            ESP_LOGW(TAG, "cannot change power save");
+    }
 }
 
 esp_err_t memo_net_suspend(void)

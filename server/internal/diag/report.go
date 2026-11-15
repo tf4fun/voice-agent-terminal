@@ -137,6 +137,7 @@ const (
 	typeCaptureError
 	typeSpeech
 	typeVoice
+	typeWifi
 )
 
 var (
@@ -230,11 +231,21 @@ func describe(e Event) string {
 		return fmt.Sprintf("诊断上报（%s）%s", TriggerLabel(triggerName(int(e.A))), result)
 	case typeSpeech:
 		text := fmt.Sprintf("朗读结束：%s（到第 %d 句）", pick(speechEnds, int(e.A)), e.B+1)
-		var dry int
-		if _, err := fmt.Sscanf(e.Tag, "dry %d", &dry); err == nil {
+		var dry, resumes int
+		if n, _ := fmt.Sscanf(e.Tag, "dry %d r%d", &dry, &resumes); n >= 1 {
 			text += fmt.Sprintf("，断流 %d 次", dry)
+			if n == 2 && resumes > 0 {
+				text += fmt.Sprintf("，断线续播 %d 次", resumes)
+			}
 		}
 		return text
+	case typeWifi:
+		reason := map[uint16]string{200: "信标超时", 201: "找不到路由器", 202: "认证失败", 203: "关联失败",
+			15: "四次握手超时", 8: "主动离开", 4: "关联超时", 2: "认证过期"}[e.A]
+		if reason == "" {
+			reason = fmt.Sprintf("原因码 %d", e.A)
+		}
+		return fmt.Sprintf("Wi-Fi 断开：%s（信号 %d dBm）", reason, int8(e.B))
 	case typeVoice:
 		return "语音页 → " + pick(voiceModes, int(e.A))
 	case typeCaptureError:

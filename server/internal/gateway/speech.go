@@ -88,12 +88,15 @@ func frame(kind byte, payload []byte) []byte {
 	return append(out, payload...)
 }
 
-// SpeechReader returns frames of one stream in order.
+// SpeechReader returns frames of one stream in order. A reader resuming
+// after a dropped connection skips everything before sentence `from`.
 type SpeechReader struct {
-	stream *speechStream
-	next   int
-	closer func()
-	once   sync.Once
+	stream   *speechStream
+	next     int
+	from     int
+	skipping bool
+	closer   func()
+	once     sync.Once
 }
 
 // Next blocks until a frame is available; ok is false after the end frame.
@@ -103,6 +106,15 @@ func (r *SpeechReader) Next(ctx context.Context) ([]byte, bool, error) {
 		if r.next < len(r.stream.frames) {
 			f := r.stream.frames[r.next]
 			r.next++
+			if r.skipping {
+				if f[0] != FrameSentence || int(binary.LittleEndian.Uint16(f[3:])) < r.from {
+					if f[0] != FrameEnd {
+						r.stream.mu.Unlock()
+						continue
+					}
+				}
+				r.skipping = false
+			}
 			r.stream.mu.Unlock()
 			return f, true, nil
 		}
@@ -127,7 +139,7 @@ type speechStreams struct {
 }
 
 // OpenSpeech starts or joins the synthesis of a reply.
-func (s *Service) OpenSpeech(ctx context.Context, sessionID, messageID string) (*SpeechReader, error) {
+func (s *Service) OpenSpeech(ctx context.Context, sessionID, messageID string, from int) (*SpeechReader, error) {
 	if s.TTS == nil || !s.TTS.Enabled() {
 		return nil, ErrSpeechUnavailable
 	}
@@ -168,7 +180,7 @@ func (s *Service) OpenSpeech(ctx context.Context, sessionID, messageID string) (
 		stream.idle = nil
 	}
 	stream.mu.Unlock()
-	reader := &SpeechReader{stream: stream}
+	reader := &SpeechReader{stream: stream, from: from, skipping: from > 0}
 	reader.closer = func() {
 		stream.mu.Lock()
 		defer stream.mu.Unlock()

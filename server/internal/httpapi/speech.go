@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/tf4fun/voice-agent-terminal/server/internal/gateway"
@@ -14,7 +15,18 @@ import (
 // mono audio, or end with a status byte). Synthesis follows the reply while it
 // is still being generated; listeners joining later start from the beginning.
 func (s *Server) speech(w http.ResponseWriter, r *http.Request) {
-	reader, err := s.service.OpenSpeech(r.Context(), r.PathValue("session"), r.PathValue("message"))
+	// from=<sentence> resumes after a dropped connection without repeating
+	// the sentences already heard.
+	from := 0
+	if value := r.URL.Query().Get("from"); value != "" {
+		parsed, err := strconv.Atoi(value)
+		if err != nil || parsed < 0 || parsed > 65535 {
+			writeError(w, 400, "invalid_from")
+			return
+		}
+		from = parsed
+	}
+	reader, err := s.service.OpenSpeech(r.Context(), r.PathValue("session"), r.PathValue("message"), from)
 	if errors.Is(err, gateway.ErrSpeechUnavailable) {
 		writeError(w, 503, "speech_unavailable")
 		return

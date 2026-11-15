@@ -24,6 +24,7 @@ typedef enum {
     TRACE_CAPTURE_ERROR, // b: esp_err_t from audio capture
     TRACE_SPEECH,      // a: end status (0 done, 1 failed, 2 stopped, 3 limit), b: last sentence index
     TRACE_VOICE,       // a: voice mode shown
+    TRACE_WIFI,        // a: disconnect reason, b: RSSI
 } agent_trace_type_t;
 
 typedef enum {

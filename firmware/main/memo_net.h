@@ -31,6 +31,8 @@ memo_net_state_t memo_net_state(void);
 /* Caller-owned copy; no mutable strings escape event callbacks. */
 void memo_net_info(memo_network_info_t *out);
 bool memo_net_has_ip(void);
+// Keeps the radio out of modem sleep while held (nested holds are counted).
+void memo_net_hold_awake(bool hold);
 
 /* SNTP 是否已经同步过（决定 recorded_at 能不能用真实时间）。 */
 bool memo_net_time_synced(void);

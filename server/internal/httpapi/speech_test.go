@@ -88,6 +88,14 @@ func TestReplySpeechStreamsSentencesAndAudio(t *testing.T) {
 	if again := readSpeech(t, e, path); len(again) != len(frames) {
 		t.Fatalf("replay has %d frames, first had %d", len(again), len(frames))
 	}
+	// Resuming from the second sentence skips the first one's frames.
+	if sentences > 1 {
+		resumed := readSpeech(t, e, path+"?from=1")
+		if resumed[0].kind != gateway.FrameSentence || binary.LittleEndian.Uint16(resumed[0].payload) != 1 {
+			t.Fatalf("resume started with kind %d", resumed[0].kind)
+		}
+	}
+	e.request(t, "GET", path+"?from=x", nil, 400)
 	e.request(t, "GET", base+"/messages/"+model.NewID()+"/speech", nil, 404)
 }
 

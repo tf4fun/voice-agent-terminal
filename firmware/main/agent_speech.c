@@ -126,13 +126,13 @@ static void writer_task(void *arg)
     }
 }
 
-static esp_http_client_handle_t open_stream(const char *session, const char *message)
+static esp_http_client_handle_t open_stream(const char *session, const char *message, uint16_t from)
 {
     memo_endpoint_t endpoint;
     if (!memo_net_has_ip() || !memo_discovery_endpoint(&endpoint)) return NULL;
-    char url[256];
-    const int length = snprintf(url, sizeof(url), "http://%s:%u/api/v1/sessions/%s/messages/%s/speech",
-                                endpoint.host, endpoint.port, session, message);
+    char url[280];
+    const int length = snprintf(url, sizeof(url), "http://%s:%u/api/v1/sessions/%s/messages/%s/speech?from=%u",
+                                endpoint.host, endpoint.port, session, message, (unsigned)from);
     if (length < 0 || length >= (int)sizeof(url)) return NULL;
     // Keepalive frames arrive every 5 s while the reply is still being thought about.
     const esp_http_client_config_t config = {
@@ -156,80 +156,105 @@ static esp_http_client_handle_t open_stream(const char *session, const char *mes
     return client;
 }
 
-// Plays one stream until it ends, fails or a newer request supersedes it.
+// After a dropped connection, waits up to 10 s for the network to return.
+static bool network_back(unsigned request)
+{
+    for (int i = 0; i < 100 && atomic_load(&s_request) == request; i++) {
+        if (memo_net_has_ip() && i >= 3) return true;
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    return false;
+}
+
+enum { STREAM_DONE, STREAM_STOPPED, STREAM_BROKEN };
+
+// Reads one connection into the playback buffer; reports how it ended.
+static int read_stream(esp_http_client_handle_t client, unsigned request, uint16_t *index, uint8_t *status)
+{
+    uint8_t buffer[512];
+    // IDF reads try to fill the buffer; a short timeout keeps stop requests
+    // responsive. Keepalives every 5 s mean 15 s of silence is a dead stream.
+    esp_http_client_set_timeout_ms(client, 100);
+    int64_t heard = esp_timer_get_time();
+    agent_speech_parser_reset(&s_parser);
+    while (atomic_load(&s_request) == request) {
+        const int got = esp_http_client_read(client, (char *)buffer, sizeof(buffer));
+        if (got == -ESP_ERR_HTTP_EAGAIN) {
+            if (esp_timer_get_time() - heard > 15000000) return STREAM_BROKEN;
+            continue;
+        }
+        if (got <= 0) return STREAM_BROKEN;
+        heard = esp_timer_get_time();
+        size_t offset = 0;
+        while (offset < (size_t)got && atomic_load(&s_request) == request) {
+            agent_speech_event_t event;
+            offset += agent_speech_parse(&s_parser, buffer + offset, (size_t)got - offset, &event);
+            if (s_parser.invalid) return STREAM_BROKEN;
+            if (event.kind == AGENT_SPEECH_AUDIO) {
+                // Queue for the writer; wait in short slices so a stop stays prompt.
+                size_t sent = 0;
+                while (sent < event.size && atomic_load(&s_request) == request)
+                    sent += xStreamBufferSend(s_pcm, event.data + sent, event.size - sent, pdMS_TO_TICKS(50));
+            } else if (event.kind == AGENT_SPEECH_SENTENCE && event.size >= 2) {
+                *index = (uint16_t)(event.data[0] | (event.data[1] << 8));
+                char sentence[AGENT_SPEECH_SENTENCE_BYTES];
+                size_t text = event.size - 2;
+                if (text >= sizeof(sentence)) text = sizeof(sentence) - 1;
+                // Cut before a UTF-8 continuation byte so the text stays valid.
+                while (text > 0 && text < event.size - 2 && (event.data[2 + text] & 0xC0) == 0x80) text--;
+                memcpy(sentence, event.data + 2, text);
+                sentence[text] = '\0';
+                publish(true, true, *index, sentence, NULL);
+            } else if (event.kind == AGENT_SPEECH_END) {
+                *status = event.size ? event.data[0] : 1;
+                return STREAM_DONE;
+            }
+        }
+    }
+    return STREAM_STOPPED;
+}
+
+// Plays one reply until it ends, fails or a newer request supersedes it. A
+// dropped connection resumes from the sentence being spoken (up to 3 times).
 static void play(unsigned request, const char *session, const char *message)
 {
-    agent_speech_parser_reset(&s_parser);
     publish(true, false, 0, "", message);
-    esp_http_client_handle_t client = open_stream(session, message);
+    memo_net_hold_awake(true); // Modem sleep missed beacons while streaming.
     uint8_t status = 1;
     uint16_t index = 0;
-    bool writing = false;
-    if (client != NULL && bsp_audio_set_format(16000, 16, 1) == ESP_OK) {
+    int outcome = STREAM_BROKEN, resumes = 0;
+    if (bsp_audio_set_format(16000, 16, 1) == ESP_OK) {
         // The writer is idle here, so the buffer can be emptied safely.
         xStreamBufferReset(s_pcm);
         atomic_store(&s_underruns, 0);
         atomic_store(&s_ended, false);
         atomic_store(&s_stop, false);
         xTaskNotifyGive(s_writer);
-        writing = true;
-        uint8_t buffer[512];
-        bool done = false;
-        // IDF reads try to fill the buffer; a short timeout keeps stop requests
-        // responsive. Keepalives every 5 s mean 15 s of silence is a dead stream.
-        esp_http_client_set_timeout_ms(client, 100);
-        int64_t heard = esp_timer_get_time();
-        while (!done && atomic_load(&s_request) == request) {
-            const int got = esp_http_client_read(client, (char *)buffer, sizeof(buffer));
-            if (got == -ESP_ERR_HTTP_EAGAIN) {
-                if (esp_timer_get_time() - heard > 15000000) break;
-                continue;
+        for (;;) {
+            esp_http_client_handle_t client = open_stream(session, message, index);
+            if (client != NULL) {
+                outcome = read_stream(client, request, &index, &status);
+                esp_http_client_close(client);
+                esp_http_client_cleanup(client);
             }
-            if (got <= 0) break;
-            heard = esp_timer_get_time();
-            size_t offset = 0;
-            while (offset < (size_t)got && !done && atomic_load(&s_request) == request) {
-                agent_speech_event_t event;
-                offset += agent_speech_parse(&s_parser, buffer + offset, (size_t)got - offset, &event);
-                if (s_parser.invalid) { done = true; break; }
-                if (event.kind == AGENT_SPEECH_AUDIO) {
-                    // Queue for the writer; wait in short slices so a stop stays prompt.
-                    size_t sent = 0;
-                    while (sent < event.size && atomic_load(&s_request) == request)
-                        sent += xStreamBufferSend(s_pcm, event.data + sent, event.size - sent, pdMS_TO_TICKS(50));
-                } else if (event.kind == AGENT_SPEECH_SENTENCE && event.size >= 2) {
-                    index = (uint16_t)(event.data[0] | (event.data[1] << 8));
-                    char sentence[AGENT_SPEECH_SENTENCE_BYTES];
-                    size_t text = event.size - 2;
-                    if (text >= sizeof(sentence)) text = sizeof(sentence) - 1;
-                    // Cut before a UTF-8 continuation byte so the text stays valid.
-                    while (text > 0 && text < event.size - 2 && (event.data[2 + text] & 0xC0) == 0x80) text--;
-                    memcpy(sentence, event.data + 2, text);
-                    sentence[text] = '\0';
-                    publish(true, true, index, sentence, NULL);
-                } else if (event.kind == AGENT_SPEECH_END) {
-                    status = event.size ? event.data[0] : 1;
-                    done = true;
-                }
-            }
+            if (atomic_load(&s_request) != request) { outcome = STREAM_STOPPED; break; }
+            if (outcome == STREAM_DONE || resumes >= 3 || !network_back(request)) break;
+            resumes++;
+            ESP_LOGW(TAG, "speech stream dropped; resuming at sentence %u", (unsigned)index);
         }
-        if (atomic_load(&s_request) != request) status = 2;
-    }
-    if (writing) {
+        if (outcome == STREAM_STOPPED) status = 2;
         // Let the queued audio finish unless playback was stopped.
         atomic_store(&s_ended, true);
         if (status == 2) atomic_store(&s_stop, true);
         while (xSemaphoreTake(s_writer_done, pdMS_TO_TICKS(50)) != pdTRUE)
             if (atomic_load(&s_request) != request) atomic_store(&s_stop, true);
     }
-    if (client != NULL) {
-        esp_http_client_close(client);
-        esp_http_client_cleanup(client);
-    }
-    char underruns[AGENT_TRACE_TAG_BYTES];
-    snprintf(underruns, sizeof(underruns), "dry %u", atomic_load(&s_underruns));
-    agent_trace(TRACE_SPEECH, status, index, underruns);
-    ESP_LOGI(TAG, "speech end status=%u sentences=%u underruns=%u", status, index + 1, atomic_load(&s_underruns));
+    memo_net_hold_awake(false);
+    char tag[AGENT_TRACE_TAG_BYTES];
+    snprintf(tag, sizeof(tag), "dry %u r%d", atomic_load(&s_underruns), resumes);
+    agent_trace(TRACE_SPEECH, status, index, tag);
+    ESP_LOGI(TAG, "speech end status=%u sentences=%u underruns=%u resumes=%d", status, index + 1,
+             atomic_load(&s_underruns), resumes);
     publish(false, false, index, NULL, NULL);
 }
 
