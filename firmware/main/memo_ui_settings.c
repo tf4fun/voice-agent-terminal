@@ -88,7 +88,7 @@ static void refresh_meter_bar(bool animate)
         s_meter_target = -1;
         return;
     }
-    const int target = memo_progress_width(160,
+    const int target = memo_progress_width(152,
         s_selected == ROW_BRIGHTNESS ? s_draft.brightness : s_draft.volume, 100);
     if (target == s_meter_target) return; // Heartbeats must not restart motion.
     s_meter_target = target;
@@ -223,12 +223,25 @@ static void refresh_rows(void)
             memo_ui_set_selected(s_rows[row], selected);
             lv_obj_set_style_text_color(lv_obj_get_child(s_rows[row], 0),
                                         lv_color_hex(UI_FG), 0);
-            lv_obj_set_style_text_color(s_values[row], lv_color_hex(UI_DIM), 0);
+            lv_obj_set_style_text_color(s_values[row], lv_color_hex(selected ? UI_ACCENT : UI_DIM), 0);
         }
     }
     memo_ui_scrollbar_update(s_scroll, layout.rows * layout.pitch - (layout.pitch - layout.row_height),
                              ROW_COUNT, layout.rows, s_top);
     if (s_in_sheet) lv_obj_set_hidden(s_scroll, true);
+}
+
+// Numeric values read as large figures; Chinese values keep the body font.
+static void sheet_value(const char *value)
+{
+    bool ascii = true;
+    for (const char *p = value; *p != '\0'; p++) if ((unsigned char)*p >= 0x80 || *p == ' ') ascii = false;
+    const lv_font_t *font = ascii ? &lv_font_montserrat_40 : memo_font_body();
+    if (lv_obj_get_style_text_font(s_sheet_value, 0) != font) {
+        lv_obj_set_style_text_font(s_sheet_value, font, 0);
+        lv_obj_set_y(s_sheet_value, ascii ? 40 : 50);
+    }
+    if (strcmp(lv_label_get_text(s_sheet_value), value) != 0) memo_font_label_text(s_sheet_value, value, true);
 }
 
 static void sheet_visible(bool visible)
@@ -256,6 +269,7 @@ void memo_ui_settings_build(void)
     lv_obj_set_style_radius(s_screen, 0, 0);
 
     memo_ui_header(s_screen, "设置", false);
+    memo_ui_page_dots(s_screen, 1, 2);
     const memo_rows_layout_t layout = memo_settings_layout(width, lv_display_get_vertical_resolution(NULL));
 
     for (int row = 0; row < ROW_COUNT; row++) {
@@ -263,7 +277,6 @@ void memo_ui_settings_build(void)
                                      card_w, layout.row_height, &s_row_shadows[row]);
         s_rows[row] = obj;
         memo_ui_set_selected(obj, false);
-        lv_obj_set_style_border_width(obj, 0, 0);
 
         lv_obj_t *label = memo_ui_label(obj, memo_font_label(), UI_FG);
         char name[48];
@@ -276,11 +289,12 @@ void memo_ui_settings_build(void)
         s_values[row] = memo_ui_label(obj, memo_font_label(), UI_DIM);
         // DOT mode only truncates within a bounded height. Content height
         // otherwise lets an unselected address wrap onto a second line.
-        lv_obj_set_size(s_values[row], 88, memo_font_label()->line_height);
-        lv_obj_align(s_values[row], LV_ALIGN_RIGHT_MID, -12, 0);
+        lv_obj_set_size(s_values[row], 96, memo_font_label()->line_height);
+        lv_obj_set_style_text_align(s_values[row], LV_TEXT_ALIGN_RIGHT, 0);
+        lv_obj_align(s_values[row], LV_ALIGN_RIGHT_MID, -14, 0);
     }
 
-    s_scroll = memo_ui_scrollbar_create(s_screen, 228, layout.top,
+    s_scroll = memo_ui_scrollbar_create(s_screen, 230, layout.top,
                                         layout.rows * layout.pitch - (layout.pitch - layout.row_height));
 
     s_hint = memo_ui_label(s_screen, memo_font_label(), UI_DIM);
@@ -293,21 +307,22 @@ void memo_ui_settings_build(void)
 
     /* 子页：一张居中的卡片，显示当前项与值。 */
     s_sheet = memo_ui_card(s_screen, 24, 100, width - 48, 116, &s_sheet_shadow);
-    lv_obj_set_style_border_color(s_sheet, lv_color_hex(UI_BORDER), 0);
+    lv_obj_set_style_radius(s_sheet, VM_RADIUS_PANEL, 0);
+    lv_obj_set_style_border_color(s_sheet, lv_color_hex(UI_ACCENT), 0);
+    lv_obj_set_style_border_width(s_sheet, 2, 0);
 
     s_sheet_title = memo_ui_label(s_sheet, memo_font_label(), UI_DIM);
     lv_obj_set_size(s_sheet_title, width - 72, memo_font_label()->line_height);
     lv_obj_set_style_text_align(s_sheet_title, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_pos(s_sheet_title, 12, 10);
+    lv_obj_set_pos(s_sheet_title, 12, 8);
 
     s_sheet_value = memo_ui_label(s_sheet, memo_font_body(), UI_FG);
-    lv_obj_set_size(s_sheet_value, width - 72, memo_font_body()->line_height);
+    lv_obj_set_width(s_sheet_value, width - 72);
     lv_obj_set_style_text_align(s_sheet_value, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_pos(s_sheet_value, 12, 62);
+    lv_obj_set_pos(s_sheet_value, 12, 46);
 
-    s_meter_track = memo_ui_meter_create(s_sheet, 160, 12, &s_meter_fill);
-    lv_obj_set_style_border_color(s_meter_track, lv_color_hex(UI_DIM), 0);
-    lv_obj_align(s_meter_track, LV_ALIGN_BOTTOM_MID, 0, -16);
+    s_meter_track = memo_ui_meter_create(s_sheet, 152, 8, &s_meter_fill);
+    lv_obj_align(s_meter_track, LV_ALIGN_BOTTOM_MID, 0, -22);
     lv_obj_set_hidden(s_meter_track, true);
     s_sheet_note = memo_ui_label(s_sheet, memo_font_label(), UI_DIM);
     lv_obj_set_size(s_sheet_note, width - 72, memo_font_label()->line_height);
@@ -341,7 +356,7 @@ void memo_ui_settings_enter(const memo_settings_t *draft)
     lv_label_set_text(s_sheet_title, row_label(s_selected));
     char value[24];
     format_value(s_selected, value, sizeof(value));
-    lv_label_set_text(s_sheet_value, value);
+    sheet_value(value);
     refresh_meter_bar(false);
 }
 
@@ -352,7 +367,7 @@ void memo_ui_settings_show_draft(const memo_settings_t *draft)
     sheet_visible(true);
     char value[24];
     format_value(s_selected, value, sizeof(value));
-    lv_label_set_text(s_sheet_value, value);
+    sheet_value(value);
     refresh_meter_bar(true);
     refresh_rows();
 }

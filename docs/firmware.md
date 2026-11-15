@@ -47,6 +47,24 @@ The user authorized deletion of the two existing prototype sessions on
 2026-11-14. Both local deletion and Hermes synchronization completed. Their
 old title suffix handling and the v1 database migration were removed.
 
+## Visual refresh
+
+The refreshed interface keeps every key interaction. Neutral light and dark
+palettes share a violet accent for selection, progress and icons; failures use
+the recording red. Session rows are rounded cards with a title-initial badge,
+and today's sessions show only the time. A two-dot indicator under the header
+marks the Sessions/Settings root cycle. The recording page shows a large timer,
+a status pill, sixteen rounded level bars and a transcript card. Empty states,
+provisioning and settings use accent-tinted circular icon badges, and numeric
+setting values use large figures with a pill meter. The design adds no shadows,
+gradients or translucent layers, and its animations are the two existing
+spinners. Heap and largest-block margins for this layout await device
+measurement.
+
+`tools/ui-preview.sh` renders every screen on the host in both themes with the
+locked LVGL version and the production `agent_app.c`, writing PNG frames and
+contact sheets under `build/ui-preview/frames/`.
+
 ## Whole-message and SSE validation checkpoint
 
 The complete-message follow-up replaces the earlier device card-page profile.

@@ -60,11 +60,15 @@ static int64_t s_notice_until;
 static int s_backlight = -1, s_soc = -1;
 static lv_obj_t *s_transition, *s_screen, *s_status, *s_title;
 static lv_obj_t *s_rows[4], *s_row_titles[4], *s_row_details[4];
+static lv_obj_t *s_row_badges[4], *s_row_initials[4];
 static bool s_row_selected[4];
-static lv_obj_t *s_scroll, *s_text, *s_arc, *s_clock;
-static lv_obj_t *s_wave[12];
-static uint8_t s_levels[12];
-static lv_obj_t *s_chat_card, *s_chat_role, *s_chat_body;
+static lv_obj_t *s_scroll, *s_text, *s_arc, *s_clock, *s_record_dot;
+#define AGENT_WAVE_BARS 16
+#define AGENT_WAVE_PITCH 10
+#define AGENT_WAVE_CENTER 166
+static lv_obj_t *s_wave[AGENT_WAVE_BARS];
+static uint8_t s_levels[AGENT_WAVE_BARS];
+static lv_obj_t *s_chat_card, *s_chat_role, *s_chat_body, *s_chat_dot;
 static lv_obj_t *s_chat_wait, *s_chat_wait_arc;
 static char s_chat_title[AGENT_TITLE_BYTES + 1], s_chat_status[64];
 static char *s_chat_text;
@@ -96,6 +100,8 @@ static void delete_rows(void)
     memset(s_rows, 0, sizeof(s_rows));
     memset(s_row_titles, 0, sizeof(s_row_titles));
     memset(s_row_details, 0, sizeof(s_row_details));
+    memset(s_row_badges, 0, sizeof(s_row_badges));
+    memset(s_row_initials, 0, sizeof(s_row_initials));
     memset(s_row_selected, 0, sizeof(s_row_selected));
 }
 
@@ -107,12 +113,12 @@ static void delete_screen(void)
     if (s_page == AGENT_PAGE_SETTINGS) memo_ui_settings_destroy();
     else if (s_page == AGENT_PAGE_PROVISION) memo_ui_provision_destroy();
     else memo_ui_screen_delete(s_screen);
-    s_screen = s_status = s_title = s_scroll = s_text = s_arc = s_clock = NULL;
+    s_screen = s_status = s_title = s_scroll = s_text = s_arc = s_clock = s_record_dot = NULL;
     memset(s_wave, 0, sizeof(s_wave));
     memset(s_levels, 0, sizeof(s_levels));
     free(s_chat_text);
     s_chat_text = NULL;
-    s_chat_card = s_chat_role = s_chat_body = NULL;
+    s_chat_card = s_chat_role = s_chat_body = s_chat_dot = NULL;
     s_chat_wait = s_chat_wait_arc = NULL;
     s_chat_title[0] = s_chat_status[0] = '\0';
     s_chat_id[0] = '\0';
@@ -124,19 +130,40 @@ static void delete_screen(void)
 static void build_rows(void)
 {
     const memo_rows_layout_t layout = memo_rows_layout(BSP_LCD_W, BSP_LCD_H);
+    const int badge = 36, text_x = 12 + badge + 10;
     for (int i = 0; i < 4; i++) {
         s_rows[i] = memo_ui_card(s_screen, layout.x, layout.top + i * layout.pitch,
                                  layout.width, layout.row_height, NULL);
         memo_ui_set_selected(s_rows[i], false);
-        lv_obj_set_style_border_width(s_rows[i], 0, 0);
-        s_row_titles[i] = label(s_rows[i], 12, 0, layout.width - 24, false, UI_FG);
+        s_row_badges[i] = memo_ui_icon_badge(s_rows[i], 12, (layout.row_height - badge) / 2, badge);
+        s_row_initials[i] = memo_ui_label(s_row_badges[i], memo_font_label(), UI_ACCENT);
+        lv_obj_set_size(s_row_initials[i], badge, memo_font_label()->line_height);
+        lv_obj_set_style_text_align(s_row_initials[i], LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_align(s_row_initials[i], LV_ALIGN_CENTER, 0, 1);
+        s_row_titles[i] = label(s_rows[i], text_x, 2, layout.width - text_x - 12, false, UI_FG);
         lv_obj_set_height(s_row_titles[i], memo_font_label()->line_height);
         lv_label_set_long_mode(s_row_titles[i], LV_LABEL_LONG_DOT);
         s_row_details[i] = memo_ui_label(s_rows[i], memo_font_meta(), UI_DIM);
-        lv_obj_set_pos(s_row_details[i], 12, 33);
-        lv_obj_set_size(s_row_details[i], layout.width - 24, memo_font_meta()->line_height);
+        lv_obj_set_pos(s_row_details[i], text_x, 33);
+        lv_obj_set_size(s_row_details[i], layout.width - text_x - 12, memo_font_meta()->line_height);
         lv_label_set_long_mode(s_row_details[i], LV_LABEL_LONG_DOT);
     }
+}
+
+// First UTF-8 character of a title, used as the session row's initial.
+static void title_initial(const char *title, char *out, size_t capacity)
+{
+    size_t length = 1;
+    const unsigned char lead = (unsigned char)title[0];
+    if (lead >= 0xF0) length = 4;
+    else if (lead >= 0xE0) length = 3;
+    else if (lead >= 0xC0) length = 2;
+    for (size_t i = 1; i < length; i++)
+        if (((unsigned char)title[i] & 0xC0) != 0x80) { length = 1; break; }
+    if (lead == 0 || length + 1 > capacity) length = 0;
+    memcpy(out, title, length);
+    out[length] = '\0';
+    if (lead >= 'a' && lead <= 'z' && length == 1) out[0] = (char)(lead - 'a' + 'A');
 }
 
 static void build_screen(agent_page_t page)
@@ -159,13 +186,19 @@ static void build_screen(agent_page_t page)
         else if (page == AGENT_PAGE_RECORD) title = "录音";
         else if (page == AGENT_PAGE_PREPARING) title = "准备录音";
         s_title = memo_ui_header(s_screen, title, page != AGENT_PAGE_SESSIONS);
+        if (page == AGENT_PAGE_SESSIONS) memo_ui_page_dots(s_screen, 0, AGENT_ROOT_PAGE_COUNT);
         if (page == AGENT_PAGE_CHAT) {
             const agent_chat_card_layout_t layout = agent_chat_card_layout(
                 BSP_LCD_W, BSP_LCD_H, memo_font_label()->line_height);
             s_chat_card = memo_ui_card(s_screen, layout.x, layout.top,
                 layout.width, layout.height, NULL);
+            lv_obj_set_style_radius(s_chat_card, VM_RADIUS_PANEL, 0);
             lv_obj_set_style_pad_all(s_chat_card, 0, 0);
-            s_chat_role = label(s_chat_card, 12, layout.role_y, 40, false, UI_DIM);
+            s_chat_dot = lv_obj_create(s_chat_card);
+            memo_ui_flat_rect(s_chat_dot, UI_ACCENT, 4);
+            lv_obj_set_size(s_chat_dot, 8, 8);
+            lv_obj_set_pos(s_chat_dot, 14, layout.role_y + 15);
+            s_chat_role = label(s_chat_card, 28, layout.role_y + 2, 40, false, UI_DIM);
             s_scroll = lv_obj_create(s_chat_card);
             memo_ui_flat_rect(s_scroll, UI_SURFACE, 0);
             lv_obj_set_pos(s_scroll, 12, layout.body_y);
@@ -183,42 +216,27 @@ static void build_screen(agent_page_t page)
             memo_ui_flat_rect(s_chat_wait, UI_SURFACE, 0);
             lv_obj_set_pos(s_chat_wait, 12, layout.body_y);
             lv_obj_set_size(s_chat_wait, layout.body_width, layout.body_height);
-            s_chat_wait_arc = lv_arc_create(s_chat_wait);
-            const int wait_top = (layout.body_height - 52) / 2;
-            lv_obj_set_pos(s_chat_wait_arc, (layout.body_width - 52) / 2, wait_top);
-            lv_obj_set_size(s_chat_wait_arc, 52, 52);
-            lv_arc_set_bg_angles(s_chat_wait_arc, 0, 360);
-            lv_arc_set_range(s_chat_wait_arc, 0, 100);
-            lv_arc_set_value(s_chat_wait_arc, 24);
-            lv_obj_remove_style(s_chat_wait_arc, NULL, LV_PART_KNOB);
-            lv_obj_set_style_arc_color(s_chat_wait_arc, lv_color_hex(UI_BORDER), LV_PART_MAIN);
-            lv_obj_set_style_arc_color(s_chat_wait_arc, lv_color_hex(UI_FG), LV_PART_INDICATOR);
-            lv_obj_set_style_arc_width(s_chat_wait_arc, 2, LV_PART_MAIN);
-            lv_obj_set_style_arc_width(s_chat_wait_arc, 2, LV_PART_INDICATOR);
-            for (int i = 0; i < 3; i++) {
-                lv_obj_t *dot = lv_obj_create(s_chat_wait);
-                memo_ui_flat_rect(dot, UI_DIM, 2);
-                lv_obj_set_size(dot, 4, 4);
-                lv_obj_set_pos(dot, layout.body_width / 2 - 10 + i * 8, wait_top + 24);
-            }
+            const int wait_size = 44;
+            s_chat_wait_arc = memo_ui_spinner(s_chat_wait, wait_size, 4);
+            lv_obj_set_pos(s_chat_wait_arc, (layout.body_width - wait_size) / 2, (layout.body_height - wait_size) / 2 - 12);
             lv_obj_set_hidden(s_chat_wait, true);
-            s_status = label(s_chat_card, layout.status_x, layout.status_y, layout.status_width, false, UI_DIM);
+            s_status = label(s_chat_card, layout.status_x, layout.status_y + 2, layout.status_width, false, UI_DIM);
             lv_obj_set_style_text_align(s_status, LV_TEXT_ALIGN_RIGHT, 0);
             lv_obj_set_height(s_status, memo_font_label()->line_height);
             lv_label_set_long_mode(s_status, LV_LABEL_LONG_DOT);
             lv_obj_set_hidden(s_status, true);
         } else if (page == AGENT_PAGE_PREPARING) {
-            s_arc = lv_arc_create(s_screen);
-            lv_obj_set_size(s_arc, 72, 72);
-            lv_obj_set_pos(s_arc, 84, 108);
-            lv_arc_set_bg_angles(s_arc, 0, 360);
-            lv_arc_set_range(s_arc, 0, 100);
-            lv_arc_set_value(s_arc, 72);
-            lv_obj_remove_style(s_arc, NULL, LV_PART_KNOB);
-            lv_obj_set_style_arc_color(s_arc, lv_color_hex(UI_BORDER), LV_PART_MAIN);
-            lv_obj_set_style_arc_color(s_arc, lv_color_hex(UI_FG), LV_PART_INDICATOR);
-            lv_obj_set_style_arc_width(s_arc, 3, LV_PART_MAIN);
-            lv_obj_set_style_arc_width(s_arc, 3, LV_PART_INDICATOR);
+            lv_obj_t *badge = memo_ui_icon_badge(s_screen, 72, 96, 96);
+            s_arc = memo_ui_spinner(badge, 72, 5);
+            lv_obj_center(s_arc);
+            lv_obj_t *mic = lv_obj_create(badge);
+            memo_ui_flat_rect(mic, UI_ACCENT, 7);
+            lv_obj_set_size(mic, 14, 24);
+            lv_obj_align(mic, LV_ALIGN_CENTER, 0, -3);
+            lv_obj_t *stand = lv_obj_create(badge);
+            memo_ui_flat_rect(stand, UI_ACCENT, 1);
+            lv_obj_set_size(stand, 2, 7);
+            lv_obj_align(stand, LV_ALIGN_CENTER, 0, 13);
             lv_anim_t animation;
             lv_anim_init(&animation);
             lv_anim_set_var(&animation, s_arc);
@@ -227,35 +245,44 @@ static void build_screen(agent_page_t page)
             lv_anim_set_repeat_count(&animation, LV_ANIM_REPEAT_INFINITE);
             lv_anim_set_exec_cb(&animation, arc_rotate);
             lv_anim_start(&animation);
-            s_status = label(s_screen, 24, 208, 192, false, UI_DIM);
+            s_status = label(s_screen, 24, 214, 192, false, UI_DIM);
             lv_obj_set_style_text_align(s_status, LV_TEXT_ALIGN_CENTER, 0);
             set_text(s_status, "正在连接语音服务", false);
         } else if (page == AGENT_PAGE_RECORD) {
-            s_clock = label(s_screen, 24, 54, 192, true, UI_FG);
+            s_clock = memo_ui_label(s_screen, &lv_font_montserrat_40, UI_FG);
+            lv_obj_set_pos(s_clock, 24, 44);
+            lv_obj_set_width(s_clock, 192);
             lv_obj_set_style_text_align(s_clock, LV_TEXT_ALIGN_CENTER, 0);
-            s_status = label(s_screen, 24, 98, 192, false, UI_DIM);
+            lv_obj_t *pill = lv_obj_create(s_screen);
+            memo_ui_flat_rect(pill, UI_SURFACE, 15);
+            lv_obj_set_size(pill, 120, 30);
+            lv_obj_set_pos(pill, 60, 98);
+            s_record_dot = lv_obj_create(pill);
+            memo_ui_flat_rect(s_record_dot, UI_RECORDING, 4);
+            lv_obj_set_size(s_record_dot, 8, 8);
+            lv_obj_set_pos(s_record_dot, 18, 11);
+            s_status = label(pill, 30, -1, 80, false, UI_DIM);
             lv_obj_set_style_text_align(s_status, LV_TEXT_ALIGN_CENTER, 0);
-            lv_obj_t *recording = lv_obj_create(s_screen);
-            memo_ui_flat_rect(recording, UI_RECORDING, 4);
-            lv_obj_set_size(recording, 6, 6);
-            lv_obj_set_pos(recording, 68, 111);
-            s_scroll = lv_obj_create(s_screen);
-            memo_ui_flat_rect(s_scroll, UI_BG, 0);
-            lv_obj_set_pos(s_scroll, 24, 200);
-            lv_obj_set_size(s_scroll, 192, 88);
+            const int wave_x = (BSP_LCD_W - AGENT_WAVE_BARS * AGENT_WAVE_PITCH + 4) / 2;
+            for (int i = 0; i < AGENT_WAVE_BARS; i++) {
+                s_wave[i] = lv_obj_create(s_screen);
+                memo_ui_flat_rect(s_wave[i], UI_ACCENT, 3);
+                lv_obj_set_pos(s_wave[i], wave_x + i * AGENT_WAVE_PITCH, AGENT_WAVE_CENTER - 3);
+                lv_obj_set_size(s_wave[i], 6, 6);
+            }
+            lv_obj_t *transcript = memo_ui_card(s_screen, 16, 204, BSP_LCD_W - 32, 100, NULL);
+            lv_obj_set_style_pad_all(transcript, 0, 0);
+            s_scroll = lv_obj_create(transcript);
+            memo_ui_flat_rect(s_scroll, UI_SURFACE, 0);
+            lv_obj_set_pos(s_scroll, 14, 8);
+            lv_obj_set_size(s_scroll, BSP_LCD_W - 60, 84);
             lv_obj_set_style_pad_all(s_scroll, 0, 0);
             lv_obj_set_scrollable(s_scroll, true);
             lv_obj_set_scroll_dir(s_scroll, LV_DIR_VER);
             lv_obj_set_scrollbar_mode(s_scroll, LV_SCROLLBAR_MODE_OFF);
-            s_text = label(s_scroll, 0, 0, 192, false, UI_FG);
+            s_text = label(s_scroll, 0, 0, BSP_LCD_W - 60, false, UI_FG);
             lv_label_set_long_mode(s_text, LV_LABEL_LONG_WRAP);
-            memo_ui_rule(s_screen, 24, 272, 192);
-            for (int i = 0; i < 12; i++) {
-                s_wave[i] = lv_obj_create(s_screen);
-                memo_ui_flat_rect(s_wave[i], UI_FG, 0);
-                lv_obj_set_pos(s_wave[i], 28 + i * 16, 163);
-                lv_obj_set_size(s_wave[i], 8, 2);
-            }
+            lv_obj_set_style_text_line_space(s_text, AGENT_CHAT_LINE_SPACE, 0);
         }
     }
     lv_screen_load(s_screen);
@@ -266,6 +293,8 @@ static void select_row(int row, bool selected)
     if (s_row_selected[row] == selected) return;
     s_row_selected[row] = selected;
     memo_ui_set_selected(s_rows[row], selected);
+    lv_obj_set_style_bg_color(s_row_badges[row], lv_color_hex(selected ? UI_ACCENT : UI_ACCENT_SOFT), 0);
+    lv_obj_set_style_text_color(s_row_initials[row], lv_color_hex(selected ? UI_SURFACE : UI_ACCENT), 0);
     lv_obj_set_style_text_color(s_row_titles[row], lv_color_hex(UI_FG), 0);
     if (s_row_details[row] != NULL)
         lv_obj_set_style_text_color(s_row_details[row], lv_color_hex(UI_DIM), 0);
@@ -311,14 +340,24 @@ static void render_sessions(void)
     for (int i = 0; i < 4; i++) {
         lv_obj_set_hidden(s_rows[i], i >= count);
         if (i >= count) continue;
-        char detail[80];
+        char detail[80], initial[8];
         const agent_session_t *session = &s_view.sessions[i];
-        set_text(s_row_titles[i], session->title[0] ? session->title : "新会话", false);
+        const char *title = session->title[0] ? session->title : "新会话";
+        set_text(s_row_titles[i], title, false);
+        title_initial(title, initial, sizeof(initial));
+        set_text(s_row_initials[i], initial, false);
         if (session->updated_at > 0) {
-            const time_t timestamp = session->updated_at / 1000 + memo_settings_get()->tz_offset_min * 60;
-            struct tm date;
+            const int offset = memo_settings_get()->tz_offset_min * 60;
+            const time_t timestamp = session->updated_at / 1000 + offset;
+            const time_t now = (time_t)memo_net_now() + offset;
+            struct tm date, today;
             gmtime_r(&timestamp, &date);
-            snprintf(detail, sizeof(detail), "%02d-%02d %02d:%02d", date.tm_mon + 1, date.tm_mday, date.tm_hour, date.tm_min);
+            gmtime_r(&now, &today);
+            // Today's sessions show only the time; earlier ones keep the date.
+            if (memo_net_now() != 0 && date.tm_year == today.tm_year && date.tm_yday == today.tm_yday)
+                snprintf(detail, sizeof(detail), "%02d:%02d", date.tm_hour, date.tm_min);
+            else
+                snprintf(detail, sizeof(detail), "%02d-%02d %02d:%02d", date.tm_mon + 1, date.tm_mday, date.tm_hour, date.tm_min);
         } else detail[0] = '\0';
         set_text(s_row_details[i], detail, false);
         select_row(i, i == s_selected);
@@ -328,11 +367,27 @@ static void render_sessions(void)
         lv_label_set_long_mode(s_title, LV_LABEL_LONG_SCROLL_CIRCULAR);
 }
 
+// Progress reads in the accent color; failures that offer a retry read as alerts.
+static uint32_t chat_status_color(const char *text)
+{
+    if (s_view.notice[0] != '\0' && strcmp(text, s_view.notice) == 0) return UI_DIM;
+    const char *state = s_view.message.state;
+    if (s_view.text_kind == AGENT_TEXT_DRAFT) return UI_ACCENT;
+    if (s_view.text_kind == AGENT_TEXT_INPUT) return UI_DIM;
+    if (strcmp(state, "failed") == 0 || strcmp(state, "unconfirmed") == 0 ||
+        strcmp(state, "incomplete") == 0) return UI_RECORDING;
+    if (agent_message_active(state)) return UI_ACCENT;
+    return UI_DIM;
+}
+
 static void chat_status(const char *text)
 {
     // LVGL's DOT mode edits its displayed buffer, so compare the source text.
     if (strcmp(s_chat_status, text) != 0 && memo_font_label_text(s_status, text, false))
         agent_copy_text(s_chat_status, sizeof(s_chat_status), text);
+    const uint32_t color = chat_status_color(text);
+    if ((lv_color_to_u32(lv_obj_get_style_text_color(s_status, 0)) & 0xFFFFFF) != color)
+        lv_obj_set_style_text_color(s_status, lv_color_hex(color), 0);
     lv_obj_set_hidden(s_status, text[0] == '\0');
 }
 
@@ -375,7 +430,7 @@ static void render_chat(void)
                                 s_chat_text != NULL && s_chat_text[0] != '\0';
     const bool shown_input = retain_loading ?
         (s_chat_kind == AGENT_TEXT_INPUT || s_chat_kind == AGENT_TEXT_DRAFT) : input;
-    const uint32_t color = shown_input ? UI_SELECTED : UI_SURFACE;
+    const uint32_t color = shown_input ? UI_ACCENT_SOFT : UI_SURFACE;
     const char *title = s_view.title[0] ? s_view.title : "对话";
     if (strcmp(s_chat_title, title) != 0 && memo_font_label_text(s_title, title, false))
         agent_copy_text(s_chat_title, sizeof(s_chat_title), title);
@@ -383,6 +438,7 @@ static void render_chat(void)
     set_background(s_chat_card, color);
     set_background(s_scroll, color);
     set_background(s_chat_wait, color);
+    set_background(s_chat_dot, shown_input ? UI_DIM : UI_ACCENT);
 
     if (generating) {
         chat_wait(true);
@@ -481,16 +537,21 @@ static void render(void)
         char clock[32];
         snprintf(clock, sizeof(clock), "%02lu:%02lu", (unsigned long)(seconds / 60), (unsigned long)(seconds % 60));
         set_text(s_clock, clock, true);
+        const bool listening = s_view.capture == AGENT_RECORDING;
         set_text(s_status, s_view.capture == AGENT_COMMITTING ? "正在保存" :
             s_view.capture == AGENT_FINALIZING ? "正在收尾" : "正在录音", false);
-        set_text(s_text, s_view.text.text, false);
+        set_background(s_record_dot, listening ? UI_RECORDING : UI_ACCENT);
+        set_text(s_text, s_view.text.text[0] ? s_view.text.text : "请开始说话", false);
+        if ((lv_color_to_u32(lv_obj_get_style_text_color(s_text, 0)) & 0xFFFFFF) != (s_view.text.text[0] ? UI_FG : UI_DIM))
+            lv_obj_set_style_text_color(s_text, lv_color_hex(s_view.text.text[0] ? UI_FG : UI_DIM), 0);
         lv_obj_update_layout(s_scroll);
         lv_obj_scroll_to_y(s_scroll, lv_obj_get_scroll_y(s_scroll) + lv_obj_get_scroll_bottom(s_scroll), LV_ANIM_OFF);
         memmove(s_levels, s_levels + 1, sizeof(s_levels) - 1);
-        s_levels[11] = agent_capture_level();
-        for (int i = 0; i < 12; i++) {
-            const int height = 2 + s_levels[i] * 28 / 100;
-            lv_obj_set_pos(s_wave[i], 28 + i * 16, 164 - height / 2);
+        s_levels[AGENT_WAVE_BARS - 1] = listening ? agent_capture_level() : 0;
+        for (int i = 0; i < AGENT_WAVE_BARS; i++) {
+            const int height = 6 + s_levels[i] * 52 / 100;
+            if (lv_obj_get_height(s_wave[i]) == height) continue;
+            lv_obj_set_y(s_wave[i], AGENT_WAVE_CENTER - height / 2);
             lv_obj_set_height(s_wave[i], height);
         }
     }

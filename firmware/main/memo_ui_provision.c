@@ -22,41 +22,34 @@ static void stroke(lv_layer_t *layer, int x1, int y1, int x2, int y2)
 {
     lv_draw_line_dsc_t line;
     lv_draw_line_dsc_init(&line);
-    line.color = lv_color_hex(UI_DIM);
+    line.color = lv_color_hex(UI_ACCENT);
     line.width = 2;
+    line.round_start = line.round_end = 1;
     line.p1 = (lv_point_precise_t){x1, y1};
     line.p2 = (lv_point_precise_t){x2, y2};
     lv_draw_line(layer, &line);
 }
 
+// Icons are drawn around the centre of the circular accent badge.
 static void draw_icon(lv_event_t *event)
 {
     lv_area_t area;
     lv_obj_get_coords(lv_event_get_target_obj(event), &area);
     lv_layer_t *layer = lv_event_get_layer(event);
-    const int x = area.x1, y = area.y1;
+    const int cx = (area.x1 + area.x2) / 2, cy = (area.y1 + area.y2) / 2;
     if (s_visual_state == MEMO_PROV_WIFI_CONNECTED) {
-        stroke(layer, x + 6, y + 21, x + 16, y + 31);
-        stroke(layer, x + 16, y + 31, x + 34, y + 9);
+        stroke(layer, cx - 10, cy + 1, cx - 3, cy + 8);
+        stroke(layer, cx - 3, cy + 8, cx + 11, cy - 7);
     } else if (s_visual_state == MEMO_PROV_FAILED) {
-        lv_draw_arc_dsc_t arc;
-        lv_draw_arc_dsc_init(&arc);
-        arc.color = lv_color_hex(UI_DIM);
-        arc.width = 2;
-        arc.center = (lv_point_t){x + 20, y + 20};
-        arc.radius = 18;
-        arc.start_angle = 0;
-        arc.end_angle = 360;
-        lv_draw_arc(layer, &arc);
-        stroke(layer, x + 20, y + 10, x + 20, y + 23);
-        stroke(layer, x + 20, y + 29, x + 20, y + 30);
+        stroke(layer, cx - 8, cy - 8, cx + 8, cy + 8);
+        stroke(layer, cx + 8, cy - 8, cx - 8, cy + 8);
     } else {
         // Bluetooth mark uses drawing primitives, independent of font coverage.
-        stroke(layer, x + 20, y + 3, x + 20, y + 37);
-        stroke(layer, x + 20, y + 3, x + 30, y + 13);
-        stroke(layer, x + 30, y + 13, x + 10, y + 29);
-        stroke(layer, x + 10, y + 11, x + 30, y + 27);
-        stroke(layer, x + 30, y + 27, x + 20, y + 37);
+        stroke(layer, cx, cy - 14, cx, cy + 14);
+        stroke(layer, cx, cy - 14, cx + 8, cy - 6);
+        stroke(layer, cx + 8, cy - 6, cx - 8, cy + 7);
+        stroke(layer, cx - 8, cy - 7, cx + 8, cy + 6);
+        stroke(layer, cx + 8, cy + 6, cx, cy + 14);
     }
 }
 
@@ -82,18 +75,17 @@ void memo_ui_provision_build(void)
     s_screen = lv_obj_create(NULL);
     memo_ui_flat_rect(s_screen, UI_BG, 0);
     memo_ui_header(s_screen, "蓝牙配网", true);
-    s_icon = lv_obj_create(s_screen);
-    memo_ui_flat_rect(s_icon, UI_BG, 0);
-    lv_obj_set_pos(s_icon, layout.icon_x, layout.icon_y);
-    lv_obj_set_size(s_icon, layout.icon_size, layout.icon_size);
+    s_icon = memo_ui_icon_badge(s_screen, layout.icon_x, layout.icon_y, layout.icon_size);
     lv_obj_add_event_cb(s_icon, draw_icon, LV_EVENT_DRAW_MAIN, NULL);
     s_state = centered_label(s_screen, 16, layout.title_y, width - 32, line_height, UI_FG);
+    lv_obj_set_style_text_font(s_state, memo_font_body(), 0);
     s_detail = centered_label(s_screen, layout.text_x, layout.detail_y,
         layout.text_width, layout.detail_height, UI_DIM);
     lv_label_set_long_mode(s_detail, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_line_space(s_detail, MEMO_PROVISION_LINE_SPACE, 0);
     s_identity_card = memo_ui_card(s_screen, layout.text_x, layout.identity_y,
         layout.text_width, layout.identity_height, NULL);
+    lv_obj_set_style_radius(s_identity_card, layout.identity_height / 2, 0);
     lv_obj_set_style_pad_all(s_identity_card, 0, 0);
     s_identity = centered_label(s_identity_card, 12, 5, layout.text_width - 26,
         line_height, UI_FG);

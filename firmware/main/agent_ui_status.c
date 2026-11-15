@@ -11,8 +11,9 @@ static void stroke(lv_layer_t *layer, int x1, int y1, int x2, int y2)
 {
     lv_draw_line_dsc_t line;
     lv_draw_line_dsc_init(&line);
-    line.color = lv_color_hex(UI_DIM);
-    line.width = 1;
+    line.color = lv_color_hex(UI_ACCENT);
+    line.width = 2;
+    line.round_start = line.round_end = 1;
     line.p1 = (lv_point_precise_t){x1, y1};
     line.p2 = (lv_point_precise_t){x2, y2};
     lv_draw_line(layer, &line);
@@ -23,58 +24,64 @@ static void outline(lv_layer_t *layer, int x, int y, int width, int height, int 
     lv_draw_rect_dsc_t rect;
     lv_draw_rect_dsc_init(&rect);
     rect.bg_opa = LV_OPA_TRANSP;
-    rect.border_color = lv_color_hex(UI_DIM);
-    rect.border_width = 1;
+    rect.border_color = lv_color_hex(UI_ACCENT);
+    rect.border_width = 2;
     rect.radius = radius;
     const lv_area_t area = {x, y, x + width - 1, y + height - 1};
     lv_draw_rect(layer, &rect, &area);
 }
 
+static void arc(lv_layer_t *layer, int cx, int cy, int radius, int start, int end)
+{
+    lv_draw_arc_dsc_t dsc;
+    lv_draw_arc_dsc_init(&dsc);
+    dsc.color = lv_color_hex(UI_ACCENT);
+    dsc.width = 2;
+    dsc.rounded = 1;
+    dsc.center = (lv_point_t){cx, cy};
+    dsc.radius = radius;
+    dsc.start_angle = start;
+    dsc.end_angle = end;
+    lv_draw_arc(layer, &dsc);
+}
+
+static void dot(lv_layer_t *layer, int cx, int cy)
+{
+    lv_draw_rect_dsc_t rect;
+    lv_draw_rect_dsc_init(&rect);
+    rect.bg_color = lv_color_hex(UI_ACCENT);
+    rect.radius = LV_RADIUS_CIRCLE;
+    const lv_area_t area = {cx - 2, cy - 2, cx + 2, cy + 2};
+    lv_draw_rect(layer, &rect, &area);
+}
+
+// Icons are drawn around the centre of the circular accent badge.
 static void draw_icon(lv_event_t *event)
 {
     lv_area_t area;
     lv_obj_get_coords(lv_event_get_target_obj(event), &area);
     lv_layer_t *layer = lv_event_get_layer(event);
-    const int x = area.x1, y = area.y1;
+    const int cx = (area.x1 + area.x2) / 2, cy = (area.y1 + area.y2) / 2;
     if (s_status == AGENT_STATUS_NEEDS_NETWORK || s_status == AGENT_STATUS_CONNECTING) {
-        lv_draw_arc_dsc_t arc;
-        lv_draw_arc_dsc_init(&arc);
-        arc.color = lv_color_hex(UI_DIM);
-        arc.width = 1;
-        arc.center = (lv_point_t){x + 20, y + 32};
-        arc.start_angle = 225;
-        arc.end_angle = 315;
-        for (int radius = 6; radius <= 20; radius += 7) {
-            arc.radius = radius;
-            lv_draw_arc(layer, &arc);
-        }
-        stroke(layer, x + 19, y + 32, x + 21, y + 32);
-        if (s_status == AGENT_STATUS_NEEDS_NETWORK) stroke(layer, x + 6, y + 36, x + 34, y + 6);
+        for (int radius = 7; radius <= 21; radius += 7) arc(layer, cx, cy + 9, radius, 225, 315);
+        dot(layer, cx, cy + 9);
+        if (s_status == AGENT_STATUS_NEEDS_NETWORK) stroke(layer, cx - 13, cy + 13, cx + 13, cy - 13);
     } else if (s_status == AGENT_STATUS_EMPTY) {
-        outline(layer, x + 14, y + 3, 12, 22, 6);
-        lv_draw_arc_dsc_t arc;
-        lv_draw_arc_dsc_init(&arc);
-        arc.color = lv_color_hex(UI_DIM);
-        arc.width = 1;
-        arc.center = (lv_point_t){x + 20, y + 22};
-        arc.radius = 13;
-        arc.start_angle = 0;
-        arc.end_angle = 180;
-        lv_draw_arc(layer, &arc);
-        stroke(layer, x + 20, y + 35, x + 20, y + 39);
-        stroke(layer, x + 12, y + 39, x + 28, y + 39);
+        outline(layer, cx - 6, cy - 16, 12, 21, 6);
+        arc(layer, cx, cy - 3, 11, 0, 180);
+        stroke(layer, cx, cy + 8, cx, cy + 13);
+        stroke(layer, cx - 6, cy + 14, cx + 6, cy + 14);
     } else if (s_status == AGENT_STATUS_ERROR) {
-        outline(layer, x + 4, y + 4, 32, 32, 0);
-        stroke(layer, x + 20, y + 10, x + 20, y + 24);
-        stroke(layer, x + 20, y + 29, x + 20, y + 31);
+        arc(layer, cx, cy, 15, 0, 360);
+        stroke(layer, cx, cy - 7, cx, cy + 2);
+        dot(layer, cx, cy + 8);
     } else {
         for (int row = 0; row < 2; row++) {
-            const int top = y + 6 + row * 18;
-            outline(layer, x + 4, top, 32, 12, 0);
-            stroke(layer, x + 8, top + 6, x + 10, top + 6);
-            stroke(layer, x + 18, top + 6, x + 30, top + 6);
+            const int top = cy - 13 + row * 15;
+            outline(layer, cx - 14, top, 28, 11, 4);
+            dot(layer, cx - 8, top + 5);
+            stroke(layer, cx - 1, top + 5, cx + 8, top + 5);
         }
-        stroke(layer, x + 20, y + 18, x + 20, y + 24);
     }
 }
 
@@ -92,12 +99,9 @@ void agent_ui_status_build(lv_obj_t *parent)
     memo_ui_flat_rect(s_panel, UI_BG, 0);
     lv_obj_set_pos(s_panel, layout.x, layout.y);
     lv_obj_set_size(s_panel, layout.width, layout.height);
-    s_icon = lv_obj_create(s_panel);
-    memo_ui_flat_rect(s_icon, UI_BG, 0);
-    lv_obj_set_pos(s_icon, layout.icon_x, layout.icon_y);
-    lv_obj_set_size(s_icon, layout.icon_size, layout.icon_size);
+    s_icon = memo_ui_icon_badge(s_panel, layout.icon_x, layout.icon_y, layout.icon_size);
     lv_obj_add_event_cb(s_icon, draw_icon, LV_EVENT_DRAW_MAIN, NULL);
-    s_title = memo_ui_label(s_panel, memo_font_label(), UI_FG);
+    s_title = memo_ui_label(s_panel, memo_font_body(), UI_FG);
     lv_obj_set_pos(s_title, 12, layout.title_y);
     lv_obj_set_width(s_title, layout.width - 24);
     lv_obj_set_style_text_align(s_title, LV_TEXT_ALIGN_CENTER, 0);
