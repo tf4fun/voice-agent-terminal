@@ -22,6 +22,7 @@ import (
 	"github.com/tf4fun/voice-agent-terminal/server/internal/hermes"
 	"github.com/tf4fun/voice-agent-terminal/server/internal/httpapi"
 	"github.com/tf4fun/voice-agent-terminal/server/internal/store"
+	"github.com/tf4fun/voice-agent-terminal/server/internal/tts"
 )
 
 func main() {
@@ -78,6 +79,12 @@ func run(arguments []string) error {
 	}
 	client := &hermes.Client{BaseURL: cfg.HermesURL, APIKey: cfg.HermesKey}
 	service := gateway.New(st, cfg, client, transcriber, logger)
+	switch cfg.TTSProvider {
+	case "openai":
+		service.TTS = &tts.OpenAI{URL: cfg.TTSURL, APIKey: cfg.OpenAIKey, Model: cfg.TTSModel, Voice: cfg.TTSVoice, Log: logger}
+	case "fake":
+		service.TTS = tts.Fake{}
+	}
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 	service.Start(ctx)
@@ -96,7 +103,7 @@ func run(arguments []string) error {
 		BaseContext: func(net.Listener) context.Context { return ctx }}
 	finished := make(chan error, 1)
 	go func() { finished <- server.Serve(listener) }()
-	logger.Info("listening", "addr", listener.Addr().String(), "version", httpapi.Version, "asr_provider", cfg.ASRProvider)
+	logger.Info("listening", "addr", listener.Addr().String(), "version", httpapi.Version, "asr_provider", cfg.ASRProvider, "tts_provider", cfg.TTSProvider)
 	select {
 	case err := <-finished:
 		cancel()

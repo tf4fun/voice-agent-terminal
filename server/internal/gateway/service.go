@@ -14,6 +14,7 @@ import (
 	"github.com/tf4fun/voice-agent-terminal/server/internal/hermes"
 	"github.com/tf4fun/voice-agent-terminal/server/internal/model"
 	"github.com/tf4fun/voice-agent-terminal/server/internal/store"
+	"github.com/tf4fun/voice-agent-terminal/server/internal/tts"
 )
 
 type capture struct {
@@ -34,6 +35,7 @@ type Service struct {
 	Config       config.Config
 	Hermes       *hermes.Client
 	ASR          asr.Transcriber
+	TTS          tts.Synthesizer // Optional; nil disables spoken replies.
 	Events       *events.Hub
 	Log          *slog.Logger
 	mu           sync.Mutex
@@ -45,6 +47,8 @@ type Service struct {
 	wake         chan struct{}
 	workers      sync.WaitGroup
 	cancel       context.CancelFunc
+	ctx          context.Context
+	speech       speechStreams
 }
 
 func New(st *store.Store, cfg config.Config, client *hermes.Client, transcriber asr.Transcriber, logger *slog.Logger) *Service {
@@ -62,6 +66,14 @@ func New(st *store.Store, cfg config.Config, client *hermes.Client, transcriber 
 func (s *Service) Start(parent context.Context) {
 	ctx, cancel := context.WithCancel(parent)
 	s.cancel = cancel
+	s.mu.Lock()
+	s.ctx = ctx
+	s.mu.Unlock()
+	// Keep a configured speech session warm for the first sentence of a reply.
+	if warm, ok := s.TTS.(interface{ Run(context.Context) }); ok && s.TTS.Enabled() {
+		s.workers.Add(1)
+		go func() { defer s.workers.Done(); warm.Run(ctx) }()
+	}
 	// Keep a configured transcription session warm for the next recording.
 	if warm, ok := s.ASR.(interface{ Run(context.Context) }); ok && s.ASR.Enabled() {
 		s.workers.Add(1)
@@ -498,4 +510,15 @@ func (s *Service) complete(parent context.Context, message model.Message) {
 		return
 	}
 	s.Events.Publish(events.Event{Type: "message.updated", SessionID: message.SessionID, MessageID: message.ID, Status: state})
+}
+
+// baseContext is the service lifetime; background work started by requests
+// (speech synthesis) outlives the request but not the service.
+func (s *Service) baseContext() context.Context {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.ctx == nil {
+		return context.Background()
+	}
+	return s.ctx
 }

@@ -311,6 +311,37 @@ metadata and complete message snapshots support recovery after an event gap. SSE
 is transient. Approval prompts are surfaced as attention states; detailed
 approval controls remain a subsequent product decision.
 
+## Spoken replies
+
+`GET /api/v1/sessions/{id}/messages/{message}/speech` streams a reply's voice
+while the reply is still being generated. The gateway follows the stored reply,
+splits it into sentences (Chinese and English terminators, list markers kept
+in the sentence, at most 80 characters with a split at a comma), drops Markdown
+markup, code blocks and link targets, and synthesizes each sentence in order.
+The response is framed binary: one kind byte, a little-endian uint16 length,
+then the payload. Kind 1 starts a sentence (uint16 index and its UTF-8 text),
+kind 2 carries 16 kHz PCM16LE mono audio in 128 ms frames, and kind 3 ends the
+stream with a status byte (0 done, 1 failed, 2 cancelled, 3 size limit).
+
+Synthesis starts on the first request for a reply and is shared: later
+listeners replay from the beginning. Ten seconds after the last listener
+leaves an unfinished stream, synthesis stops; a later request redoes it.
+Finished streams stay replayable for ten minutes, up to eight streams, and
+one reply is bounded to 16 MiB of audio. `/api/v1/server` reports `speech`.
+
+`VOICE_TTS_PROVIDER` is `openai` (default), `fake` (a soft chime, 100 ms per
+character, for development) or `off`. OpenAI deprecated its Speech API models
+(`gpt-4o-mini-tts`, `tts-1`, `tts-1-hd`; shutdown 2027-01-06), so the gateway
+uses the Realtime API as a reader: `OPENAI_TTS_MODEL` defaults to
+`gpt-realtime-2.1-mini` and `OPENAI_TTS_VOICE` to `marin` at
+`OPENAI_TTS_URL` (`wss://api.openai.com/v1/realtime`). Each sentence is an
+out-of-band `response.create` (`conversation: "none"`, empty input) whose
+instructions say the text verbatim; 24 kHz output is downsampled to 16 kHz
+with a windowed-sinc low-pass. One configured session is kept warm like the
+transcription session. A live check from the deployment host on 2026-11-15
+read Chinese, English and mixed sentences verbatim with the first audio after
+0.64–0.87 s; opening a session through the proxy took 3.7 s.
+
 ## Device diagnostic reports
 
 `POST /api/v1/device/logs` accepts one JSON report of at most 64 KiB from a

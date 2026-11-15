@@ -25,6 +25,10 @@ type Config struct {
 	OpenAIKey      string
 	OpenAIURL      string
 	OpenAIModel    string
+	TTSProvider    string // openai, fake or off.
+	TTSURL         string
+	TTSModel       string
+	TTSVoice       string
 	Workers        int
 	ChatTimeout    time.Duration
 	CaptureTimeout time.Duration
@@ -53,6 +57,8 @@ func Load(getenv func(string) string) (Config, error) {
 		ASRProvider: value("VOICE_ASR_PROVIDER", "openai"), OpenAIKey: getenv("OPENAI_API_KEY"),
 		OpenAIURL:   value("OPENAI_REALTIME_URL", "wss://api.openai.com/v1/realtime?intent=transcription"),
 		OpenAIModel: value("OPENAI_TRANSCRIBE_MODEL", "gpt-live-transcribe"),
+		TTSProvider: value("VOICE_TTS_PROVIDER", "openai"), TTSURL: value("OPENAI_TTS_URL", "wss://api.openai.com/v1/realtime"),
+		TTSModel: value("OPENAI_TTS_MODEL", "gpt-realtime-2.1-mini"), TTSVoice: value("OPENAI_TTS_VOICE", "marin"),
 		ChatTimeout: 10 * time.Minute, CaptureTimeout: 5 * time.Minute, MaxAudioBytes: 15 << 20,
 	}
 	var err error
@@ -69,7 +75,7 @@ func Load(getenv func(string) string) (Config, error) {
 		name, value string
 		websocket   bool
 	}{
-		{"HERMES_BASE_URL", cfg.HermesURL, false}, {"OPENAI_REALTIME_URL", cfg.OpenAIURL, true},
+		{"HERMES_BASE_URL", cfg.HermesURL, false}, {"OPENAI_REALTIME_URL", cfg.OpenAIURL, true}, {"OPENAI_TTS_URL", cfg.TTSURL, true},
 	} {
 		parsed, err := url.Parse(target.value)
 		if err != nil || parsed.Host == "" || parsed.User != nil || parsed.Fragment != "" {
@@ -85,6 +91,9 @@ func Load(getenv func(string) string) (Config, error) {
 	}
 	if cfg.ASRProvider != "openai" && cfg.ASRProvider != "fake" {
 		return Config{}, fmt.Errorf("VOICE_ASR_PROVIDER must be openai or fake")
+	}
+	if cfg.TTSProvider != "openai" && cfg.TTSProvider != "fake" && cfg.TTSProvider != "off" {
+		return Config{}, fmt.Errorf("VOICE_TTS_PROVIDER must be openai, fake or off")
 	}
 	return cfg, nil
 }

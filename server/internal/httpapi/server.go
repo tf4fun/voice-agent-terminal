@@ -72,6 +72,7 @@ func New(service *gateway.Service) http.Handler {
 	handle("GET /api/v1/sessions/{session}/messages/{message}", s.message)
 	handle("GET /api/v1/sessions/{session}/messages/{message}/text", s.messageText)
 	handle("POST /api/v1/sessions/{session}/messages/{message}/retry", s.retry)
+	handle("GET /api/v1/sessions/{session}/messages/{message}/speech", s.speech)
 	handle("POST /api/v1/device/logs", s.addDeviceReport)
 	handle("GET /api/v1/device/logs", s.deviceReports)
 	handle("GET /api/v1/device/logs/{report}", s.deviceReport)
@@ -185,6 +186,7 @@ func (s *Server) capabilities(w http.ResponseWriter, r *http.Request) {
 		"max_draft_bytes": model.MaxDraftBytes, "max_segments": model.MaxSegments,
 		"max_text_window_bytes": model.WindowBytes, "max_event_bytes": 1024,
 		"max_audio_ms": s.service.Config.CaptureTimeout.Milliseconds(), "device_logs": true,
+		"speech": s.service.SpeechEnabled(), "speech_format": "pcm_s16le", "speech_rate": 16000,
 	})
 }
 
