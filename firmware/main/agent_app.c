@@ -1377,8 +1377,12 @@ static bool sleep_device(void)
 static void power_tick(int64_t now)
 {
     const memo_settings_t *settings = memo_settings_get();
+    // A reply being read aloud keeps the screen on and the device awake, like
+    // the thinking that precedes it; deep sleep would cut the speech off.
+    agent_speech_view_t speech;
+    agent_speech_copy(&speech);
     const bool active = s_view.capture != AGENT_IDLE || (s_view.busy && !s_sleep_requested) || s_edit.active || s_page == AGENT_PAGE_PROVISION ||
-        agent_message_active(s_view.message.state) || bsp_button_read_mv() < BSP_BTN_MV_RELEASED_MIN;
+        agent_message_active(s_view.message.state) || speech.active || bsp_button_read_mv() < BSP_BTN_MV_RELEASED_MIN;
     const memo_power_action_t action = s_manual_sleep ? MEMO_POWER_SLEEP : memo_power_poll(&s_power, now / 1000, settings->screen_timeout_s,
                                                       settings->sleep_min, active, s_view.busy && !s_sleep_requested);
     const int brightness = action == MEMO_POWER_ON ? (s_edit.active ? s_edit.value.brightness : settings->brightness) : 0;

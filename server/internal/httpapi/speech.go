@@ -50,6 +50,11 @@ func (s *Server) speech(w http.ResponseWriter, r *http.Request) {
 		frame, ok, err := reader.Next(wait)
 		cancel()
 		if err != nil && r.Context().Err() == nil && errors.Is(err, context.DeadlineExceeded) {
+			if reader.Resuming() {
+				// A device resuming mid-frame would read a keepalive as
+				// frame bytes; stay silent until the stream reaches it.
+				continue
+			}
 			frame, ok, err = keepalive, true, nil
 		}
 		if err != nil || !ok {

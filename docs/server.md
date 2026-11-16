@@ -336,7 +336,8 @@ and stays ahead. The stream is cached in the gateway: synthesis starts on the
 first request for a reply and is shared, later listeners replay from the
 beginning, and `?offset=<bytes>` resumes a dropped connection at any byte of the
 cached stream, even mid-frame (keepalives are not part of the cache and are not
-counted). Ten seconds after the last listener leaves an unfinished stream,
+counted; none is sent until a resumed connection has reached its offset, since
+the device may be inside a frame). Ten seconds after the last listener leaves an unfinished stream,
 synthesis stops; a later request redoes it. Finished streams stay replayable
 for ten minutes, up to eight streams, and one reply is bounded to 16 MiB of
 audio and 8000 bytes of text. `/api/v1/server` reports `speech`.

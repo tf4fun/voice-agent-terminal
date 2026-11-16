@@ -55,6 +55,9 @@ type speechStream struct {
 	cancel   context.CancelFunc
 	finished time.Time
 	idle     *time.Timer
+	// abandoned is set when the idle timer stops synthesis; the stream is
+	// about to end as cancelled, so a new listener starts a fresh one.
+	abandoned bool
 }
 
 func (st *speechStream) append(frame []byte) bool {
@@ -144,6 +147,11 @@ func (r *SpeechReader) Next(ctx context.Context) ([]byte, bool, error) {
 	}
 }
 
+// Resuming reports that the reader has not yet reached its resume offset. The
+// offset may fall inside a frame that is not synthesized yet (the stream is
+// being redone), so nothing may be inserted between frames until it is reached.
+func (r *SpeechReader) Resuming() bool { return r.skip > 0 }
+
 func (r *SpeechReader) Close() { r.once.Do(r.closer) }
 
 type speechStreams struct {
@@ -169,7 +177,8 @@ func (s *Service) OpenSpeech(ctx context.Context, sessionID, messageID string, o
 	if stream != nil {
 		// A stream stopped for lack of listeners, or by a failure, is redone.
 		stream.mu.Lock()
-		retry := stream.done && stream.readers == 0 && stream.status != SpeechDone && stream.status != SpeechLimit
+		retry := stream.readers == 0 && (stream.abandoned && !stream.done ||
+			stream.done && stream.status != SpeechDone && stream.status != SpeechLimit)
 		stream.mu.Unlock()
 		if retry {
 			delete(s.speech.streams, messageID)
@@ -200,7 +209,15 @@ func (s *Service) OpenSpeech(ctx context.Context, sessionID, messageID string, o
 		stream.readers--
 		if stream.readers == 0 && !stream.done {
 			// Nobody is listening: stop paying for speech after a short grace.
-			stream.idle = time.AfterFunc(speechIdleCancel, stream.cancel)
+			stream.idle = time.AfterFunc(speechIdleCancel, func() {
+				stream.mu.Lock()
+				abandoned := stream.readers == 0
+				stream.abandoned = abandoned
+				stream.mu.Unlock()
+				if abandoned {
+					stream.cancel()
+				}
+			})
 		}
 	}
 	return reader, nil

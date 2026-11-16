@@ -66,7 +66,7 @@ never touches the header. With a draft, long Down clears it through
 ## Diagnostic reports
 
 The firmware keeps a diagnostic trace in RTC memory (`agent_trace.c`): the last
-160 events and about 1.5 KiB of warning/error log lines, 5.4 KiB in total. It
+160 events and about 1.5 KiB of warning/error log lines, 5.3 KiB in total. It
 survives software resets, panics and watchdog resets, and is cleared at power-on.
 Events cover button press/release, resolved gestures with page and capture
 state, page and capture transitions with heap figures, mutating HTTP requests
@@ -78,7 +78,7 @@ A report is uploaded to `POST /api/v1/device/logs` after a failed recording, a
 capture error, an abnormal reset (panic, watchdog, brownout, lockup) or a draft
 send within 5 s of a failed recording. The network task uploads while capture is
 idle, at most once per 15 s and 30 times per boot; a failed upload stays pending.
-The upload streams chunked JSON from a 5.4 KiB heap snapshot held only during the
+The upload streams chunked JSON from a 5.3 KiB heap snapshot held only during the
 request. Reports never contain audio, transcripts or credentials.
 
 ## Following messages from other clients
@@ -117,7 +117,8 @@ rediscovery is available by confirming the server row in settings. Each short
 press is handled independently of the driver's multi-click events.
 
 Settings contain network, server, volume, brightness, screen-off delay,
-deep-sleep delay, theme, time zone and version. The sleep delay starts when the display goes dark.
+deep-sleep delay, theme, time zone and version. The sleep delay starts when the display goes dark;
+the screen stays on while recording, while Hermes thinks and while a reply is read aloud.
 Selected session titles scroll horizontally. Dates and unselected rows have
 bounded single-line layouts. Active pages own their widgets and animations.
 Switching pages deletes the inactive page after loading a fixed transition screen.
