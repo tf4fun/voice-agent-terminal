@@ -18,7 +18,7 @@ type speechFrame struct {
 	payload []byte
 }
 
-func readSpeech(t *testing.T, e *environment, path string) []speechFrame {
+func readSpeech(t *testing.T, e *environment, path string) ([]speechFrame, string) {
 	t.Helper()
 	request, _ := http.NewRequest("GET", e.server.URL+path, nil)
 	request.Header.Set("Authorization", "Bearer device-test")
@@ -29,6 +29,10 @@ func readSpeech(t *testing.T, e *environment, path string) []speechFrame {
 	defer response.Body.Close()
 	if response.StatusCode != 200 || response.Header.Get("X-Speech-Format") != "pcm_s16le;rate=16000;channels=1" {
 		t.Fatalf("speech status %d", response.StatusCode)
+	}
+	streamID := response.Header.Get("X-Speech-Stream")
+	if !model.ValidID(streamID) {
+		t.Fatalf("invalid X-Speech-Stream %q", streamID)
 	}
 	var frames []speechFrame
 	header := make([]byte, 3)
@@ -42,7 +46,7 @@ func readSpeech(t *testing.T, e *environment, path string) []speechFrame {
 		}
 		frames = append(frames, speechFrame{header[0], payload})
 		if header[0] == gateway.FrameEnd {
-			return frames
+			return frames, streamID
 		}
 	}
 }
@@ -56,7 +60,7 @@ func TestReplySpeechStreamsSentencesAndAudio(t *testing.T) {
 	e.request(t, "GET", path, nil, 503) // No synthesizer configured.
 	e.service.TTS = tts.Fake{}
 	// Opened while the reply may still be streaming; speech starts once it is complete.
-	frames := readSpeech(t, e, path)
+	frames, streamID := readSpeech(t, e, path)
 	sentences, audio := 0, 0
 	spoken := ""
 	for _, f := range frames {
@@ -84,15 +88,18 @@ func TestReplySpeechStreamsSentencesAndAudio(t *testing.T) {
 		t.Fatalf("audio %d bytes for %q, want %d", audio, spoken, want)
 	}
 	// A second listener replays the finished stream from the start.
-	if again := readSpeech(t, e, path); len(again) != len(frames) {
-		t.Fatalf("replay has %d frames, first had %d", len(again), len(frames))
+	if again, againID := readSpeech(t, e, path); len(again) != len(frames) || againID != streamID {
+		t.Fatalf("replay has %d frames (%s), first had %d (%s)", len(again), againID, len(frames), streamID)
 	}
-	// Resuming at a byte offset continues there: past the sentence frame,
-	// the next bytes are the first audio frame.
-	resumed := readSpeech(t, e, path+"?offset="+strconv.Itoa(3+len(frames[0].payload)))
-	if resumed[0].kind != gateway.FrameAudio || len(resumed) != len(frames)-1 {
-		t.Fatalf("resume started with kind %d, %d frames", resumed[0].kind, len(resumed))
+	// Resuming at a byte offset requires the matching stream ID.
+	offset := strconv.Itoa(3 + len(frames[0].payload))
+	resumed, resumedID := readSpeech(t, e, path+"?offset="+offset+"&stream="+streamID)
+	if resumed[0].kind != gateway.FrameAudio || len(resumed) != len(frames)-1 || resumedID != streamID {
+		t.Fatalf("resume started with kind %d, %d frames (%s)", resumed[0].kind, len(resumed), resumedID)
 	}
+	e.request(t, "GET", path+"?offset="+offset, nil, 409)
+	e.request(t, "GET", path+"?offset="+offset+"&stream="+model.NewID(), nil, 409)
+	e.request(t, "GET", path+"?offset=1&stream=bad", nil, 400)
 	e.request(t, "GET", path+"?offset=x", nil, 400)
 	e.request(t, "GET", base+"/messages/"+model.NewID()+"/speech", nil, 404)
 }

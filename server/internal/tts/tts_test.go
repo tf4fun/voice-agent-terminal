@@ -64,10 +64,7 @@ func start(t *testing.T, fake *fakeRealtime) *OpenAI {
 	t.Cleanup(func() { cancel(); <-done })
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		client.mu.Lock()
-		ready := client.idle != nil
-		client.mu.Unlock()
-		if ready {
+		if client.hasWarmSession() {
 			return client
 		}
 		time.Sleep(5 * time.Millisecond)

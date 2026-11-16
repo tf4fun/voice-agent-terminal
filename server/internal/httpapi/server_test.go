@@ -300,3 +300,25 @@ func TestTranscriptionWorksWhileHermesIsUnconfigured(t *testing.T) {
 	e.request(t, "POST", base+"/messages", map[string]any{"id": model.NewID(), "text": "先记录想法", "new_session": true}, 503)
 	e.request(t, "GET", base, nil, 404)
 }
+
+type failingASR struct{ err error }
+
+func (*failingASR) Enabled() bool { return true }
+func (a *failingASR) Transcribe(_ context.Context, input io.ReadCloser, _ int, _ func(asr.Update) error) error {
+	_, _ = io.Copy(io.Discard, input)
+	return a.err
+}
+
+func TestTranscriptLimitMapsTo413Not502(t *testing.T) {
+	e := setup(t)
+	e.service.ASR = &failingASR{err: asr.ErrLimit}
+	status, body := e.upload(t, model.NewID(), make([]byte, 6400))
+	if status != 413 || !strings.Contains(body, `"limit_exceeded"`) {
+		t.Fatalf("got status=%d body=%s, want 413 limit_exceeded", status, body)
+	}
+	e.service.ASR = &failingASR{err: asr.ErrUpstream}
+	status, body = e.upload(t, model.NewID(), make([]byte, 6400))
+	if status != 502 || !strings.Contains(body, `"transcription_failed"`) {
+		t.Fatalf("got status=%d body=%s, want 502 transcription_failed", status, body)
+	}
+}

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/tf4fun/voice-agent-terminal/server/internal/gateway"
+	"github.com/tf4fun/voice-agent-terminal/server/internal/model"
 )
 
 // speech streams a reply's synthesized voice as framed binary: a kind byte, a
@@ -15,8 +16,8 @@ import (
 // mono audio, or end with a status byte). Speech starts once the reply is
 // complete; the stream is cached so listeners can join or resume at any byte.
 func (s *Server) speech(w http.ResponseWriter, r *http.Request) {
-	// offset=<bytes> resumes after a dropped connection exactly where the
-	// device stopped reading, even mid-frame; keepalives are not counted.
+	// offset=<bytes>&stream=<id> resumes after a dropped connection on the
+	// exact stream it started on, even mid-frame; keepalives are not counted.
 	offset := 0
 	if value := r.URL.Query().Get("offset"); value != "" {
 		parsed, err := strconv.Atoi(value)
@@ -26,7 +27,12 @@ func (s *Server) speech(w http.ResponseWriter, r *http.Request) {
 		}
 		offset = parsed
 	}
-	reader, err := s.service.OpenSpeech(r.Context(), r.PathValue("session"), r.PathValue("message"), offset)
+	streamID := r.URL.Query().Get("stream")
+	if streamID != "" && !model.ValidID(streamID) {
+		writeError(w, 400, "invalid_stream")
+		return
+	}
+	reader, err := s.service.OpenSpeech(r.Context(), r.PathValue("session"), r.PathValue("message"), streamID, offset)
 	if errors.Is(err, gateway.ErrSpeechUnavailable) {
 		writeError(w, 503, "speech_unavailable")
 		return
@@ -44,6 +50,7 @@ func (s *Server) speech(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Speech-Format", "pcm_s16le;rate=16000;channels=1")
+	w.Header().Set("X-Speech-Stream", reader.StreamID())
 	w.WriteHeader(http.StatusOK)
 	_ = controller.Flush()
 	keepalive := []byte{gateway.FrameKeepalive, 0, 0}

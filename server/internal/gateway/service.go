@@ -19,30 +19,34 @@ import (
 // preparedTTL bounds how long an unused upstream session stays open.
 var preparedTTL = 30 * time.Second
 
+const pendingBatchLimit = 16
+
 type preparedCapture struct {
 	session asr.Prepared
 	timer   *time.Timer
 }
 
 type Service struct {
-	Store        *store.Store
-	Config       config.Config
-	Hermes       *hermes.Client
-	ASR          asr.Transcriber
-	TTS          tts.Synthesizer // Optional; nil disables spoken replies.
-	Events       *events.Hub
-	Log          *slog.Logger
-	mu           sync.Mutex
-	lifecycleMu  sync.Mutex
-	lifecycles   map[string]*sessionLifecycleLock
-	transcripts  map[string]*transcription
-	prepared     map[string]*preparedCapture
-	captureSlots chan struct{}
-	wake         chan struct{}
-	workers      sync.WaitGroup
-	cancel       context.CancelFunc
-	ctx          context.Context
-	speech       speechStreams
+	Store         *store.Store
+	Config        config.Config
+	Hermes        *hermes.Client
+	ASR           asr.Transcriber
+	TTS           tts.Synthesizer // Optional; nil disables spoken replies.
+	Events        *events.Hub
+	Log           *slog.Logger
+	mu            sync.Mutex
+	lifecycleMu   sync.Mutex
+	lifecycles    map[string]*sessionLifecycleLock
+	pendingMu     sync.Mutex
+	pendingCursor *store.PendingCursor
+	transcripts   map[string]*transcription
+	prepared      map[string]*preparedCapture
+	captureSlots  chan struct{}
+	wake          chan struct{}
+	workers       sync.WaitGroup
+	cancel        context.CancelFunc
+	ctx           context.Context
+	speech        speechStreams
 }
 
 func New(st *store.Store, cfg config.Config, client *hermes.Client, transcriber asr.Transcriber, logger *slog.Logger) *Service {
@@ -84,12 +88,7 @@ func (s *Service) Start(parent context.Context) {
 		defer ticker.Stop()
 		for {
 			if s.Hermes.Enabled() {
-				pending, err := s.Store.PendingSessions(ctx)
-				if err == nil {
-					for _, session := range pending {
-						_ = s.Reconcile(ctx, session)
-					}
-				}
+				s.reconcilePending(ctx)
 			}
 			select {
 			case <-ctx.Done():
@@ -98,6 +97,36 @@ func (s *Service) Start(parent context.Context) {
 			}
 		}
 	}()
+}
+
+// reconcilePending processes at most pendingBatchLimit pending sessions per
+// round and advances a cursor so persistent upstream errors never starve later entries.
+func (s *Service) reconcilePending(ctx context.Context) {
+	s.pendingMu.Lock()
+	defer s.pendingMu.Unlock()
+	pending, err := s.Store.PendingSessions(ctx, s.pendingCursor, pendingBatchLimit)
+	if err != nil {
+		return
+	}
+	if len(pending) == 0 && s.pendingCursor != nil {
+		s.pendingCursor = nil
+		pending, err = s.Store.PendingSessions(ctx, nil, pendingBatchLimit)
+		if err != nil {
+			return
+		}
+	}
+	for _, session := range pending {
+		if ctx.Err() != nil {
+			return
+		}
+		_ = s.Reconcile(ctx, session)
+	}
+	if len(pending) < pendingBatchLimit {
+		s.pendingCursor = nil
+		return
+	}
+	last := pending[len(pending)-1]
+	s.pendingCursor = &store.PendingCursor{CreatedAt: last.CreatedAt, ID: last.ID}
 }
 
 func (s *Service) Close() {

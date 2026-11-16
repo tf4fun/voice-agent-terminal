@@ -1305,7 +1305,10 @@ esp_err_t agent_client_record(bool new_session)
     command_t c = {.kind = CMD_RECORD, .enabled = new_session};
     lock();
     if (s_view.busy || s_view.capture != AGENT_IDLE || !s_view.connected || s_view.paused ||
-        (!new_session && s_view.session_id[0] == '\0')) { unlock(); return ESP_ERR_INVALID_STATE; }
+        (!new_session && (s_view.session_id[0] == '\0' || strcmp(s_view.message.state, "attention") == 0))) {
+        unlock();
+        return ESP_ERR_INVALID_STATE;
+    }
     agent_copy_text(c.id, sizeof(c.id), s_view.session_id);
     s_view.capture = AGENT_PREPARING;
     s_cancelled = false;
@@ -1350,7 +1353,8 @@ esp_err_t agent_client_send(uint32_t serial, uint32_t selection)
     lock();
     const bool ready = selection != 0 && selection == s_view.selection && !s_view.busy &&
         s_view.capture == AGENT_IDLE && s_draft != NULL &&
-        s_view.text_kind == AGENT_TEXT_DRAFT && s_view.draft_serial == serial;
+        s_view.text_kind == AGENT_TEXT_DRAFT && s_view.draft_serial == serial &&
+        (s_view.session_local || strcmp(s_view.message.state, "attention") != 0);
     unlock();
     agent_trace(TRACE_SEND, ready ? 1 : 0, (int32_t)serial, NULL);
     if (!ready) return ESP_ERR_INVALID_STATE;

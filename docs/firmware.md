@@ -18,7 +18,9 @@ acts in that moment), then expands into the draft panel, whose header shows
 the draft's character count against its 140-character bound (red from 90 %). Sending collapses it
 to one line with the question while Hermes thinks: a comet arc orbits the orb,
 the bars rise in turn and the status counts the seconds waited; this lasts
-until Hermes has finished, since the device fetches the reply whole. While a
+until Hermes has finished, since the device fetches the reply whole. If Hermes
+reports `attention`, the status reads "等待审批", polling continues, and new
+recordings or sends in that session stay disabled until execution resumes. While a
 reply is spoken the strip keeps the question, dimmed; while Hermes thinks and
 while it speaks the strip is a flat grey field without a border, marking the
 question as sent and no longer editable, unlike the bordered resting strip. The
@@ -51,7 +53,8 @@ reads into a 16 KiB buffer (about 512 ms) shared with recording
 playback), and a writer task at the capture task's priority feeds the codec
 after 400 ms of prebuffer, refilling 200 ms after running dry, with short fades
 around each dry spell so it does not click. A dropped connection resumes at the
-exact stream byte it stopped at (`?offset=`, up to three times, keepalives not
+exact stream byte it stopped at (`?offset=<bytes>&stream=<id>` using the
+`X-Speech-Stream` response header, up to three times, keepalives not
 counted), with the frame parser carried over. If the gateway would have to
 synthesize the stream again (it answers 409 `speech_restarted`), playback ends
 there instead of continuing from new audio. The speech trace event records

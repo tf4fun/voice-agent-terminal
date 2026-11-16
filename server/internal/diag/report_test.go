@@ -71,6 +71,9 @@ func TestVoiceAndSpeechEventsRender(t *testing.T) {
 	if got := describe(Event{Type: typeVoice, A: 7}); got != "语音页 → 朗读中" {
 		t.Fatal(got)
 	}
+	if got := describe(Event{Type: typeVoice, A: 9}); got != "语音页 → 等待审批" {
+		t.Fatal(got)
+	}
 	if got := describe(Event{Type: typePage, A: 6}); got != "页面 → 语音" {
 		t.Fatal(got)
 	}

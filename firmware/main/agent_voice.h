@@ -19,6 +19,7 @@ typedef enum {
     // Values are trace codes (TRACE_VOICE); 6 was a streamed-reply mode.
     AGENT_VOICE_SPEAKING = 7,
     AGENT_VOICE_FAILED,        // The newest reply failed or is unconfirmed: OK retries.
+    AGENT_VOICE_ATTENTION,     // Waiting for approval in Hermes; keep polling and block sends.
 } agent_voice_mode_t;
 
 // capture: 0 idle, 1 preparing, 2 recording, 3 finalizing (agent_capture_state_t).
@@ -31,6 +32,7 @@ static inline agent_voice_mode_t agent_voice_mode(int capture, bool has_draft, b
     if (has_draft) return AGENT_VOICE_DRAFT;
     if (speaking) return AGENT_VOICE_SPEAKING;
     if (!has_turn) return AGENT_VOICE_IDLE;
+    if (strcmp(state, "attention") == 0) return AGENT_VOICE_ATTENTION;
     // The reply is fetched whole once complete, so receiving still reads as thinking.
     if (strcmp(state, "queued") == 0 || strcmp(state, "sending") == 0 || strcmp(state, "waiting") == 0 ||
         strcmp(state, "receiving") == 0)

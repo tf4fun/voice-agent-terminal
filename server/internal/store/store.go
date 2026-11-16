@@ -153,8 +153,24 @@ func (s *Store) Sessions(ctx context.Context, limit, offset int) ([]model.Sessio
 	return items, rows.Err()
 }
 
-func (s *Store) PendingSessions(ctx context.Context) ([]model.Session, error) {
-	rows, err := s.db.QueryContext(ctx, "SELECT id,title,state,created_at,updated_at,error FROM sessions WHERE state IN ('creating','deleting') LIMIT 16")
+type PendingCursor struct {
+	CreatedAt int64
+	ID        string
+}
+
+func (s *Store) PendingSessions(ctx context.Context, after *PendingCursor, limit int) ([]model.Session, error) {
+	if limit <= 0 {
+		limit = 16
+	}
+	query := "SELECT id,title,state,created_at,updated_at,error FROM sessions WHERE state IN ('creating','deleting')"
+	var args []any
+	if after != nil {
+		query += " AND (created_at > ? OR (created_at = ? AND id > ?))"
+		args = append(args, after.CreatedAt, after.CreatedAt, after.ID)
+	}
+	query += " ORDER BY created_at ASC, id ASC LIMIT ?"
+	args = append(args, limit)
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}

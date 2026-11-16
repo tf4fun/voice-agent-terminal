@@ -955,6 +955,7 @@ static void render_voice(void)
         status = line;
         break;
     }
+    case AGENT_VOICE_ATTENTION: status = message_status(s_view.message.state); tone = UI_ACCENT; break;
     case AGENT_VOICE_FAILED: status = message_status(s_view.message.state); tone = UI_RECORDING; break;
     case AGENT_VOICE_IDLE:
         if (s_voice_review >= 0) {
@@ -989,7 +990,7 @@ static void render_voice(void)
             agent_copy_text(line, sizeof(line), mode == AGENT_VOICE_RECORDING ? "请开始说话" : "…");
             strip_tone = UI_DIM;
         }
-    } else if (mode == AGENT_VOICE_THINKING || mode == AGENT_VOICE_SPEAKING) {
+    } else if (mode == AGENT_VOICE_THINKING || mode == AGENT_VOICE_ATTENTION || mode == AGENT_VOICE_SPEAKING) {
         // The question stays in view, dimmed, until the reply has been heard.
         if (strcmp(s_voice_question_id, s_view.message.id) != 0) {
             if (agent_client_part_prefix(s_view.selection, true, s_voice_question, sizeof(s_voice_question))) {
@@ -1057,6 +1058,7 @@ static void render_voice(void)
     static const voice_hint_t draft[] = {{"OK", false, "发送"}, {"OK", true, "重录"}};
     static const voice_hint_t recording[] = {{"OK", true, "松开结束"}};
     static const voice_hint_t speaking_hints[] = {{"OK", false, "文字"}, {LV_SYMBOL_DOWN, true, "停止"}};
+    static const voice_hint_t attention[] = {{"OK", false, "文字"}};
     switch (mode) {
     case AGENT_VOICE_PREPARING:
     case AGENT_VOICE_RECORDING: voice_hints(1, recording, 1); break;
@@ -1064,6 +1066,7 @@ static void render_voice(void)
     case AGENT_VOICE_DRAFT: voice_hints(3, draft, 2); break;
     case AGENT_VOICE_SPEAKING: voice_hints(4, speaking_hints, 2); break;
     case AGENT_VOICE_FAILED: voice_hints(5, failed, 2); break;
+    case AGENT_VOICE_ATTENTION: voice_hints(8, attention, 1); break;
     default:
         if (s_voice_review >= 0) voice_hints(6, review, 2);
         else voice_hints(7, idle, 2);
@@ -1259,7 +1262,7 @@ static void voice_key(bsp_btn_t button)
     if (button == BSP_BTN_OK) {
         if (mode == AGENT_VOICE_DRAFT) {
             if (agent_client_send(s_view.draft_serial, s_view.selection) != ESP_OK && bsp_lvgl_lock(1000)) {
-                ui_notice("内容已更新，请稍候");
+                ui_notice(strcmp(s_view.message.state, "attention") == 0 ? "等待审批" : "内容已更新，请稍候");
                 bsp_lvgl_unlock();
             }
         } else if (mode == AGENT_VOICE_FAILED) {
@@ -1325,6 +1328,10 @@ static void gesture(bsp_btn_t button, bool hold)
     if (s_page == AGENT_PAGE_SETTINGS) { settings_key(button, hold); return; }
     if (s_view.capture != AGENT_IDLE) return;
     if (hold && button == BSP_BTN_OK && agent_page_can_record(s_page)) {
+        if (s_page != AGENT_PAGE_SESSIONS && strcmp(s_view.message.state, "attention") == 0) {
+            if (bsp_lvgl_lock(1000)) { ui_notice("等待审批"); bsp_lvgl_unlock(); }
+            return;
+        }
         s_record_return = s_page;
         s_seen_capture = s_view.capture_serial;
         agent_speech_stop(true); // Recording interrupts a reply being read aloud.

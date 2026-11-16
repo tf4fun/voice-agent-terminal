@@ -699,6 +699,34 @@ static void test_failure_report_upload(void)
     }
 }
 
+static void test_attention_keeps_polling_and_blocks_new_sends(void)
+{
+    setup();s_view.text_kind=AGENT_TEXT_REPLY;s_view.chat_loading=true;
+    char response[256];
+    snprintf(response,sizeof(response),"{\"message\":{\"id\":\"%s\",\"state\":\"attention\",\"revision\":3,"
+        "\"input_bytes\":2,\"reply_bytes\":0,\"error\":\"approval_required\"},\"before\":\"\",\"after\":\"\"}",message_id);
+    whole_input="hi";whole_reply="approved answer";injected_response=response;
+    agent_view_t view=s_view;
+    CHECK(poll_turn(&view));
+    CHECK(!s_reply_loaded&&strcmp(s_view.message.state,"attention")==0);
+    // While waiting for approval, recording in this session and sending are refused.
+    CHECK(agent_client_record(false)==ESP_ERR_INVALID_STATE);
+    hold_draft("another");
+    CHECK(agent_client_send(s_view.draft_serial,s_view.selection)==ESP_ERR_INVALID_STATE);
+    discard_draft();
+    s_view.text_kind=AGENT_TEXT_REPLY;
+    view=s_view;
+    CHECK(poll_reply_state(&view));
+    CHECK(!s_reply_loaded&&strcmp(s_view.message.state,"attention")==0);
+    // Once approved and completed, the next poll fetches the complete reply.
+    snprintf(response,sizeof(response),"{\"message\":{\"id\":\"%s\",\"state\":\"completed\",\"revision\":4,"
+        "\"input_bytes\":2,\"reply_bytes\":15},\"before\":\"\",\"after\":\"\"}",message_id);
+    content_revision="4";content_state="completed";
+    view=s_view;
+    CHECK(poll_reply_state(&view));
+    CHECK(s_reply_loaded&&strcmp(s_reply_text,"approved answer")==0&&strcmp(s_view.message.state,"completed")==0);
+}
+
 int main(void)
 {
     assert(agent_client_init()==ESP_OK);
@@ -706,6 +734,7 @@ int main(void)
     test_oversized_content_is_bounded();
     test_raw_content_integrity();
     test_active_reply_is_fetched_once_complete();
+    test_attention_keeps_polling_and_blocks_new_sends();
     test_retry_accepts_server_message();
     for(enum capture_case item=CAPTURE_NORMAL;item<=CAPTURE_TOO_MANY_CHARS;item++)test_upload(item);
     test_new_chat_is_created_by_its_first_send();

@@ -19,7 +19,7 @@ for (const id of [
 const KEY_STORE = "voice-agent.key";
 const THEME_STORE = "voice-agent.theme";
 const PAGE = 20;
-const ACTIVE = new Set(["queued", "sending", "waiting", "receiving"]);
+const ACTIVE = new Set(["queued", "sending", "waiting", "receiving", "attention"]);
 const RETRYABLE = new Set(["failed", "unconfirmed"]);
 const encoder = new TextEncoder();
 const byteLength = text => encoder.encode(text).length;
@@ -36,7 +36,8 @@ const state = {
   messagesMore: false,
   threadSequence: 0,
   localDrafts: new Map(), // Unsent composer text per session ("" = new chat).
-  pending: null, // IDs of the last send, reused when its response was lost.
+  pendingByKey: new Map(), // IDs of the last send per session/new-chat key.
+  failedSends: new Map(), // Failed or unconfirmed sends kept independently of composer drafts.
   sending: false,
   events: null,
 };
@@ -348,7 +349,10 @@ function handleEvent(event) {
     case "chat.reset":
       if (event.session_id === state.currentId) {
         const message = findMessage(event.message_id);
-        if (message) reloadReply(message);
+        if (message) {
+          message.pendingDeltas = [];
+          reloadReply(message);
+        }
       }
       break;
     case "message.updated":
@@ -375,8 +379,12 @@ async function loadSessions(reset) {
     }
     state.sessions = items;
     state.sessionsMore = more;
+    for (const entry of failedList("")) {
+      if (entry.fresh && items.some(s => s.id === entry.session)) removeFailedSend("", entry.message);
+    }
     renderSessions();
     syncHeader();
+    if (state.currentId === null) syncFailedSends();
     if (state.sessions.some(s => s.state === "deleting")) refreshSessionsSoonLater();
   } finally {
     state.sessionsLoading = false;
@@ -538,9 +546,11 @@ function showWelcome(options = {}) {
     cards.append(card);
   }
   welcome.append(cards);
-  ui["thread-inner"].replaceChildren(welcome);
   ui.input.value = state.localDrafts.get("") || "";
   composerChanged();
+  const failed = renderFailedSends("");
+  if (failed) ui["thread-inner"].replaceChildren(welcome, failed);
+  else ui["thread-inner"].replaceChildren(welcome);
 }
 
 async function openSession(id, options = {}) {
@@ -551,17 +561,6 @@ async function openSession(id, options = {}) {
   state.messages = [];
   state.messagesMore = false;
   setRoute(id);
-  if (!currentSession()) {
-    try {
-      const session = await request(`/sessions/${id}`);
-      if (!state.sessions.some(s => s.id === id)) state.sessions.push(session);
-    } catch (error) {
-      if (sequence !== state.threadSequence) return;
-      if (options.fromRoute) { showWelcome(); return; }
-      report(error);
-      return;
-    }
-  }
   syncHeader();
   renderSessions();
   ui.input.value = state.localDrafts.get(id) || "";
@@ -569,16 +568,32 @@ async function openSession(id, options = {}) {
   const loading = el("div", "state-line");
   loading.append(typing(), el("span", "", "正在载入对话…"));
   ui["thread-inner"].replaceChildren(loading);
+  if (!currentSession()) {
+    try {
+      const session = await request(`/sessions/${id}`);
+      if (sequence !== state.threadSequence || state.currentId !== id) return;
+      if (!state.sessions.some(s => s.id === id)) state.sessions.push(session);
+      syncHeader();
+      renderSessions();
+      composerChanged();
+    } catch (error) {
+      if (sequence !== state.threadSequence || state.currentId !== id) return;
+      if (options.fromRoute) { showWelcome(); return; }
+      ui["thread-inner"].replaceChildren(el("div", "state-line error", "对话载入失败"));
+      report(error);
+      return;
+    }
+  }
   try {
     await loadMessages(id, sequence, 0);
   } catch (error) {
-    if (sequence === state.threadSequence) {
+    if (sequence === state.threadSequence && state.currentId === id) {
       ui["thread-inner"].replaceChildren(el("div", "state-line error", "对话载入失败"));
       report(error);
     }
     return;
   }
-  if (sequence !== state.threadSequence) return;
+  if (sequence !== state.threadSequence || state.currentId !== id) return;
   renderThread();
   scrollToBottom(true);
   if (window.matchMedia("(min-width: 861px)").matches) ui.input.focus();
@@ -599,42 +614,70 @@ async function mapLimit(items, limit, task) {
 function makeMessage(meta) {
   return {
     id: meta.id, state: meta.state, error: meta.error || "", created: meta.created_at,
-    input: "", reply: "", replyBytes: 0, revision: 0, loading: false, pendingDeltas: [], node: null, frame: 0,
+    input: "", reply: "", replyBytes: 0, revision: 0,
+    loading: false, fetching: false, reloadingActive: false, reloading: null, reloadAgain: false,
+    pendingDeltas: [], node: null, frame: 0,
   };
 }
 
-async function fetchContent(message) {
-  const base = `/sessions/${state.currentId}/messages/${message.id}/content?part=`;
+function setMessageLoading(message, kind, active) {
+  if (kind === "fetching") message.fetching = active;
+  else if (kind === "reloading") message.reloadingActive = active;
+  message.loading = Boolean(message.fetching || message.reloadingActive);
+}
+
+function drainPendingDeltas(message) {
+  while (message.pendingDeltas.length && !message.loading) {
+    const delta = message.pendingDeltas.shift();
+    applyDeltaTo(message, delta);
+  }
+}
+
+async function fetchContent(message, id = state.currentId, sequence = state.threadSequence) {
+  const base = `/sessions/${id}/messages/${message.id}/content?part=`;
   const [input, reply] = await Promise.all([request(base + "input", { raw: true }), request(base + "reply", { raw: true })]);
+  if (sequence !== state.threadSequence || id !== state.currentId) return;
   message.input = input.data;
   setReply(message, reply);
 }
 
 // The revision records which stored snapshot the shown reply came from.
+// Older revisions never overwrite newer snapshots.
 function setReply(message, reply) {
+  const revision = Number(reply.headers.get("X-Revision")) || 0;
+  if (message.revision > 0 && revision > 0 && revision < message.revision) return false;
+  if (message.revision > 0 && revision === 0) return false;
   const text = reply.data;
-  message.reply = text;
-  message.revision = Number(reply.headers.get("X-Revision")) || 0;
+  const nextBytes = byteLength(text);
   const stateName = reply.headers.get("X-Message-State") || message.state;
-  message.replyBytes = byteLength(text);
+  if (message.revision > 0 && revision === message.revision) {
+    if (nextBytes < message.replyBytes) return false;
+    if (!ACTIVE.has(message.state) && ACTIVE.has(stateName)) return false;
+  }
+  message.reply = text;
+  if (revision > 0) message.revision = revision;
+  message.replyBytes = nextBytes;
   if (stateName) message.state = stateName;
-  const deltas = message.pendingDeltas;
-  message.pendingDeltas = [];
-  for (const delta of deltas) applyDeltaTo(message, delta);
+  return true;
 }
 
 async function loadMessages(id, sequence, offset) {
   const page = await request(`/sessions/${id}/messages?limit=${PAGE}&offset=${offset}`);
+  if (sequence !== state.threadSequence || id !== state.currentId) return [];
   const metas = page.items.slice().reverse();
   const loaded = metas.map(makeMessage);
-  for (const message of loaded) message.loading = true;
-  if (sequence !== state.threadSequence) return [];
+  for (const message of loaded) setMessageLoading(message, "fetching", true);
   // Track the newest page immediately so live deltas buffer while content loads.
   if (offset === 0) state.messages = loaded;
   await mapLimit(loaded, 4, async message => {
-    try { await fetchContent(message); } finally { message.loading = false; }
+    try { await fetchContent(message, id, sequence); } finally {
+      setMessageLoading(message, "fetching", false);
+      if (sequence === state.threadSequence && id === state.currentId && !message.loading) {
+        drainPendingDeltas(message);
+      }
+    }
   });
-  if (sequence !== state.threadSequence) return [];
+  if (sequence !== state.threadSequence || id !== state.currentId) return [];
   if (offset > 0) {
     const known = new Set(state.messages.map(m => m.id));
     state.messages = loaded.filter(m => !known.has(m.id)).concat(state.messages);
@@ -651,15 +694,17 @@ async function loadOlder(button) {
   const anchor = ui.thread.scrollHeight - ui.thread.scrollTop;
   try {
     await loadMessages(id, sequence, state.messages.length);
-    if (sequence !== state.threadSequence) return;
+    if (sequence !== state.threadSequence || id !== state.currentId) return;
     renderThread();
     ui.thread.style.scrollBehavior = "auto";
     ui.thread.scrollTop = ui.thread.scrollHeight - anchor;
     ui.thread.style.scrollBehavior = "";
   } catch (error) {
-    report(error);
-    button.disabled = false;
-    button.textContent = "更早的消息";
+    if (sequence === state.threadSequence && id === state.currentId) {
+      report(error);
+      button.disabled = false;
+      button.textContent = "更早的消息";
+    }
   }
 }
 
@@ -668,10 +713,11 @@ async function loadOlder(button) {
 let reconciling = null;
 let reconcileAgain = false;
 function reconcileThread() {
+  if (!state.currentId) return Promise.resolve();
   if (reconciling) { reconcileAgain = true; return reconciling; }
   reconciling = reconcileOnce().finally(() => {
     reconciling = null;
-    if (reconcileAgain) { reconcileAgain = false; reconcileThread(); }
+    if (reconcileAgain) { reconcileAgain = false; if (state.currentId) reconcileThread(); }
   });
   return reconciling;
 }
@@ -679,28 +725,37 @@ function reconcileThread() {
 async function reconcileOnce() {
   const id = state.currentId;
   const sequence = state.threadSequence;
+  if (!id) return;
   try {
     const page = await request(`/sessions/${id}/messages?limit=${PAGE}&offset=0`);
-    if (sequence !== state.threadSequence) return;
+    if (sequence !== state.threadSequence || id !== state.currentId) return;
     for (const meta of page.items.slice().reverse()) {
+      if (sequence !== state.threadSequence || id !== state.currentId) return;
+      if (removeFailedSend(id, meta.id)) syncFailedSends();
       let message = findMessage(meta.id);
       if (!message) {
         // Sent from the device or another page: show it and follow, like a new turn here.
         message = makeMessage(meta);
         state.messages.push(message);
-        message.loading = true;
-        try { await fetchContent(message); } finally { message.loading = false; }
-        if (sequence !== state.threadSequence) return;
+        setMessageLoading(message, "fetching", true);
+        try { await fetchContent(message, id, sequence); } finally {
+          setMessageLoading(message, "fetching", false);
+          if (sequence === state.threadSequence && id === state.currentId && !message.loading) {
+            drainPendingDeltas(message);
+          }
+        }
+        if (sequence !== state.threadSequence || id !== state.currentId) return;
         renderThread();
         scrollToBottom(true); // Instant, so later deltas still see the view at the bottom.
         continue;
       }
+      if (meta.revision && message.revision && meta.revision < message.revision) continue;
       // The revision also catches a reply whose final fetch failed, and a
       // retry from another client that ended in the same state.
       if (message.revision !== meta.revision || message.state !== meta.state || ACTIVE.has(meta.state)) {
-        message.state = meta.state;
-        message.error = meta.error || "";
+        if (!message.revision || meta.revision >= message.revision) message.error = meta.error || "";
         await reloadReply(message);
+        if (sequence !== state.threadSequence || id !== state.currentId) return;
       }
     }
   } catch (error) {
@@ -711,18 +766,36 @@ async function reconcileOnce() {
 function findMessage(id) { return state.messages.find(m => m.id === id); }
 
 async function reloadReply(message) {
-  const id = state.currentId;
-  message.loading = true;
-  try {
-    const reply = await request(`/sessions/${id}/messages/${message.id}/content?part=reply`, { raw: true });
-    if (id !== state.currentId) return;
-    setReply(message, reply);
-  } catch (error) {
-    report(error);
-  } finally {
-    message.loading = false;
+  if (message.reloading) {
+    message.reloadAgain = true;
+    return message.reloading;
   }
-  updateMessage(message);
+  const id = state.currentId;
+  const sequence = state.threadSequence;
+  if (!id) return;
+  const run = (async () => {
+    setMessageLoading(message, "reloading", true);
+    try {
+      do {
+        message.reloadAgain = false;
+        const reply = await request(`/sessions/${id}/messages/${message.id}/content?part=reply`, { raw: true });
+        if (sequence !== state.threadSequence || id !== state.currentId) return;
+        setReply(message, reply);
+      } while (message.reloadAgain);
+    } catch (error) {
+      if (sequence === state.threadSequence && id === state.currentId) report(error);
+    } finally {
+      setMessageLoading(message, "reloading", false);
+      if (message.reloading === run) message.reloading = null;
+    }
+    if (sequence === state.threadSequence && id === state.currentId) {
+      if (!message.loading) drainPendingDeltas(message);
+      updateMessage(message);
+      composerChanged();
+    }
+  })();
+  message.reloading = run;
+  await run;
 }
 
 function applyDelta(event) {
@@ -753,24 +826,37 @@ function applyDeltaTo(message, event) {
   return false;
 }
 
+function isSettledState(name) {
+  return name === "completed" || name === "incomplete" || name === "cancelled";
+}
+
 async function messageUpdated(event) {
+  const id = state.currentId;
+  const sequence = state.threadSequence;
   let message = findMessage(event.message_id);
   if (!message) { reconcileThread(); return; }
-  if (event.status) message.state = event.status;
+  if (event.status && (!isSettledState(message.state) || !ACTIVE.has(event.status))) {
+    message.state = event.status;
+  }
   if (!ACTIVE.has(message.state)) {
     try {
-      const meta = await request(`/sessions/${state.currentId}/messages/${message.id}`);
-      message.error = meta.error || "";
-      message.state = meta.state;
+      const meta = await request(`/sessions/${id}/messages/${message.id}`);
+      if (sequence !== state.threadSequence || id !== state.currentId) return;
+      if (!message.revision || meta.revision >= message.revision) {
+        message.error = meta.error || "";
+        message.state = meta.state;
+      }
     } catch { /* keep the event state */ }
+    if (sequence !== state.threadSequence || id !== state.currentId) return;
     await reloadReply(message);
   } else {
     updateMessage(message);
   }
-  composerChanged();
+  if (sequence === state.threadSequence && id === state.currentId) composerChanged();
 }
 
 function renderThread() {
+  reconcileFailedSends();
   const fragment = document.createDocumentFragment();
   if (state.messagesMore) {
     const older = el("button", "older", "更早的消息");
@@ -778,7 +864,7 @@ function renderThread() {
     older.addEventListener("click", () => loadOlder(older));
     fragment.append(older);
   }
-  if (!state.messages.length) {
+  if (!state.messages.length && !failedList(state.currentId || "").length) {
     const empty = el("div", "welcome");
     const big = mark();
     big.classList.add("large");
@@ -789,6 +875,8 @@ function renderThread() {
     const nodes = messageNodes(message, index === state.messages.length - 1);
     fragment.append(...nodes);
   });
+  const failed = renderFailedSends(state.currentId || "");
+  if (failed) fragment.append(failed);
   ui["thread-inner"].replaceChildren(fragment);
   composerChanged();
 }
@@ -828,18 +916,24 @@ function fillAssistant(message, node) {
   head.append(mark(), el("strong", "", "Hermes"));
   const body = el("div", "reply md");
   const active = ACTIVE.has(message.state);
+  const attention = message.state === "attention";
   if (message.reply) {
     body.append(renderMarkdown(message.reply));
-    if (active) {
+    if (active && !attention) {
       const last = body.lastElementChild;
       (last && !last.classList.contains("code") ? last : body).classList.add("caret");
     }
-  } else if (active) {
+  } else if (active && !attention) {
     const line = el("div", "state-line");
     line.append(typing(), el("span", "", message.state === "receiving" ? "正在回复…" : "正在思考…"));
     body.append(line);
   } else if (message.state === "completed") {
     body.append(el("p", "muted", "（没有文字回复）"));
+  }
+  if (attention) {
+    const line = el("div", "state-line attention");
+    line.append(typing(), el("span", "", STATE_TEXT.attention));
+    body.append(line);
   }
   const problem = STATE_TEXT[message.state];
   if (problem && !active) {
@@ -882,7 +976,9 @@ async function retryMessage(message, button) {
     const meta = await request(`/sessions/${state.currentId}/messages/${message.id}/retry`, { method: "POST" });
     message.state = meta.state;
     message.error = meta.error || "";
+    if (meta.revision) message.revision = meta.revision;
     updateMessage(message);
+    composerChanged();
   } catch (error) {
     report(error);
     button.disabled = false;
@@ -902,9 +998,169 @@ function composerChanged() {
   area.style.height = Math.min(area.scrollHeight, Math.round(window.innerHeight * 0.4)) + "px";
   const hasText = area.value.trim().length > 0;
   const session = currentSession();
+  const last = state.messages[state.messages.length - 1];
   const blocked = state.sending || lastMessageActive() || (session && session.state === "deleting");
   ui.send.disabled = !hasText || blocked;
-  ui.send.title = lastMessageActive() ? "等待当前回复完成" : "发送";
+  ui.send.title = lastMessageActive()
+    ? (last && last.state === "attention" ? "等待 Hermes 审批" : "等待当前回复完成")
+    : "发送";
+}
+
+function failedList(key) {
+  return state.failedSends.get(key) || [];
+}
+
+function addFailedSend(entry) {
+  const list = failedList(entry.draftKey);
+  if (!list.some(item => item.message === entry.message)) {
+    list.push(entry);
+    state.failedSends.set(entry.draftKey, list);
+  }
+}
+
+function removeFailedSend(draftKey, messageId) {
+  const list = failedList(draftKey);
+  const next = list.filter(item => item.message !== messageId);
+  if (next.length === list.length) return false;
+  if (next.length) state.failedSends.set(draftKey, next);
+  else state.failedSends.delete(draftKey);
+  return true;
+}
+
+function reconcileFailedSends() {
+  const key = state.currentId || "";
+  const list = failedList(key);
+  if (!list.length) return;
+  const present = new Set(state.messages.map(m => m.id));
+  for (const entry of list) {
+    if (present.has(entry.message)) removeFailedSend(key, entry.message);
+  }
+}
+
+function hasDraftText(key) {
+  if ((state.currentId || "") === key) return ui.input.value.length > 0;
+  return state.localDrafts.has(key);
+}
+
+function errorMessage(error) {
+  if (error instanceof TypeError) return "连接中断，未收到服务响应（结果未确认）。";
+  return error && error.message ? error.message : "发送失败。";
+}
+
+function renderFailedSends(key) {
+  const list = failedList(key);
+  if (!list.length) return null;
+  const box = el("div", "failed-sends");
+  for (const entry of list) {
+    const node = el("div", "msg user failed-send");
+    node.append(el("div", "bubble", entry.text));
+    const status = el("p", "state-line error",
+      entry.uncertain ? "发送结果未确认：重试将沿用原消息 ID，若服务端已收到不会重复。" : `发送失败：${entry.error}`);
+    const tools = el("div", "msg-tools keep");
+    const retry = el("button");
+    retry.type = "button";
+    retry.disabled = !!entry.sending;
+    retry.append(icon("retry"), el("span", "", entry.sending ? "正在重试…" : "重试"));
+    retry.addEventListener("click", () => retryFailedSend(entry));
+    tools.append(retry);
+    if (!ui.input.value) {
+      const edit = el("button");
+      edit.type = "button";
+      edit.disabled = !!entry.sending;
+      edit.append(icon("edit"), el("span", "", "放回输入框"));
+      edit.addEventListener("click", () => restoreFailedToInput(entry));
+      tools.append(edit);
+    }
+    tools.append(copyButton(() => entry.text));
+    const dismiss = el("button");
+    dismiss.type = "button";
+    dismiss.disabled = !!entry.sending;
+    dismiss.append(icon("trash"), el("span", "", "丢弃"));
+    dismiss.addEventListener("click", () => { removeFailedSend(entry.draftKey, entry.message); syncFailedSends(); });
+    tools.append(dismiss);
+    node.append(status, tools);
+    box.append(node);
+  }
+  return box;
+}
+
+function syncFailedSends() {
+  const container = ui["thread-inner"];
+  if (typeof container.querySelector === "function") {
+    const existing = container.querySelector(".failed-sends");
+    if (existing) existing.remove();
+  }
+  const block = renderFailedSends(state.currentId || "");
+  if (block) {
+    container.append(block);
+    if (nearBottom()) scrollToBottom(false);
+  }
+}
+
+function restoreFailedToInput(entry) {
+  if ((state.currentId || "") !== entry.draftKey || ui.input.value) return;
+  removeFailedSend(entry.draftKey, entry.message);
+  state.pendingByKey.set(entry.draftKey, {
+    session: entry.session, message: entry.message, text: entry.text, fresh: entry.fresh,
+  });
+  ui.input.value = entry.text;
+  composerChanged();
+  syncFailedSends();
+  ui.input.focus();
+}
+
+async function applySendSuccess(pending, draftKey, meta) {
+  if (pending.fresh) {
+    if (meta.session && !state.sessions.some(s => s.id === pending.session)) state.sessions.unshift(meta.session);
+    if (state.currentId === null) await openSession(pending.session, { force: true });
+    else renderSessions();
+    refreshSessionsSoon();
+    return;
+  }
+  if (pending.session !== state.currentId) {
+    refreshSessionsSoon();
+    return;
+  }
+  let message = findMessage(meta.id);
+  if (!message) {
+    message = makeMessage(meta);
+    message.input = pending.text;
+    state.messages.push(message);
+  }
+  renderThread();
+  scrollToBottom(true);
+  refreshSessionsSoon();
+}
+
+async function postMessage(pending) {
+  const payload = { method: "POST", json: { id: pending.message, text: pending.text, new_session: pending.fresh } };
+  try {
+    return await request(`/sessions/${pending.session}/messages`, payload);
+  } catch (error) {
+    if (!(error instanceof TypeError)) throw error;
+    return await request(`/sessions/${pending.session}/messages`, payload); // Same IDs are idempotent.
+  }
+}
+
+async function retryFailedSend(entry) {
+  if (entry.sending) return;
+  if (!entry.fresh && entry.session === state.currentId && lastMessageActive()) {
+    toast("等待当前回复完成");
+    return;
+  }
+  entry.sending = true;
+  syncFailedSends();
+  try {
+    const meta = await postMessage(entry);
+    removeFailedSend(entry.draftKey, entry.message);
+    await applySendSuccess(entry, entry.draftKey, meta);
+  } catch (error) {
+    entry.sending = false;
+    entry.uncertain = error instanceof TypeError;
+    entry.error = errorMessage(error);
+    if ((state.currentId || "") === entry.draftKey) syncFailedSends();
+    report(error);
+  }
 }
 
 // Sends the composer text as one message. A new chat has no session yet: the
@@ -914,46 +1170,35 @@ async function send() {
   const text = ui.input.value.trim();
   if (!text || state.sending || lastMessageActive()) return;
   if (byteLength(text) > 64 * 1024) { toast("内容超过 64 KiB 上限。"); return; }
-  let pending = state.pending;
   const fresh = !state.currentId;
+  const draftKey = fresh ? "" : state.currentId;
+  let pending = state.pendingByKey.get(draftKey);
   if (!pending || pending.text !== text || pending.fresh !== fresh || (!fresh && pending.session !== state.currentId)) {
-    pending = state.pending = { session: state.currentId || uuid(), message: uuid(), text, fresh };
+    pending = { session: state.currentId || uuid(), message: uuid(), text, fresh };
+    state.pendingByKey.set(draftKey, pending);
   }
-  const id = pending.session;
-  const draftKey = fresh ? "" : id;
   state.sending = true;
   // The text leaves the composer now; whatever is typed while it is sent is
   // a new draft, which the response never touches.
   ui.input.value = "";
   composerChanged();
   try {
-    const payload = { method: "POST", json: { id: pending.message, text, new_session: fresh } };
-    let meta;
-    try {
-      meta = await request(`/sessions/${id}/messages`, payload);
-    } catch (error) {
-      if (!(error instanceof TypeError)) throw error;
-      meta = await request(`/sessions/${id}/messages`, payload); // Same IDs are idempotent.
-    }
-    state.pending = null;
-    if (fresh) {
-      if (meta.session && !state.sessions.some(s => s.id === id)) state.sessions.unshift(meta.session);
-      if (state.currentId === null) await openSession(id, { force: true });
-      refreshSessionsSoon();
-      return;
-    }
-    if (id !== state.currentId) return;
-    let message = findMessage(meta.id);
-    if (!message) {
-      message = makeMessage(meta);
-      message.input = text;
-      state.messages.push(message);
-    }
-    renderThread();
-    scrollToBottom(true);
-    refreshSessionsSoon();
+    const meta = await postMessage(pending);
+    if (state.pendingByKey.get(draftKey) === pending) state.pendingByKey.delete(draftKey);
+    removeFailedSend(draftKey, pending.message);
+    await applySendSuccess(pending, draftKey, meta);
   } catch (error) {
-    restoreDraft(draftKey, text); // Sending again reuses the same IDs.
+    const uncertain = error instanceof TypeError;
+    if (uncertain || hasDraftText(draftKey)) {
+      if (state.pendingByKey.get(draftKey) === pending) state.pendingByKey.delete(draftKey);
+      addFailedSend({
+        session: pending.session, message: pending.message, text: pending.text, fresh: pending.fresh,
+        draftKey, uncertain, error: errorMessage(error), sending: false,
+      });
+      if ((state.currentId || "") === draftKey) syncFailedSends();
+    } else {
+      restoreDraft(draftKey, text); // Empty draft + definite error: put text back and keep retry IDs.
+    }
     report(error);
   } finally {
     state.sending = false;
@@ -1020,6 +1265,8 @@ async function confirmDelete() {
       toast("已提交删除，正在等待 Hermes 同步。");
     } else {
       state.sessions = state.sessions.filter(s => s.id !== target.id);
+      state.failedSends.delete(target.id);
+      state.pendingByKey.delete(target.id);
       toast("会话已删除。");
     }
     if (target.id === state.currentId) showWelcome();
@@ -1350,6 +1597,9 @@ ui["auth-form"].addEventListener("submit", async event => {
 });
 ui["sign-out"].addEventListener("click", () => {
   state.sessions = [];
+  state.localDrafts.clear();
+  state.pendingByKey.clear();
+  state.failedSends.clear();
   renderSessions();
   showWelcome();
   requireKey("");

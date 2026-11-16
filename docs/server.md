@@ -52,12 +52,14 @@ or is chosen in the sidebar. Narrow screens use a slide-in sidebar.
 - The composer text stays in the page (per session, until sent or reloaded);
   the device's voice draft stays on the device. Sending posts the complete
   text. A new conversation has no session until its first send, which creates
-  it and is titled from its first line; a lost response is retried with the
-  same IDs.
+  it and is titled from its first line; a lost response or a send that failed
+  while another draft was typed is kept with its original IDs for retry or
+  recovery without touching the new draft.
 - A message sent from the device appears as soon as its first event arrives,
   and the view follows it to the bottom while its reply streams.
-- Failed or unconfirmed replies offer retry on the latest exchange. Messages and
-  code blocks can be copied, including on plain-HTTP LAN pages.
+- Failed or unconfirmed replies offer retry on the latest exchange; `attention`
+  replies show the approval prompt and disable new sends until Hermes resumes.
+  Messages and code blocks can be copied, including on plain-HTTP LAN pages.
 - `#/c/<session-id>` links open a session directly. Ctrl/Cmd+K starts a new
   conversation; Enter sends and Shift+Enter inserts a line break.
 
@@ -161,7 +163,8 @@ incrementally resamples 16 kHz input to 24 kHz and connects to OpenAI. A
 successful response is `200` with the final transcript, trimmed, as the whole
 `text/plain; charset=utf-8` body. A blank transcript returns `422 no_speech`,
 a reused ID `409`, a full set of four concurrent uploads `409 busy`, an
-oversized upload `413` and an upstream failure `502 transcription_failed`.
+oversized upload `413 audio_too_large`, an oversized transcript (> 16 KiB)
+`413 limit_exceeded`, and an upstream failure `502 transcription_failed`.
 Closing the connection cancels the transcription. Audio bytes are transient.
 
 `GET /api/v1/transcriptions/{id}/text` reads the live text of a running
@@ -270,10 +273,13 @@ approval controls remain a subsequent product decision.
 ## Spoken replies
 
 `GET /api/v1/sessions/{id}/messages/{message}/speech` streams a reply's voice.
-The gateway waits until Hermes has finished the reply, drops Markdown markup,
-code blocks and link targets line by line, and synthesizes the whole reply in
-one request, so speech has no per-sentence start-up gaps. The response is
-framed binary: one kind byte, a little-endian uint16 length, then the payload.
+The gateway waits until Hermes has finished the reply, cleans complete Markdown
+structures (code blocks, links, inline code, markup) before line breaks, and
+synthesizes the whole reply in one request (only the first 64 KiB of the reply
+are cleaned, and a link or code span longer than 1 KiB stays text, so cleaning
+costs linear time), so speech has no per-sentence start-up
+gaps. The response is framed binary with an `X-Speech-Stream` stream identity
+header: one kind byte, a little-endian uint16 length, then the payload.
 Kind 1 starts speech (uint16 index 0 and the first 240 bytes of the text; the
 device shows the reply text it fetched itself), kind 2 carries 16 kHz PCM16LE
 mono audio in 128 ms frames, and kind 3 ends the stream with a status byte
@@ -284,14 +290,16 @@ survives a long think.
 Audio is released once 1 s is ready; synthesis then runs faster than playback
 and stays ahead. The stream is cached in the gateway: synthesis starts on the
 first request for a reply and is shared, later listeners replay from the
-beginning, and `?offset=<bytes>` resumes a dropped connection at any byte of the
-cached stream, even mid-frame (keepalives are not part of the cache and are not
-counted; none is sent until a resumed connection has reached its offset, since
-the device may be inside a frame). A resume continues only the cached stream it
-started on: when that stream is gone (it failed, was dropped, the gateway
-restarted, or a retry under the same message ID wrote a new reply) a request with
-an offset returns 409 `speech_restarted` and starts nothing, since new audio need
-not match the bytes already played. Ten seconds after the last listener leaves an unfinished stream,
+beginning, and `?offset=<bytes>&stream=<id>` resumes a dropped connection at any
+byte of the exact cached stream returned in `X-Speech-Stream`, even mid-frame
+(keepalives are not part of the cache and are not counted; none is sent until a
+resumed connection has reached its offset, since the device may be inside a
+frame). A resume continues only the exact stream instance it started on: when
+that stream is gone or missing a matching `stream` parameter (it failed, was
+evicted, the gateway restarted, a listener re-synthesized the same attempt, or
+a retry under the same message ID wrote a new reply) a request with an offset
+returns 409 `speech_restarted` and starts nothing, since new audio need not
+match the bytes already played. Ten seconds after the last listener leaves an unfinished stream,
 synthesis stops; a later request redoes it. Finished streams stay replayable
 for ten minutes, up to eight streams, and one reply is bounded to 16 MiB of
 audio and 8000 bytes of text. `/api/v1/server` reports `speech`.
