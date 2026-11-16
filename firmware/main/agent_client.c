@@ -26,7 +26,7 @@
 
 typedef enum {
     CMD_REFRESH, CMD_OPEN, CMD_CLOSE, CMD_RECORD, CMD_SEND,
-    CMD_REVIEW, CMD_RETRY, CMD_PROVISION, CMD_PAUSE, CMD_CLEAR,
+    CMD_REVIEW, CMD_RETRY, CMD_PROVISION, CMD_PAUSE,
 } command_kind_t;
 
 typedef struct {
@@ -48,9 +48,12 @@ static uint8_t s_audio_chunk[1280];
 static bool s_audio_started;
 // When the last recording failed; a send shortly after one is reported.
 static _Atomic uint32_t s_record_failed_ms; // 0 = none; 32-bit for single-word atomics.
+// The message ID for the draft serial being sent; a retry after a lost
+// response reuses both, so the gateway stores the message once.
 static char s_pending_message[37];
-static uint32_t s_pending_revision;
-static int s_draft_total;
+static uint32_t s_pending_serial;
+// The unsent voice draft: RAM only, replaced by each successful recording.
+static char *s_draft;
 static agent_view_t s_read_view;
 // Whole-content caches must fit the ESP32-C3 heap (about a 64 KiB largest block)
 // together with the UI snapshot copy. Longer content keeps only a UTF-8 prefix.
@@ -63,7 +66,6 @@ static char *s_input_text, *s_reply_text;
 static size_t s_input_total, s_reply_total;
 static bool s_input_truncated, s_reply_truncated;
 static char s_cached_message[37];
-static uint32_t s_cached_draft_revision;
 static bool s_input_loaded, s_reply_loaded;
 
 typedef struct {
@@ -88,8 +90,41 @@ static void clear_message_cache(void)
     s_input_truncated = false;
     reset_reply_cache();
     s_cached_message[0] = '\0';
-    s_cached_draft_revision = 0;
     s_input_loaded = s_reply_loaded = false;
+}
+
+static uint32_t utf8_chars(const char *text)
+{
+    uint32_t count = 0;
+    for (; *text != '\0'; text++) if (((unsigned char)*text & 0xC0) != 0x80) count++;
+    return count;
+}
+
+// The caller holds s_lock. A changed serial invalidates a queued send.
+static void discard_draft(void)
+{
+    free(s_draft);
+    s_draft = NULL;
+    s_view.draft_chars = 0;
+    s_view.draft_serial++;
+}
+
+// The caller holds s_lock: the text card leaves the draft or live transcript
+// for the draft, if any, or else the exchange already cached.
+static void show_draft_or_exchange(void)
+{
+    if (s_draft != NULL) {
+        s_view.text_kind = AGENT_TEXT_DRAFT;
+        agent_copy_text(s_view.text_id, sizeof(s_view.text_id), s_view.session_id);
+    } else {
+        s_view.text_kind = AGENT_TEXT_REPLY;
+        agent_copy_text(s_view.text_id, sizeof(s_view.text_id), s_view.turn.present ? s_view.turn.message.id : "");
+    }
+    memset(&s_view.text, 0, sizeof(s_view.text));
+    if (s_draft != NULL) s_view.text.total = (uint32_t)strlen(s_draft);
+    s_view.text_loading = false;
+    s_view.text_request++;
+    s_view.text_generation++;
 }
 
 static esp_err_t response_header(esp_http_client_event_t *event)
@@ -269,18 +304,13 @@ static void discover_server(void)
         const cJSON *service = cJSON_GetObjectItemCaseSensitive(root, "service");
         const cJSON *protocol = cJSON_GetObjectItemCaseSensitive(root, "protocol");
         if (status == 200 && cJSON_IsString(service) && strcmp(service->valuestring, "voice-agent-server") == 0 &&
-            cJSON_IsNumber(protocol) && protocol->valueint == 1 && cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, "drafts")) &&
+            // Protocol 2: transcription is a side channel and sends carry the text.
+            cJSON_IsNumber(protocol) && protocol->valueint == 2 &&
             cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, "bounded_paging")) &&
-            cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, "text_before")) &&
             cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, "text_tail")) &&
-            cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, "draft_text")) &&
-            cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, "replace_recording")) &&
-            cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, "staged_recording")) &&
-            cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, "replacement_reservation")) &&
             cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, "whole_messages"))) {
             lock();
             s_view.speech = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, "speech"));
-            s_view.draft_clear = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, "draft_clear"));
             unlock();
             memo_discovery_confirm(&endpoint);
             notice("");
@@ -337,54 +367,6 @@ static bool poll_list(agent_view_t *view)
     return true;
 }
 
-static bool poll_draft(agent_view_t *view)
-{
-    char path[160];
-    snprintf(path, sizeof(path), "/sessions/%s/draft?limit=4&offset=%d", view->session_id, view->segment_requested);
-    const int status = request(HTTP_METHOD_GET, path, NULL, s_sync_body, sizeof(s_sync_body));
-    agent_segment_t items[AGENT_PAGE_SIZE] = {0};
-    int count = 0;
-    int total = 0;
-    uint32_t revision = 0;
-    if (status != 200 || !agent_parse_draft(s_sync_body, items, &count, &revision, &total)) {
-        lock(); s_view.segments_loading = false; s_view.segment_requested = s_view.segment_offset; unlock();
-        return false;
-    }
-    const bool more = response_has_more(s_sync_body);
-    lock();
-    if (still_selected(view) && s_view.segment_requested == view->segment_requested &&
-        s_view.text_request == view->text_request && revision >= s_view.draft_revision) {
-        memcpy(s_view.segments, items, sizeof(items));
-        const bool new_draft = s_view.segment_total == 0 && total > 0;
-        s_view.segment_count = count;
-        s_view.segment_total = total;
-        s_view.segment_offset = view->segment_requested;
-        s_view.segments_more = more;
-        s_view.segments_loading = false;
-        s_view.draft_revision = revision;
-        if (total == 0 && s_view.text_kind == AGENT_TEXT_DRAFT && s_view.capture == AGENT_IDLE) {
-            s_view.text_id[0] = '\0';
-            memset(&s_view.text, 0, sizeof(s_view.text));
-            s_view.text_request++;
-            s_view.text_kind = AGENT_TEXT_REPLY;
-            s_view.text_loading = false;
-            s_view.chat_loading = true;
-            s_view.text_generation++;
-            s_resync = true;
-        }
-        if (total > 0 && (s_view.text_id[0] == '\0' || (new_draft && s_view.capture == AGENT_IDLE))) {
-            agent_copy_text(s_view.text_id, sizeof(s_view.text_id), view->session_id);
-            s_view.text_kind = AGENT_TEXT_DRAFT;
-            memset(&s_view.text, 0, sizeof(s_view.text));
-            s_view.text_request++;
-            s_view.text_loading = true;
-        }
-        changed();
-    }
-    unlock();
-    return true;
-}
-
 // The caller holds s_lock while comparing a response with the current intent.
 static bool same_text_request(const agent_view_t *view)
 {
@@ -393,27 +375,18 @@ static bool same_text_request(const agent_view_t *view)
         s_view.text.offset == view->text.offset;
 }
 
+// The live transcript of the recording in progress (text_id is its
+// transcription ID). It exists on the gateway only once audio is streaming.
 static bool poll_text(agent_view_t *view)
 {
     if (view->text_id[0] == '\0') return true;
-    char path[240];
+    char path[112];
     if (view->text_kind != AGENT_TEXT_SEGMENT || view->capture == AGENT_IDLE) return true;
-    snprintf(path, sizeof(path), "/sessions/%s/segments/%s/text?limit=512&tail=1", view->session_id, view->text_id);
+    snprintf(path, sizeof(path), "/transcriptions/%s/text?limit=512&tail=1", view->text_id);
     const int status = request(HTTP_METHOD_GET, path, NULL, s_sync_body, sizeof(s_sync_body));
     agent_text_t text;
-    if (status != 200 || !agent_parse_text(s_sync_body, &text)) {
-        if (status == 400 || status == 404) {
-            lock();
-            if (same_text_request(view)) {
-                memset(&s_view.text, 0, sizeof(s_view.text));
-                s_view.text_request++;
-                if (status == 404) s_view.text_id[0] = '\0';
-                changed();
-            }
-            unlock();
-        }
-        return false;
-    }
+    if (status == 404) return true; // Not streaming yet, or already released.
+    if (status != 200 || !agent_parse_text(s_sync_body, &text)) return false;
     lock();
     if (same_text_request(view)) {
         s_view.text = text;
@@ -493,6 +466,7 @@ char *agent_client_text_copy(uint32_t selection, uint32_t generation)
         (s_reply_text == NULL ? "" : s_reply_text) : s_input_text;
     bool truncated = s_view.text_kind == AGENT_TEXT_REPLY ? s_reply_truncated : s_input_truncated;
     if (s_view.text_kind == AGENT_TEXT_SEGMENT) { source = s_view.text.text; truncated = false; }
+    if (s_view.text_kind == AGENT_TEXT_DRAFT) { source = s_draft; truncated = false; }
     char *copy = NULL;
     if (selection == s_view.selection && generation == s_view.text_generation && source != NULL) {
         const size_t length = strlen(source);
@@ -514,7 +488,7 @@ char *agent_client_text_copy(uint32_t selection, uint32_t generation)
 char *agent_client_part_copy(uint32_t selection, bool input)
 {
     lock();
-    const bool loaded = input ? s_input_loaded && s_view.text_kind != AGENT_TEXT_DRAFT : s_reply_loaded;
+    const bool loaded = input ? s_input_loaded : s_reply_loaded;
     const char *source = input ? s_input_text : s_reply_text;
     char *copy = NULL;
     if (selection == s_view.selection && loaded && source != NULL) {
@@ -524,57 +498,6 @@ char *agent_client_part_copy(uint32_t selection, bool input)
     }
     unlock();
     return copy;
-}
-
-static bool poll_full_draft(agent_view_t *view)
-{
-    lock();
-    const bool cached = s_input_loaded && s_cached_draft_revision == view->draft_revision;
-    unlock();
-    if (cached) {
-        lock();
-        if (still_selected(view) && s_view.text_request == view->text_request &&
-            s_view.text_kind == AGENT_TEXT_DRAFT &&
-            (s_view.text_loading || s_view.text.revision != s_cached_draft_revision ||
-             s_view.text.total != s_input_total || s_view.chat_loading)) {
-            s_view.text.revision = s_cached_draft_revision;
-            s_view.text.total = (uint32_t)s_input_total;
-            s_view.text_loading = s_view.chat_loading = s_view.chat_sending = false;
-            s_view.chat_ready = true;
-            s_view.text_generation++;
-            changed();
-        }
-        unlock();
-        return true;
-    }
-    char path[128];
-    snprintf(path, sizeof(path), "/sessions/%s/draft/content?revision=%lu",
-             view->session_id, (unsigned long)view->draft_revision);
-    char *text = NULL;
-    content_headers_t headers;
-    const int status = read_content(path, &text, &headers);
-    if (status != 200 || text == NULL || headers.revision == 0) { free(text); return false; }
-    lock();
-    if (still_selected(view) && s_view.text_request == view->text_request &&
-        s_view.capture == AGENT_IDLE && s_view.text_kind == AGENT_TEXT_DRAFT) {
-        free(s_input_text);
-        s_input_text = text;
-        text = NULL;
-        s_input_total = headers.total;
-        s_input_truncated = headers.truncated;
-        s_input_loaded = true;
-        s_cached_message[0] = '\0';
-        s_cached_draft_revision = headers.revision;
-        s_view.draft_revision = s_view.text.revision = headers.revision;
-        s_view.text.total = headers.total;
-        s_view.text_loading = s_view.chat_loading = s_view.chat_sending = false;
-        s_view.chat_ready = true;
-        s_view.text_generation++;
-        changed();
-    }
-    unlock();
-    free(text);
-    return true;
 }
 
 static bool poll_turn(agent_view_t *view)
@@ -737,21 +660,12 @@ static void sync_task(void *arg)
                     last_list = now;
                 }
             } else if (!s_read_view.session_switching && s_read_view.capture != AGENT_IDLE) {
-                ok = poll_draft(&s_read_view);
-                agent_client_copy(&s_read_view);
-                if (ok && s_read_view.text_kind == AGENT_TEXT_SEGMENT) ok = poll_text(&s_read_view);
-            } else if (!s_read_view.session_switching && s_read_view.text_kind == AGENT_TEXT_DRAFT) {
-                ok = poll_draft(&s_read_view);
-                agent_client_copy(&s_read_view);
-                if (ok && s_read_view.text_kind == AGENT_TEXT_DRAFT) ok = poll_full_draft(&s_read_view);
-                else if (ok) ok = poll_turn(&s_read_view);
-            } else if (!s_read_view.session_switching) {
-                if (s_read_view.segments_loading) {
-                    ok = poll_draft(&s_read_view);
-                    agent_client_copy(&s_read_view);
-                }
-                if (ok && s_read_view.text_kind == AGENT_TEXT_DRAFT) ok = poll_full_draft(&s_read_view);
-                else if (ok && (urgent || s_read_view.chat_loading || !s_read_view.chat_ready)) ok = poll_turn(&s_read_view);
+                ok = poll_text(&s_read_view);
+            } else if (!s_read_view.session_switching && !s_read_view.session_local &&
+                       s_read_view.text_kind != AGENT_TEXT_DRAFT) {
+                // A local new chat has nothing on the gateway yet, and the
+                // draft is device RAM: neither is polled.
+                if (urgent || s_read_view.chat_loading || !s_read_view.chat_ready) ok = poll_turn(&s_read_view);
                 else if (ok && s_read_view.chat_ready &&
                          !agent_message_active(s_read_view.message.state)) {
                     const int64_t now = esp_timer_get_time();
@@ -799,53 +713,44 @@ static void sync_task(void *arg)
     }
 }
 
-static uint32_t draft_revision(const char *session)
+// Reads the final transcript, the whole plain-text body of a finished upload.
+// A body over the draft bound is reported as 413 and left unread.
+static int read_transcript(esp_http_client_handle_t client, char **text)
 {
-    char path[120];
-    snprintf(path, sizeof(path), "/sessions/%s/draft?limit=1", session);
-    if (request(HTTP_METHOD_GET, path, NULL, s_operation_body, sizeof(s_operation_body)) != 200) return 0;
-    uint32_t revision = 0;
-    agent_parse_revision(s_operation_body, &revision);
-    cJSON *root = cJSON_Parse(s_operation_body);
-    const cJSON *total = cJSON_GetObjectItemCaseSensitive(root, "total");
-    s_draft_total = cJSON_IsNumber(total) && total->valueint >= 0 && total->valueint <= 64 ? total->valueint : 0;
-    cJSON_Delete(root);
-    return revision;
-}
-
-static void refresh_recorded_draft(const char *session)
-{
-    if (draft_revision(session) == 0) return;
-    const int offset = s_draft_total > 0 ? (s_draft_total - 1) / AGENT_PAGE_SIZE * AGENT_PAGE_SIZE : 0;
-    char path[128];
-    snprintf(path, sizeof(path), "/sessions/%s/draft?limit=4&offset=%d", session, offset);
-    agent_segment_t items[AGENT_PAGE_SIZE] = {0};
-    int count = 0, total = 0;
-    uint32_t revision = 0;
-    if (request(HTTP_METHOD_GET, path, NULL, s_operation_body, sizeof(s_operation_body)) != 200 ||
-        !agent_parse_draft(s_operation_body, items, &count, &revision, &total)) return;
-    lock();
-    if (strcmp(s_view.session_id, session) == 0) {
-        memcpy(s_view.segments, items, sizeof(items));
-        s_view.segment_count = count;
-        s_view.segment_total = total;
-        s_view.segment_offset = s_view.segment_requested = offset;
-        s_view.segments_loading = false;
-        s_view.segments_more = offset + count < total;
-        s_view.draft_revision = revision;
-        changed();
+    *text = NULL;
+    const int64_t length = esp_http_client_fetch_headers(client);
+    const int status = esp_http_client_get_status_code(client);
+    if (status != 200) return status;
+    if (length < 0) return 0;
+    if (length > AGENT_DRAFT_MAX_BYTES) return 413;
+    char *body = malloc((size_t)length + 1);
+    if (body == NULL) return 0;
+    size_t used = 0;
+    while (used < (size_t)length) {
+        const int received = esp_http_client_read(client, body + used, (int)((size_t)length - used));
+        if (received <= 0) break;
+        used += (size_t)received;
     }
-    unlock();
+    body[used] = '\0';
+    if (used != (size_t)length || memchr(body, '\0', used) != NULL || !memo_text_is_valid_utf8(body)) {
+        free(body);
+        return 0;
+    }
+    *text = body;
+    return 200;
 }
 
-static bool upload_audio(const char *session, const char *segment, uint32_t revision)
+// Streams one recording to the gateway's transcription side channel. The
+// gateway stores nothing; the final text comes back as the response body and
+// becomes the device's draft. *status receives the upload's HTTP status.
+static char *upload_audio(const char *transcription, int *status)
 {
     s_audio_started = false;
-    char path[192];
-    snprintf(path, sizeof(path), "/sessions/%s/segments/%s/audio?sample_rate=16000&replace=1&defer_commit=1&revision=%lu",
-             session, segment, (unsigned long)revision);
+    *status = 0;
+    char path[112];
+    snprintf(path, sizeof(path), "/transcriptions/%s/audio?sample_rate=16000", transcription);
     esp_http_client_handle_t client = http_client(path, HTTP_METHOD_POST);
-    if (client == NULL) return false;
+    if (client == NULL) return NULL;
     esp_http_client_set_header(client, "Content-Type", "audio/pcm");
     bool ok = esp_http_client_open(client, -1) == ESP_OK;
     if (ok && s_held) ok = agent_capture_begin() == ESP_OK;
@@ -878,210 +783,121 @@ static bool upload_audio(const char *session, const char *segment, uint32_t revi
     s_view.capture = AGENT_FINALIZING;
     changed();
     unlock();
-    uint32_t commit_revision = 0;
+    char *text = NULL;
     if (ok) {
         esp_http_client_set_timeout_ms(client, 30000);
-        int status = 0;
-        if (!s_cancelled && write_all(client, "0\r\n\r\n", 5))
-            status = read_response(client, s_operation_body, sizeof(s_operation_body));
-        ESP_LOGI(TAG, "audio response=%d bytes=%u network_stack=%u", status, (unsigned)sent,
+        if (!s_cancelled && write_all(client, "0\r\n\r\n", 5)) *status = read_transcript(client, &text);
+        ESP_LOGI(TAG, "audio response=%d bytes=%u network_stack=%u", *status, (unsigned)sent,
                  (unsigned)uxTaskGetStackHighWaterMark(NULL));
-        agent_trace(TRACE_AUDIO, (uint16_t)status, (int32_t)sent, NULL);
-        ok = status == 200 && agent_parse_revision(s_operation_body, &commit_revision) && commit_revision > 0;
+        agent_trace(TRACE_AUDIO, (uint16_t)*status, (int32_t)sent, NULL);
     }
-    // Release the upload client before allocating the commit request client.
     esp_http_client_close(client);
     esp_http_client_cleanup(client);
-    lock();
-    ok = ok && !s_cancelled;
-    if (ok) {
-        s_view.capture = AGENT_COMMITTING;
-        changed();
-    }
-    unlock();
-    if (!ok) return false;
-    snprintf(path, sizeof(path), "/sessions/%s/segments/%s/commit", session, segment);
-    char body[48];
-    snprintf(body, sizeof(body), "{\"revision\":%lu}", (unsigned long)commit_revision);
-    int status = request(HTTP_METHOD_POST, path, body, s_operation_body, sizeof(s_operation_body));
-    if (status == 0)
-        status = request(HTTP_METHOD_POST, path, body, s_operation_body, sizeof(s_operation_body));
-    return status == 200;
+    if (s_cancelled) { free(text); text = NULL; }
+    return text;
 }
 
-static bool resolve_recording(const char *session, const char *segment, bool *committed)
-{
-    char path[128];
-    snprintf(path, sizeof(path), "/sessions/%s/segments/%s/abort", session, segment);
-    const int status = request(HTTP_METHOD_POST, path, NULL, s_operation_body, sizeof(s_operation_body));
-    cJSON *root = cJSON_Parse(s_operation_body);
-    const cJSON *result = cJSON_GetObjectItemCaseSensitive(root, "status");
-    const bool saved = status == 200 && cJSON_IsString(result) && strcmp(result->valuestring, "committed") == 0;
-    const bool cancelled = status == 200 && cJSON_IsString(result) && strcmp(result->valuestring, "cancelled") == 0;
-    cJSON_Delete(root);
-    *committed = saved;
-    return saved || cancelled || status == 404;
-}
-
-// Titles a new session from the opening of its first sent message, so a
-// recording that was replaced or cleared before sending never names it.
-static void name_session(const char *session, const char *message)
-{
-    char path[160], title[96];
-    snprintf(path, sizeof(path), "/sessions/%s/messages/%s/text?part=input&limit=48", session, message);
-    agent_text_t text;
-    if (request(HTTP_METHOD_GET, path, NULL, s_operation_body, sizeof(s_operation_body)) != 200 ||
-        !agent_parse_text(s_operation_body, &text) || text.text[0] == '\0') return;
-    for (char *p = text.text; *p != '\0'; p++) if ((unsigned char)*p < 32) *p = ' ';
-    agent_copy_text(title, sizeof(title), text.text);
-    cJSON *root = cJSON_CreateObject();
-    if (root == NULL || cJSON_AddStringToObject(root, "title", title) == NULL) { cJSON_Delete(root); return; }
-    char *body = cJSON_PrintUnformatted(root);
-    cJSON_Delete(root);
-    if (body == NULL) return;
-    snprintf(path, sizeof(path), "/sessions/%s", session);
-    const int status = request(HTTP_METHOD_PATCH, path, body, s_operation_body, sizeof(s_operation_body));
-    cJSON_free(body);
-    if (status == 200) {
-        lock();
-        if (strcmp(s_view.session_id, session) == 0) {
-            agent_copy_text(s_view.title, sizeof(s_view.title), title);
-            changed();
-        }
-        unlock();
-    }
-}
-
+// Records one utterance into the RAM draft. A successful transcript replaces
+// the draft; any failure keeps the previous one. A new chat gets a local
+// session ID only: nothing exists on the gateway until its first send.
 static void record(const command_t *command)
 {
-    char session[37], segment[37], title[64];
+    char session[37], transcription[37];
     agent_copy_text(session, sizeof(session), command->id);
     const bool create = command->enabled;
-    bool prepared = false;
-    bool audio_kept = false;
-    bool created = false;
+    bool saved = false, prepared = false;
+    int status = 0;
     s_audio_started = false;
     if (!s_held) { notice(""); goto finished; }
     if (!connected()) { notice("请先连接服务器"); goto finished; }
     if (create) {
         uuid(session);
-        agent_copy_text(title, sizeof(title), "新会话");
-        char body[192];
-        snprintf(body, sizeof(body), "{\"id\":\"%s\",\"title\":\"%s\"}", session, title);
-        created = true;
-        const int status = request(HTTP_METHOD_POST, "/sessions", body, s_operation_body, sizeof(s_operation_body));
-        ESP_LOGI(TAG, "create session response=%d", status);
-        if (status != 201) {
-            notice(status == 202 ? "会话暂未就绪，请重试" : http_notice(status));
-            goto finished;
-        }
         lock();
+        discard_draft();
         agent_copy_text(s_view.session_id, sizeof(s_view.session_id), session);
-        agent_copy_text(s_view.title, sizeof(s_view.title), title);
+        agent_copy_text(s_view.title, sizeof(s_view.title), "新会话");
+        s_view.session_local = true;
         s_view.selection++;
         clear_message_cache();
         s_view.turn = (agent_turn_t){0};
-        s_view.text_generation++;
+        memset(&s_view.message, 0, sizeof(s_view.message));
         s_view.session_switching = false;
-        s_view.segment_offset = 0;
-        s_view.segment_requested = 0;
-        s_view.segment_count = 0;
-
-        s_view.chat_ready = s_view.chat_sending = false;
-        s_view.chat_loading = true;
-
+        s_view.chat_ready = true; // An empty conversation, known without asking.
+        s_view.chat_sending = s_view.chat_loading = false;
         s_view.turn_anchor[0] = '\0';
         s_view.chat_request++;
-
         s_view.text_kind = AGENT_TEXT_REPLY;
-        s_view.text_loading = false;
-        memset(&s_view.text, 0, sizeof(s_view.text));
-        s_view.text_request++;
         s_view.text_id[0] = '\0';
+        memset(&s_view.text, 0, sizeof(s_view.text));
+        s_view.text_loading = false;
+        s_view.text_request++;
+        s_view.text_generation++;
+        s_pending_message[0] = '\0';
         changed();
         unlock();
     }
     if (!s_held) goto finished;
-    uint32_t revision = draft_revision(session);
-    if (revision == 0) { notice("读取草稿失败"); goto finished; }
-    uuid(segment);
-    char path[160], body[160];
-    snprintf(path, sizeof(path), "/sessions/%s/segments", session);
-    snprintf(body, sizeof(body), "{\"id\":\"%s\",\"revision\":%lu,\"replace\":true}", segment, (unsigned long)revision);
-    int status = request(HTTP_METHOD_POST, path, body, s_operation_body, sizeof(s_operation_body));
-    if (status == 0) status = request(HTTP_METHOD_POST, path, body, s_operation_body, sizeof(s_operation_body));
-    if (status != 201 || !agent_parse_revision(s_operation_body, &revision)) {
-        bool committed = false;
-        resolve_recording(session, segment, &committed);
-        notice(http_notice(status));
-        goto finished;
-    }
+    // Opens the upstream transcriber while the preparing animation plays.
+    uuid(transcription);
+    char body[64];
+    snprintf(body, sizeof(body), "{\"id\":\"%s\"}", transcription);
+    status = request(HTTP_METHOD_POST, "/transcriptions", body, s_operation_body, sizeof(s_operation_body));
+    if (status == 0) status = request(HTTP_METHOD_POST, "/transcriptions", body, s_operation_body, sizeof(s_operation_body));
+    if (status != 201) { notice(http_notice(status)); goto finished; }
     prepared = true;
     lock();
-    agent_copy_text(s_view.text_id, sizeof(s_view.text_id), segment);
-    s_view.text_kind = AGENT_TEXT_SEGMENT;
-    memset(&s_view.text, 0, sizeof(s_view.text));
-    s_view.text_request++;
-    changed();
+    if (strcmp(s_view.session_id, session) == 0) {
+        agent_copy_text(s_view.text_id, sizeof(s_view.text_id), transcription);
+        s_view.text_kind = AGENT_TEXT_SEGMENT;
+        memset(&s_view.text, 0, sizeof(s_view.text));
+        s_view.text_request++;
+        changed();
+    }
     unlock();
-    bool saved = s_held && upload_audio(session, segment, revision);
-    bool resolved = saved;
-    if (!saved && s_audio_started) resolved = resolve_recording(session, segment, &saved);
-    ESP_LOGI(TAG, "record result saved=%d resolved=%d started=%d cancelled=%d capture_error=%d network_stack=%u",
-             saved, resolved, s_audio_started, (bool)s_cancelled, (int)agent_capture_error(),
+    status = 0;
+    char *text = s_held ? upload_audio(transcription, &status) : NULL;
+    const uint32_t chars = text != NULL ? utf8_chars(text) : 0;
+    if (chars > AGENT_DRAFT_MAX_CHARS) { free(text); text = NULL; status = 413; }
+    saved = text != NULL;
+    ESP_LOGI(TAG, "record result saved=%d status=%d started=%d cancelled=%d capture_error=%d chars=%u network_stack=%u",
+             saved, status, s_audio_started, (bool)s_cancelled, (int)agent_capture_error(), (unsigned)chars,
              (unsigned)uxTaskGetStackHighWaterMark(NULL));
-    agent_trace(TRACE_RECORD, (uint16_t)((saved ? 1 : 0) | (resolved ? 2 : 0) | (s_audio_started ? 4 : 0) |
-                (s_cancelled ? 8 : 0)), (int32_t)agent_capture_error(), NULL);
-    if (!saved && !s_cancelled && (s_audio_started || s_held)) {
+    agent_trace(TRACE_RECORD, (uint16_t)((saved ? 1 : 0) | (s_audio_started ? 4 : 0) | (s_cancelled ? 8 : 0)),
+                (int32_t)agent_capture_error(), NULL);
+    if (!saved && !s_cancelled && status != 422 && status != 413 && (s_audio_started || s_held)) {
         s_record_failed_ms = (uint32_t)(esp_timer_get_time() / 1000) | 1;
         agent_trace_request(TRACE_TRIGGER_RECORD_FAILED);
     }
     if (saved) {
-        audio_kept = true;
-        notice("");
-    } else if (!s_audio_started) {
-        revision = draft_revision(session);
-        snprintf(path, sizeof(path), "/sessions/%s/segments/%s", session, segment);
-        snprintf(body, sizeof(body), "{\"revision\":%lu}", (unsigned long)revision);
-        request(HTTP_METHOD_DELETE, path, body, s_operation_body, sizeof(s_operation_body));
-        notice(!s_cancelled && s_held ? "无法开始录音" : "");
-    } else if (s_cancelled) {
-        notice("");
-    } else {
-        // An unresolved commit may already have saved a new session's message.
-        audio_kept = !resolved;
-        notice(resolved ? "没有听清，请再说一次" : "结果待确认，请稍后重试");
-    }
-finished:
-    if (prepared) {
-        refresh_recorded_draft(session);
         lock();
         if (strcmp(s_view.session_id, session) == 0) {
-            s_view.text_kind = AGENT_TEXT_DRAFT;
-            agent_copy_text(s_view.text_id, sizeof(s_view.text_id), session);
-            memset(&s_view.text, 0, sizeof(s_view.text));
-            s_view.text_request++;
-            s_view.text_loading = true;
-            s_view.text_generation++;
-            if (s_view.segment_total == 0) s_view.text_id[0] = '\0';
-            if (s_view.segment_count == 1 && strcmp(s_view.segments[0].id, segment) == 0 &&
-                strcmp(s_view.segments[0].state, "ready") == 0 && s_view.segments[0].bytes > 0) {
-                audio_kept = true;
-                s_view.notice[0] = '\0';
-            }
+            free(s_draft);
+            s_draft = text;
+            text = NULL;
+            s_view.draft_chars = chars;
+            s_view.draft_serial++;
+            s_view.capture_serial++;
             changed();
         }
         unlock();
+        free(text); // The session was left while transcribing.
+        notice("");
+    } else if (s_cancelled) {
+        notice("");
+    } else if (!s_audio_started) {
+        notice(s_held ? "无法开始录音" : "");
+    } else if (status == 422) {
+        notice("没有听清，请再说一次");
+    } else if (status == 413) {
+        notice("超过 2000 字，请缩短后重录");
+    } else {
+        notice("转写失败，请重试");
     }
-    if (created && !audio_kept) {
-        char cleanup[96];
-        snprintf(cleanup, sizeof(cleanup), "/sessions/%s", session);
-        request(HTTP_METHOD_DELETE, cleanup, NULL, s_operation_body, sizeof(s_operation_body));
-    }
+finished:
     lock();
     s_view.capture = AGENT_IDLE;
+    if (prepared && strcmp(s_view.session_id, session) == 0) show_draft_or_exchange();
     if (strcmp(s_view.notice, "正在取消") == 0) s_view.notice[0] = '\0';
-    if (prepared && audio_kept) s_view.capture_serial++;
     changed();
     unlock();
     s_resync = true;
@@ -1148,11 +964,9 @@ static void execute(const command_t *command)
         agent_copy_text(s_view.title, sizeof(s_view.title), command->title);
         s_view.selection++;
         s_view.session_switching = false;
-        s_view.segment_offset = 0;
-        s_view.segment_requested = 0;
-        s_view.segments_loading = command->kind == CMD_OPEN;
+        s_view.session_local = false;
+        discard_draft(); // The unsent draft belongs to the session being left.
         s_view.session_requested = s_view.session_offset = 0;
-        s_view.segment_count = 0;
 
         s_view.chat_ready = s_view.chat_sending = false;
         s_view.chat_loading = true;
@@ -1162,7 +976,6 @@ static void execute(const command_t *command)
 
         s_view.text_kind = AGENT_TEXT_REPLY;
         s_view.text_loading = false;
-        s_view.segment_total = 0;
         s_view.text_id[0] = '\0';
         memset(&s_view.text, 0, sizeof(s_view.text));
         s_view.text_request++;
@@ -1175,74 +988,90 @@ static void execute(const command_t *command)
     }
     if (command->kind == CMD_REVIEW) {
         lock();
-        if (command->selection == s_view.selection) {
-            agent_copy_text(s_view.text_id, sizeof(s_view.text_id), s_view.session_id);
-            s_view.text_kind = AGENT_TEXT_DRAFT;
-            s_view.text_request++;
-            s_view.text_loading = true;
-            s_view.text_generation++;
+        if (command->selection == s_view.selection && s_draft != NULL && s_view.capture == AGENT_IDLE) {
+            show_draft_or_exchange();
             changed();
         }
         unlock();
-        s_resync = true;
         return;
     }
-    char session[37], path[160], body[192];
+    char session[37], path[160];
     lock();
     agent_copy_text(session, sizeof(session), s_view.session_id);
     const bool selected = command->selection == s_view.selection;
     unlock();
     if (!selected || !connected()) { notice("请先连接服务器"); return; }
-    if (command->kind == CMD_CLEAR) {
-        snprintf(path, sizeof(path), "/sessions/%s/draft", session);
-        snprintf(body, sizeof(body), "{\"revision\":%lu}", (unsigned long)command->revision);
-        const int status = request(HTTP_METHOD_DELETE, path, body, s_operation_body, sizeof(s_operation_body));
-        uint32_t revision = 0;
-        if (status == 200 && agent_parse_revision(s_operation_body, &revision)) {
-            lock();
-            s_view.draft_revision = revision;
-            changed();
-            unlock();
-            notice("");
-        } else notice(http_notice(status));
-        s_resync = true; // The draft poll switches the view back to the exchange.
-        return;
-    }
     if (command->kind == CMD_SEND) {
-        if (s_pending_message[0] == '\0' || s_pending_revision != command->revision) {
-            uuid(s_pending_message);
-            s_pending_revision = command->revision;
+        // The draft shown when OK was pressed; a newer recording or a clear
+        // since then changed the serial and cancels this send.
+        lock();
+        const bool local = s_view.session_local;
+        char *text = NULL;
+        if (s_draft != NULL && s_view.draft_serial == command->revision) {
+            const size_t length = strlen(s_draft);
+            text = malloc(length + 1);
+            if (text != NULL) memcpy(text, s_draft, length + 1);
         }
+        const bool current = s_draft != NULL && s_view.draft_serial == command->revision;
+        unlock();
+        if (text == NULL) { notice(current ? "内存不足，请退出会话" : "内容已更新，请稍候"); return; }
+        if (s_pending_message[0] == '\0' || s_pending_serial != command->revision) {
+            uuid(s_pending_message);
+            s_pending_serial = command->revision;
+        }
+        cJSON *root = cJSON_CreateObject();
+        char *body = NULL;
+        if (root != NULL && cJSON_AddStringToObject(root, "id", s_pending_message) != NULL &&
+            cJSON_AddStringToObject(root, "text", text) != NULL &&
+            cJSON_AddBoolToObject(root, "new_session", local) != NULL)
+            body = cJSON_PrintUnformatted(root);
+        cJSON_Delete(root);
+        if (body == NULL) { free(text); notice("内存不足，请退出会话"); return; }
         snprintf(path, sizeof(path), "/sessions/%s/messages", session);
-        snprintf(body, sizeof(body), "{\"id\":\"%s\",\"revision\":%lu}", s_pending_message, (unsigned long)command->revision);
-        const int status = request(HTTP_METHOD_POST, path, body, s_operation_body, sizeof(s_operation_body));
+        int status = request(HTTP_METHOD_POST, path, body, s_operation_body, sizeof(s_operation_body));
+        // A lost response is retried with the same IDs; the gateway stores it once.
+        if (status == 0) status = request(HTTP_METHOD_POST, path, body, s_operation_body, sizeof(s_operation_body));
+        cJSON_free(body);
         agent_message_t message;
         if (status == 202 && agent_parse_message(s_operation_body, &message)) {
+            // The gateway names a new session after its first message.
+            char title[AGENT_TITLE_BYTES + 1] = "";
+            cJSON *response = cJSON_Parse(s_operation_body);
+            const cJSON *created = cJSON_GetObjectItemCaseSensitive(response, "session");
+            const cJSON *name = cJSON_GetObjectItemCaseSensitive(created, "title");
+            if (cJSON_IsString(name)) agent_copy_text(title, sizeof(title), name->valuestring);
+            cJSON_Delete(response);
             lock();
-            s_view.message = message;
-            s_view.turn = (agent_turn_t){.message = message, .present = true};
-            agent_copy_text(s_cached_message, sizeof(s_cached_message), message.id);
-            s_cached_draft_revision = 0;
-            reset_reply_cache();
-            s_reply_loaded = true;
-            s_view.text_generation++;
-            agent_copy_text(s_view.text_id, sizeof(s_view.text_id), message.id);
-            s_view.text_kind = AGENT_TEXT_REPLY;
-            s_view.text_loading = false;
-            s_view.text_request++;
-            s_view.chat_sending = s_view.chat_loading = true;
-
-            s_view.turn_anchor[0] = '\0';
-            s_view.chat_request++;
-            s_view.segment_offset = 0;
-            s_view.segment_requested = 0;
-            s_view.segment_count = s_view.segment_total = 0;
-            const bool untitled = strcmp(s_view.session_id, session) == 0 && strcmp(s_view.title, "新会话") == 0;
-            changed();
+            if (strcmp(s_view.session_id, session) == 0) {
+                s_view.session_local = false;
+                if (title[0] != '\0') agent_copy_text(s_view.title, sizeof(s_view.title), title);
+                if (s_view.draft_serial == command->revision) discard_draft();
+                s_view.message = message;
+                s_view.turn = (agent_turn_t){.message = message, .present = true};
+                // The sent text is this exchange's input; the reply follows.
+                clear_message_cache();
+                agent_copy_text(s_cached_message, sizeof(s_cached_message), message.id);
+                s_input_text = text;
+                text = NULL;
+                s_input_total = strlen(s_input_text);
+                s_input_loaded = true;
+                s_reply_loaded = true;
+                s_view.text_generation++;
+                agent_copy_text(s_view.text_id, sizeof(s_view.text_id), message.id);
+                s_view.text_kind = AGENT_TEXT_REPLY;
+                memset(&s_view.text, 0, sizeof(s_view.text));
+                s_view.text_loading = false;
+                s_view.text_request++;
+                s_view.chat_sending = s_view.chat_loading = true;
+                s_view.turn_anchor[0] = '\0';
+                s_view.chat_request++;
+                changed();
+            }
             unlock();
+            s_pending_message[0] = '\0';
             notice("");
-            if (untitled) name_session(session, message.id);
-        } else notice(http_notice(status));
+        } else notice(status == 404 ? "会话已不存在" : http_notice(status));
+        free(text);
     } else if (command->kind == CMD_RETRY) {
         snprintf(path, sizeof(path), "/sessions/%s/messages/%s/retry", session, command->id);
         const int status = request(HTTP_METHOD_POST, path, NULL, s_operation_body, sizeof(s_operation_body));
@@ -1490,7 +1319,7 @@ void agent_client_release_record(void)
 bool agent_client_cancel_record(void)
 {
     lock();
-    const bool accepted = s_view.capture != AGENT_IDLE && s_view.capture != AGENT_COMMITTING;
+    const bool accepted = s_view.capture != AGENT_IDLE;
     if (accepted) {
         s_cancelled = true;
         s_held = false;
@@ -1500,31 +1329,33 @@ bool agent_client_cancel_record(void)
     if (accepted) agent_capture_end();
     return accepted;
 }
-esp_err_t agent_client_send(uint32_t revision, uint32_t selection)
+esp_err_t agent_client_send(uint32_t serial, uint32_t selection)
 {
     lock();
     const bool ready = selection != 0 && selection == s_view.selection && !s_view.busy &&
-        s_view.capture == AGENT_IDLE && s_view.segment_total > 0 &&
-        s_view.text_kind == AGENT_TEXT_DRAFT && s_view.text.revision == revision &&
-        s_view.draft_revision == revision && s_view.text.total > 0;
+        s_view.capture == AGENT_IDLE && s_draft != NULL &&
+        s_view.text_kind == AGENT_TEXT_DRAFT && s_view.draft_serial == serial;
     unlock();
-    agent_trace(TRACE_SEND, ready ? 1 : 0, (int32_t)revision, NULL);
+    agent_trace(TRACE_SEND, ready ? 1 : 0, (int32_t)serial, NULL);
     if (!ready) return ESP_ERR_INVALID_STATE;
     const uint32_t failed = s_record_failed_ms;
     if (failed != 0 && (uint32_t)(esp_timer_get_time() / 1000) - failed < 5000) agent_trace_request(TRACE_TRIGGER_SEND_AFTER_FAILURE);
-    command_t c = {.kind = CMD_SEND, .revision = revision, .selection = selection};
+    command_t c = {.kind = CMD_SEND, .revision = serial, .selection = selection};
     return queue(&c);
 }
+// Local: the draft never left the device. A send still queued for it sees the
+// changed serial and does nothing; one already on the wire still lands.
 esp_err_t agent_client_clear_draft(void)
 {
     lock();
-    // Like a send, only the draft revision on screen is cleared.
-    const bool ready = s_view.draft_clear && !s_view.busy && s_view.capture == AGENT_IDLE &&
-        s_view.segment_total > 0 && s_view.text_kind == AGENT_TEXT_DRAFT &&
-        s_view.draft_revision > 0 && s_view.text.revision == s_view.draft_revision;
-    command_t c = {.kind = CMD_CLEAR, .revision = s_view.draft_revision, .selection = s_view.selection};
+    const bool ready = s_view.capture == AGENT_IDLE && s_draft != NULL && s_view.text_kind == AGENT_TEXT_DRAFT;
+    if (ready) {
+        discard_draft();
+        show_draft_or_exchange();
+        changed();
+    }
     unlock();
-    return ready ? queue(&c) : ESP_ERR_INVALID_STATE;
+    return ready ? ESP_OK : ESP_ERR_INVALID_STATE;
 }
 
 esp_err_t agent_client_show_latest(void)

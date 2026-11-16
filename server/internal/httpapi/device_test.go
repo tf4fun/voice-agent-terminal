@@ -12,10 +12,8 @@ import (
 
 func TestDevicePagesReportAnExactNextPage(t *testing.T) {
 	e := setup(t)
-	var selected string
 	for index := 0; index < 5; index++ {
-		selected = model.NewID()
-		e.request(t, "POST", "/api/v1/sessions", map[string]string{"id": selected, "title": selected}, 201)
+		e.request(t, "POST", "/api/v1/sessions/"+model.NewID()+"/messages", map[string]any{"id": model.NewID(), "text": "问题", "new_session": true}, 202)
 	}
 	var page struct {
 		Items   []model.Session `json:"items"`
@@ -32,22 +30,6 @@ func TestDevicePagesReportAnExactNextPage(t *testing.T) {
 	}
 	if len(page.Items) != 1 || page.HasMore {
 		t.Fatal(page)
-	}
-	base := "/api/v1/sessions/" + selected
-	for revision := 1; revision <= 5; revision++ {
-		e.request(t, "POST", base+"/segments", map[string]any{"id": model.NewID(), "revision": revision, "text": "片段"}, 201)
-	}
-	var draft struct {
-		Items   []model.Segment `json:"items"`
-		HasMore bool            `json:"has_more"`
-	}
-	_ = json.Unmarshal(e.request(t, "GET", base+"/draft?limit=4", nil, 200), &draft)
-	if len(draft.Items) != 4 || !draft.HasMore {
-		t.Fatal(draft)
-	}
-	_ = json.Unmarshal(e.request(t, "GET", base+"/draft?limit=4&offset=4", nil, 200), &draft)
-	if len(draft.Items) != 1 || draft.HasMore {
-		t.Fatal(draft)
 	}
 }
 
@@ -88,36 +70,29 @@ func TestDeviceTextBeforeAndTailRespectUTF8AndBounds(t *testing.T) {
 	}
 }
 
-func TestDeviceDraftReviewAndRerecordSendSnapshot(t *testing.T) {
+// The device records through the side channel, keeps the text itself and
+// sends exactly that text; a lost response is retried with the same IDs.
+func TestDeviceRecordingThenSendSnapshot(t *testing.T) {
 	e := setup(t)
-	session, old, next := model.NewID(), model.NewID(), model.NewID()
-	base := "/api/v1/sessions/" + session
-	e.request(t, "POST", "/api/v1/sessions", map[string]string{"id": session, "title": "重录测试"}, 201)
-	e.request(t, "POST", base+"/segments", map[string]any{"id": old, "revision": 1, "text": strings.Repeat("原稿", 100)}, 201)
-	var window model.Window
-	if err := json.Unmarshal(e.request(t, "GET", base+"/draft/text?limit=512", nil, 200), &window); err != nil {
-		t.Fatal(err)
-	}
-	if len(window.Text) > 512 || window.Revision != 2 || window.Total != 600 {
-		t.Fatal(window)
-	}
-	e.request(t, "POST", base+"/segments", map[string]any{"id": next, "revision": 2}, 201)
-	request := httptest.NewRequest("POST", base+"/segments/"+next+"/audio?sample_rate=16000&revision=3&replace=1", strings.NewReader(strings.Repeat("\x00", 6400)))
+	recording := model.NewID()
+	e.request(t, "POST", "/api/v1/transcriptions", map[string]string{"id": recording}, 201)
+	request := httptest.NewRequest("POST", "/api/v1/transcriptions/"+recording+"/audio?sample_rate=16000", strings.NewReader(strings.Repeat("\x00", 6400)))
 	request.Header.Set("Content-Type", "audio/pcm")
 	request.Header.Set("Authorization", "Bearer device-test")
 	response := httptest.NewRecorder()
 	New(e.service).ServeHTTP(response, request)
-	if response.Code != 200 {
+	if response.Code != 200 || response.Body.String() != "测试转写" {
 		t.Fatalf("capture %d: %s", response.Code, response.Body.String())
 	}
-	if err := json.Unmarshal(e.request(t, "GET", base+"/draft/text?limit=512", nil, 200), &window); err != nil {
+	var window model.Window
+	if err := json.Unmarshal(e.request(t, "GET", "/api/v1/transcriptions/"+recording+"/text?limit=512&tail=1", nil, 200), &window); err != nil {
 		t.Fatal(err)
 	}
-	if window.Text != "测试转写" {
+	if window.Text != "测试转写" || window.Revision < 1 {
 		t.Fatal(window)
 	}
-	id := model.NewID()
-	body := map[string]any{"id": id, "revision": window.Revision}
+	base := "/api/v1/sessions/" + model.NewID()
+	body := map[string]any{"id": model.NewID(), "text": window.Text, "new_session": true}
 	e.request(t, "POST", base+"/messages", body, 202)
 	e.request(t, "POST", base+"/messages", body, 202)
 	select {
@@ -135,17 +110,10 @@ func TestDeviceDraftReviewAndRerecordSendSnapshot(t *testing.T) {
 
 func TestDeviceConversationEndpointPairsQuestionAndReply(t *testing.T) {
 	e := setup(t)
-	session, segment, message := model.NewID(), model.NewID(), model.NewID()
+	session, message := model.NewID(), model.NewID()
 	base := "/api/v1/sessions/" + session
-	e.request(t, "POST", "/api/v1/sessions", map[string]string{"id": session, "title": "聊天窗口"}, 201)
-	var empty struct {
-		Items []json.RawMessage `json:"items"`
-	}
-	if err := json.Unmarshal(e.request(t, "GET", base+"/conversation", nil, 200), &empty); err != nil || len(empty.Items) != 0 {
-		t.Fatalf("empty: %+v %v", empty, err)
-	}
-	e.request(t, "POST", base+"/segments", map[string]any{"id": segment, "revision": 1, "text": "我的提问"}, 201)
-	e.request(t, "POST", base+"/messages", map[string]any{"id": message, "revision": 2}, 202)
+	e.request(t, "GET", base+"/conversation", nil, 404) // No session before its first message.
+	e.request(t, "POST", base+"/messages", map[string]any{"id": message, "text": "我的提问", "new_session": true}, 202)
 	deadline := time.Now().Add(3 * time.Second)
 	for {
 		var state model.Message

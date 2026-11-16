@@ -3,7 +3,6 @@ package gateway
 import (
 	"context"
 	"errors"
-	"io"
 	"log/slog"
 	"sync"
 	"time"
@@ -16,11 +15,6 @@ import (
 	"github.com/tf4fun/voice-agent-terminal/server/internal/store"
 	"github.com/tf4fun/voice-agent-terminal/server/internal/tts"
 )
-
-type capture struct {
-	generation int64
-	cancel     context.CancelFunc
-}
 
 // preparedTTL bounds how long an unused upstream session stays open.
 var preparedTTL = 30 * time.Second
@@ -41,7 +35,7 @@ type Service struct {
 	mu           sync.Mutex
 	lifecycleMu  sync.Mutex
 	lifecycles   map[string]*sessionLifecycleLock
-	captures     map[string]capture
+	transcripts  map[string]*transcription
 	prepared     map[string]*preparedCapture
 	captureSlots chan struct{}
 	wake         chan struct{}
@@ -56,7 +50,7 @@ func New(st *store.Store, cfg config.Config, client *hermes.Client, transcriber 
 		Store: st, Config: cfg, Hermes: client, ASR: transcriber,
 		Events: events.NewHub(), Log: logger,
 		lifecycles:   make(map[string]*sessionLifecycleLock),
-		captures:     make(map[string]capture),
+		transcripts:  make(map[string]*transcription),
 		prepared:     make(map[string]*preparedCapture),
 		captureSlots: make(chan struct{}, 4),
 		wake:         make(chan struct{}, 1),
@@ -104,24 +98,6 @@ func (s *Service) Start(parent context.Context) {
 			}
 		}
 	}()
-	s.workers.Add(1)
-	go func() {
-		defer s.workers.Done()
-		ticker := time.NewTicker(10 * time.Second)
-		defer ticker.Stop()
-		for {
-			if expired, err := s.Store.ExpireStaged(ctx, time.Now()); err == nil {
-				for _, session := range expired {
-					s.Events.Publish(events.Event{Type: "draft.updated", SessionID: session.ID, Revision: session.Revision, Status: "cancelled"})
-				}
-			}
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-			}
-		}
-	}()
 }
 
 func (s *Service) Close() {
@@ -129,8 +105,8 @@ func (s *Service) Close() {
 		s.cancel()
 	}
 	s.mu.Lock()
-	for _, active := range s.captures {
-		active.cancel()
+	for _, active := range s.transcripts {
+		active.stop()
 	}
 	for id, entry := range s.prepared {
 		entry.timer.Stop()
@@ -168,6 +144,9 @@ func (s *Service) Reconcile(ctx context.Context, session model.Session) error {
 		if err == nil {
 			err = s.Store.SetSessionReady(ctx, session.ID)
 		}
+		if err == nil {
+			s.Wake() // The session's first message waits for it.
+		}
 	case "deleting":
 		err = s.Hermes.DeleteSession(ctx, session.ID)
 		if err == nil {
@@ -184,9 +163,9 @@ func (s *Service) Reconcile(ctx context.Context, session model.Session) error {
 }
 
 // PrepareCapture opens the upstream transcription session for a recording
-// segment while the device shows its preparing animation. It waits at most
+// while the device shows its preparing animation. It waits at most
 // wait; a slower or failed handshake leaves the upload to open its own session.
-func (s *Service) PrepareCapture(segmentID string, wait time.Duration) {
+func (s *Service) PrepareCapture(id string, wait time.Duration) {
 	preparer, ok := s.ASR.(asr.Preparer)
 	if !ok || s.ASR == nil || !s.ASR.Enabled() {
 		return
@@ -202,71 +181,41 @@ func (s *Service) PrepareCapture(segmentID string, wait time.Duration) {
 	started := time.Now()
 	session, err := preparer.Prepare(ctx)
 	if err != nil {
-		s.Log.Warn("transcription session not prepared", "segment_id", segmentID,
+		s.Log.Warn("transcription session not prepared", "transcription_id", id,
 			"elapsed_ms", time.Since(started).Milliseconds(), "error", err.Error())
 		return
 	}
-	s.Log.Info("transcription session prepared", "segment_id", segmentID, "elapsed_ms", time.Since(started).Milliseconds())
+	s.Log.Info("transcription session prepared", "transcription_id", id, "elapsed_ms", time.Since(started).Milliseconds())
 	entry := &preparedCapture{session: session}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if old := s.prepared[segmentID]; old != nil && old.timer.Stop() {
+	if old := s.prepared[id]; old != nil && old.timer.Stop() {
 		_ = old.session.Close()
 	}
 	entry.timer = time.AfterFunc(preparedTTL, func() {
 		s.mu.Lock()
-		if s.prepared[segmentID] == entry {
-			delete(s.prepared, segmentID)
+		if s.prepared[id] == entry {
+			delete(s.prepared, id)
 		}
 		s.mu.Unlock()
 		_ = session.Close()
 	})
-	s.prepared[segmentID] = entry
+	s.prepared[id] = entry
 }
 
 // takePrepared hands a prepared session to exactly one upload.
-func (s *Service) takePrepared(segmentID string) asr.Prepared {
+func (s *Service) takePrepared(id string) asr.Prepared {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	entry := s.prepared[segmentID]
+	entry := s.prepared[id]
 	if entry == nil {
 		return nil
 	}
-	delete(s.prepared, segmentID)
+	delete(s.prepared, id)
 	if !entry.timer.Stop() {
 		return nil // Expiry is already closing it.
 	}
 	return entry.session
-}
-
-func (s *Service) CancelCapture(segmentID string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if active, exists := s.captures[segmentID]; exists {
-		active.cancel()
-	}
-}
-
-// CancelCaptureGeneration cannot cancel a new recording started after an edit.
-func (s *Service) CancelCaptureGeneration(segmentID string, generation int64) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if active, exists := s.captures[segmentID]; exists && active.generation == generation {
-		active.cancel()
-	}
-}
-
-func (s *Service) registerCapture(segmentID string, generation int64, cancel context.CancelFunc) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if old, exists := s.captures[segmentID]; exists {
-		if old.generation >= generation {
-			return false
-		}
-		old.cancel()
-	}
-	s.captures[segmentID] = capture{generation: generation, cancel: cancel}
-	return true
 }
 
 func (s *Service) RenameSession(ctx context.Context, id, title string) error {
@@ -289,101 +238,6 @@ func (s *Service) RenameSession(ctx context.Context, id, title string) error {
 		return err
 	}
 	return s.Store.Rename(ctx, id, title)
-}
-
-func (s *Service) Capture(parent context.Context, sessionID, segmentID string, revision int64, input io.ReadCloser, rate int, replace, deferCommit bool) (result error) {
-	select {
-	case s.captureSlots <- struct{}{}:
-		defer func() { <-s.captureSlots }()
-	default:
-		return store.ErrBusy
-	}
-	mode := store.CaptureAppend
-	if replace {
-		mode = store.CaptureReplace
-	}
-	if deferCommit {
-		mode = store.CaptureStaged
-	}
-	generation, err := s.Store.BeginCaptureMode(parent, sessionID, segmentID, revision, mode)
-	if err != nil {
-		return err
-	}
-	lastText := ""
-	defer func() {
-		if result == nil {
-			return
-		}
-		cleanup, done := context.WithTimeout(context.Background(), 3*time.Second)
-		defer done()
-		if deferCommit {
-			status, next, updateErr := s.Store.AbortReplacement(cleanup, sessionID, segmentID)
-			if updateErr == nil && status == "cancelled" {
-				s.Events.Publish(events.Event{Type: "draft.updated", SessionID: sessionID, SegmentID: segmentID, Revision: next, Status: "failed"})
-			}
-			return
-		}
-		next, updateErr := s.Store.UpdateTranscript(cleanup, sessionID, segmentID, generation, lastText, "failed")
-		if updateErr == nil {
-			s.Events.Publish(events.Event{Type: "draft.updated", SessionID: sessionID, SegmentID: segmentID, Revision: next, Status: "failed"})
-		}
-	}()
-	ctx, cancel := context.WithTimeout(parent, s.Config.CaptureRequestTimeout())
-	defer cancel()
-	stopClose := context.AfterFunc(ctx, func() { input.Close() })
-	defer stopClose()
-	if !s.registerCapture(segmentID, generation, cancel) {
-		return store.ErrStale
-	}
-	defer func() {
-		s.mu.Lock()
-		if active := s.captures[segmentID]; active.generation == generation {
-			delete(s.captures, segmentID)
-		}
-		s.mu.Unlock()
-	}()
-	segment, checkErr := s.Store.Segment(ctx, sessionID, segmentID)
-	if checkErr != nil {
-		return checkErr
-	}
-	if segment.Generation != generation || segment.State != "capturing" {
-		return store.ErrStale
-	}
-	s.Events.Publish(events.Event{Type: "draft.updated", SessionID: sessionID, SegmentID: segmentID, Status: "capturing"})
-	finalized := false
-	emit := func(update asr.Update) error {
-		state := "capturing"
-		if update.Final {
-			state = "ready"
-		}
-		next, err := s.Store.UpdateTranscript(ctx, sessionID, segmentID, generation, update.Text, state)
-		if err != nil {
-			return err
-		}
-		lastText = update.Text
-		finalized = update.Final
-		if update.Final && deferCommit {
-			state = "staged"
-		}
-		s.Events.Publish(events.Event{Type: "draft.updated", SessionID: sessionID, SegmentID: segmentID, Revision: next, Status: state})
-		return nil
-	}
-	prepared := s.takePrepared(segmentID)
-	if preparer, ok := s.ASR.(asr.Preparer); ok && prepared != nil {
-		err = preparer.TranscribePrepared(ctx, prepared, input, rate, emit)
-	} else {
-		if prepared != nil {
-			_ = prepared.Close()
-		}
-		err = s.ASR.Transcribe(ctx, input, rate, emit)
-	}
-	if err == nil && !finalized {
-		err = asr.ErrUpstream
-	}
-	if err != nil && parent.Err() == nil {
-		s.Log.Warn("transcription failed", "segment_id", segmentID, "prepared", prepared != nil, "error", err.Error())
-	}
-	return err
 }
 
 func (s *Service) runMessages(ctx context.Context) {

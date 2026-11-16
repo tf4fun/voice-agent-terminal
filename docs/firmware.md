@@ -14,7 +14,8 @@ Opening a session shows the voice view: an orb, one status line, a one-line
 strip and two key hints. Recording happens in the same view: the timer takes
 the status line and the strip shows the last ten characters of the live
 transcript. After release the strip spins while the transcript settles (no key
-acts in that moment), then expands into the draft panel. Sending collapses it
+acts in that moment), then expands into the draft panel, whose header shows
+the draft's character count against its 2000-character bound (red from 90 %). Sending collapses it
 to one line with the question while Hermes thinks: a comet arc orbits the orb,
 the bars rise in turn and the status counts the seconds waited; this lasts
 until Hermes has finished, since the device fetches the reply whole. While a
@@ -60,8 +61,8 @@ the minimum free heap reached 26.7 KiB).
 
 The resting ticker draws one still line and animates only the 0.25 s slide
 between lines, so it costs almost nothing to render. The orb sits 8 px below the mode marks so the thinking arc
-never touches the header. With a draft, long Down clears it through
-`DELETE /sessions/{id}/draft` at the reviewed revision.
+never touches the header. With a draft, long Down clears it locally; nothing
+is sent.
 
 ## Diagnostic reports
 
@@ -100,13 +101,15 @@ not interrupted.
 | Settings | Up/down select, OK enters an editor or saves it. Up increases and down decreases a numeric value. | In the settings list, Up cycles to the next top-level page and Down sleeps. In an editor, Down cancels the unsaved edit and returns to settings. |
 | Provisioning | OK finishes provisioning and restores station networking. | Down finishes provisioning and returns to settings. |
 
-The conversation displays pending text for review. Short OK sends its displayed
-revision directly. Long OK re-records the pending message. A final transcript is
-staged first, then the device automatically confirms its atomic replacement of
-earlier pending segments. Cancellation while recording or finalizing preserves
-the earlier text. Once saving starts, Long Down leaves the page while saving
-continues. Failed re-recording preserves earlier text. Existing multi-segment drafts can be read
-as one complete joined input. Each cached input, draft or reply is bounded to
+The conversation displays the pending text for review. It lives only in device
+RAM (protocol 2, 2026-11-16): transcription is a gateway side channel that
+returns the final text and stores nothing. Short OK sends the text shown, with
+its draft serial, so a newer recording or a clear cancels a send still queued.
+Long OK re-records: a successful transcript replaces the draft, while
+cancellation, no speech (`没有听清`), a transcript over 2000 characters or a
+failed upload keeps the earlier text. Leaving the session discards the draft.
+An unsent draft keeps the device out of deep sleep while still letting the
+screen go dark; a reboot loses it. Each cached input or reply is bounded to
 16 KiB. Longer content keeps a UTF-8 prefix, leaves the rest unread on the server,
 and ends with a notice that only the beginning is shown. Sessions and settings share a
 registered top-level page cycle. Long Up advances and wraps that cycle. Additional
@@ -123,10 +126,11 @@ Selected session titles scroll horizontally. Dates and unselected rows have
 bounded single-line layouts. Active pages own their widgets and animations.
 Switching pages deletes the inactive page after loading a fixed transition screen.
 
-The gateway's index supplies the session list. Initial names are `新会话`.
-After the first successful send, the client uses the opening of the sent input as
-the title and asks Go to update Hermes. Recordings that are replaced or cleared
-before sending do not name the session. Internal IDs remain in protocol fields.
+The gateway's index supplies the session list. Long OK on the session list
+opens a new chat with a local session ID and the name `新会话`; nothing exists
+on the gateway until the first send, which creates the session and returns the
+title the gateway derived from the sent text. An abandoned recording therefore
+leaves no empty session. Internal IDs remain in protocol fields.
 The user authorized deletion of the two existing prototype sessions on
 2026-11-14. Both local deletion and Hermes synchronization completed. Their
 old title suffix handling and the v1 database migration were removed.
@@ -601,7 +605,8 @@ and accepted the revised chat spacing on `04c3dd73`.
 Recording streams mono PCM16 at 16 kHz over chunked HTTP to Go, which owns
 OpenAI transcription, provider credentials and upstream TLS/WebSocket connections.
 The device keeps a 16 KiB PCM buffer shared with spoken-reply playback, four
-session/segment metadata records and a 512-byte live transcription preview. A completed draft is loaded in full for review.
+session metadata records, a 512-byte live transcription preview and the draft
+itself, allocated to its size (at most 8000 bytes for 2000 characters).
 
 The selected exchange owns one complete user input and one complete Hermes reply
 in RAM, allocated according to their actual byte lengths. History selection loads
@@ -624,9 +629,8 @@ While waiting, Up can select the user input. Failed or interrupted replies revea
 retained text and their outcome status. Draft send and reply wait have explicit
 state labels.
 
-The device requires `whole_messages`, `draft_text`, `replace_recording`,
-`staged_recording` and `replacement_reservation` capabilities plus bounded live-transcription and session-list
-metadata, and uses `speech` and `draft_clear` when the gateway reports them. Discovery remains `_voiceagent._tcp.local`; BLUFI advertises as
+The device requires gateway protocol 2 with `bounded_paging`, `text_tail` and
+`whole_messages`, and uses `speech` when the gateway reports it. Discovery remains `_voiceagent._tcp.local`; BLUFI advertises as
 `BLUFI_AGENT`. `CONFIG_AGENT_API_KEY` configures the optional gateway credential.
 
 ## Build and validation

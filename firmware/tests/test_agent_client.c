@@ -29,39 +29,42 @@ struct fake_http {
     size_t length, read;
     int status;
     esp_http_client_method_t method;
-    char request_body[128];
+    char request_body[16384];
     size_t written;
 };
 static int response_status = 200;
 static int stream_timeout_ms;
 static const char *injected_response;
-static const char *whole_input, *whole_reply, *whole_draft;
+static const char *whole_input, *whole_reply, *whole_other;
 static int declared_extra;
 static const char *message_id = "00000000-0000-4000-8000-000000000002";
 static const char *selected_message_id = "00000000-0000-4000-8000-000000000004";
 static const char retry_response[] =
     "{\"id\":\"00000000-0000-4000-8000-000000000002\",\"state\":\"queued\","
     "\"revision\":4,\"input_bytes\":1,\"reply_bytes\":9}";
+static const char send_response[] =
+    "{\"id\":\"00000000-0000-4000-8000-000000000002\",\"state\":\"queued\",\"revision\":1,"
+    "\"input_bytes\":12,\"reply_bytes\":0,\"session\":{\"id\":\"x\",\"title\":\"测试转写\",\"state\":\"ready\"}}";
 static void (*response_hook)(void);
+
+// Every request, in order, as "<method letter> <path>\n" for the assertions.
+static char request_log[8192];
+static unsigned requests;
+static char last_body[16384];
+static unsigned dropped_sends; // Message POSTs whose response is lost.
 
 // Capture scheduling hooks are deterministic points in actual upload_audio().
 enum capture_case {
-    CAPTURE_NORMAL, CAPTURE_CANCEL_RECORDING, CAPTURE_CANCEL_FINALIZING,
-    CAPTURE_CANCEL_BEFORE_COMMIT, CAPTURE_EXIT_COMMITTING,
-    CAPTURE_LOST_ACK_ONCE, CAPTURE_LOST_ACK_TWICE, CAPTURE_SHORT,
+    CAPTURE_NORMAL, CAPTURE_CANCEL_RECORDING, CAPTURE_CANCEL_FINALIZING, CAPTURE_SHORT,
+    CAPTURE_NO_SPEECH, CAPTURE_TOO_LARGE, CAPTURE_TOO_MANY_CHARS,
 };
-static bool capture_mode, capture_running, upload_closed, stage_ready, stage_exists;
+static bool capture_mode, capture_running, cancel_accepted, audio_eof;
 static char trace_body[16384];
 static size_t trace_written;
 static unsigned trace_uploads;
 static int trace_status = 201;
-static bool server_committed, cancel_accepted, audio_eof;
-static unsigned chunks_read, cancel_attempts, commit_requests, commit_applies, abort_requests;
+static unsigned chunks_read, cancel_attempts;
 static enum capture_case capture_case;
-static char server_draft;
-static bool naming_mode; // Send, read the sent input, then PATCH the session title.
-static unsigned naming_reads, naming_patches;
-static char naming_title[128];
 static void try_cancel(void)
 {
     cancel_attempts++;
@@ -94,20 +97,8 @@ int xQueueReceive(QueueHandle_t handle, void *item, unsigned timeout)
 }
 unsigned uxQueueMessagesWaiting(QueueHandle_t handle) { return ((struct fake_queue *)handle)->count; }
 SemaphoreHandle_t xSemaphoreCreateMutex(void) { return (void *)1; }
-int xSemaphoreTake(SemaphoreHandle_t handle, unsigned timeout)
-{
-    (void)handle;(void)timeout;
-    if(capture_mode && capture_case==CAPTURE_CANCEL_BEFORE_COMMIT &&
-       upload_closed && s_view.capture==AGENT_FINALIZING && cancel_attempts==0) try_cancel();
-    return pdTRUE;
-}
-int xSemaphoreGive(SemaphoreHandle_t handle)
-{
-    (void)handle;
-    if(capture_mode && capture_case==CAPTURE_EXIT_COMMITTING &&
-       s_view.capture==AGENT_COMMITTING && cancel_attempts==0) try_cancel();
-    return pdTRUE;
-}
+int xSemaphoreTake(SemaphoreHandle_t handle, unsigned timeout) { (void)handle;(void)timeout;return pdTRUE; }
+int xSemaphoreGive(SemaphoreHandle_t handle) { (void)handle;return pdTRUE; }
 int xTaskCreate(void (*callback)(void *), const char *name, unsigned stack,
                 void *argument, unsigned priority, TaskHandle_t *task)
 {
@@ -119,7 +110,7 @@ void vTaskDelay(unsigned ticks) { (void)ticks; }
 unsigned ulTaskNotifyTake(int clear, unsigned timeout) { (void)clear;(void)timeout;return 0; }
 void xTaskNotifyGive(TaskHandle_t task) { (void)task; }
 int64_t esp_timer_get_time(void) { static int64_t time;return time += 1000; }
-void esp_fill_random(void *data, size_t size) { memset(data, 1, size); }
+void esp_fill_random(void *data, size_t size) { static unsigned char seed;memset(data, ++seed, size); }
 bool memo_net_has_ip(void) { return true; }
 esp_err_t memo_net_start(void) { return ESP_OK; }
 esp_err_t memo_net_suspend(void) { return ESP_OK; }
@@ -157,10 +148,11 @@ esp_http_client_handle_t esp_http_client_init(const esp_http_client_config_t *co
     snprintf(client->url,sizeof(client->url),"%s",config->url);
     client->method=config->method;
     client->event_handler=config->event_handler;client->user_data=config->user_data;
-    if(capture_mode && strstr(client->url,"/audio?")) {
-        CHECK(strstr(client->url,"defer_commit=1")!=NULL);
-        stage_exists=true;
-    }
+    const char *path=strstr(client->url,"/api/v1");
+    char line[400];
+    snprintf(line,sizeof(line),"%s %s\n",method_name(client->method),path?path+7:client->url);
+    if(strlen(request_log)+strlen(line)<sizeof(request_log))strcat(request_log,line);
+    requests++;
     return client;
 }
 static void emit_content_headers(esp_http_client_handle_t client)
@@ -185,82 +177,62 @@ int esp_http_client_write(esp_http_client_handle_t client,const char *data,int s
         trace_written+=(size_t)size;
         return size;
     }
-    if(capture_mode && strstr(client->url,"/audio?")) {
+    if(strstr(client->url,"/audio?")) {
         if(size==5 && memcmp(data,"0\r\n\r\n",5)==0)audio_eof=true;
-    } else if(capture_mode || naming_mode) {
-        assert(client->written+(size_t)size<sizeof(client->request_body));
-        memcpy(client->request_body+client->written,data,(size_t)size);
-        client->written+=(size_t)size;
-        client->request_body[client->written]=0;
+        return size;
     }
+    assert(client->written+(size_t)size<sizeof(client->request_body));
+    memcpy(client->request_body+client->written,data,(size_t)size);
+    client->written+=(size_t)size;
+    client->request_body[client->written]=0;
     return size;
+}
+static int64_t respond(esp_http_client_handle_t client,int status,const char *body)
+{
+    client->status=status;
+    snprintf(client->response,sizeof(client->response),"%s",body);
+    client->length=strlen(client->response);
+    return (int64_t)client->length;
 }
 int64_t esp_http_client_fetch_headers(esp_http_client_handle_t client)
 {
+    snprintf(last_body,sizeof(last_body),"%s",client->request_body);
     if(strstr(client->url,"/device/logs")) {
         trace_uploads++;
-        client->status=trace_status;
-        strcpy(client->response,"{\"id\":\"x\"}");
-        client->length=strlen(client->response);
-        return (int64_t)client->length;
+        return respond(client,trace_status,"{\"id\":\"x\"}");
+    }
+    if(strstr(client->url,"/audio?")) {
+        CHECK(audio_eof);
+        CHECK(s_view.capture==AGENT_FINALIZING);
+        if(capture_case==CAPTURE_CANCEL_FINALIZING)try_cancel();
+        if(capture_case==CAPTURE_NO_SPEECH)return respond(client,422,"{\"error\":{\"code\":\"no_speech\"}}");
+        if(capture_case==CAPTURE_TOO_LARGE) {
+            client->status=200;
+            memset(client->response,'a',AGENT_DRAFT_MAX_BYTES+1);
+            client->length=AGENT_DRAFT_MAX_BYTES+1;
+            return (int64_t)client->length;
+        }
+        if(capture_case==CAPTURE_TOO_MANY_CHARS) {
+            client->status=200;
+            memset(client->response,'a',AGENT_DRAFT_MAX_CHARS+1);
+            client->response[AGENT_DRAFT_MAX_CHARS+1]=0;
+            client->length=AGENT_DRAFT_MAX_CHARS+1;
+            return (int64_t)client->length;
+        }
+        return respond(client,200,"测试转写");
+    }
+    if(client->method==HTTP_METHOD_POST && strstr(client->url,"/api/v1/transcriptions") &&
+       !strstr(client->url,"/audio"))
+        return respond(client,201,"{\"id\":\"x\"}");
+    if(client->method==HTTP_METHOD_POST && strstr(client->url,"/messages") && !strstr(client->url,"/retry") &&
+       dropped_sends>0) {
+        dropped_sends--;
+        return -1;
     }
     client->status=response_status;
-    if(naming_mode) {
-        client->status=200;
-        if(client->method==HTTP_METHOD_POST && strstr(client->url,"/messages")) {
-            client->status=202;
-            strcpy(client->response,"{\"id\":\"00000000-0000-4000-8000-000000000002\",\"state\":\"queued\",\"revision\":1,\"input_bytes\":18,\"reply_bytes\":0}");
-        } else if(strstr(client->url,"/messages/00000000-0000-4000-8000-000000000002/text?part=input&limit=48")) {
-            naming_reads++;
-            strcpy(client->response,"{\"text\":\"打开客厅的灯\",\"offset\":0,\"end\":18,\"total\":18,\"revision\":1}");
-        } else if(client->method==HTTP_METHOD_PATCH && strstr(client->url,session_id)) {
-            naming_patches++;
-            snprintf(naming_title,sizeof(naming_title),"%s",client->request_body);
-            strcpy(client->response,"{}");
-        } else {
-            CHECK(false);strcpy(client->response,"{}");
-        }
-        client->length=strlen(client->response);
-        return (int64_t)client->length;
-    }
-    if(capture_mode) {
-        client->status=200;
-        if(strstr(client->url,"/audio?")) {
-            CHECK(audio_eof);
-            CHECK(s_view.capture==AGENT_FINALIZING);
-            stage_ready=true;
-            strcpy(client->response,"{\"revision\":7}");
-            if(capture_case==CAPTURE_CANCEL_FINALIZING)try_cancel();
-        } else if(strstr(client->url,"/commit")) {
-            CHECK(s_view.capture==AGENT_COMMITTING);
-            CHECK(strcmp(client->request_body,"{\"revision\":7}")==0);
-            commit_requests++;
-            if(!server_committed) {
-                CHECK(stage_ready);
-                server_committed=true;server_draft='B';commit_applies++;
-                stage_exists=stage_ready=false;
-            }
-            unsigned lost=0;
-            if(capture_case==CAPTURE_LOST_ACK_ONCE)lost=1;
-            if(capture_case==CAPTURE_LOST_ACK_TWICE)lost=2;
-            if(commit_requests<=lost)return -1;
-            strcpy(client->response,"{\"revision\":8}");
-        } else if(strstr(client->url,"/abort")) {
-            abort_requests++;
-            if(server_committed)strcpy(client->response,"{\"status\":\"committed\"}");
-            else {
-                stage_exists=stage_ready=false;
-                strcpy(client->response,"{\"status\":\"cancelled\"}");
-            }
-        } else {
-            CHECK(false);strcpy(client->response,"{}");
-        }
-        client->length=strlen(client->response);
-        return (int64_t)client->length;
-    }
     if (strstr(client->url,"/content") != NULL) {
         const char *value=strstr(client->url,"part=input")?whole_input:
-            strstr(client->url,"part=reply")?whole_reply:whole_draft;
+            strstr(client->url,"part=reply")?whole_reply:whole_other;
         snprintf(client->response,sizeof(client->response),"%s",value==NULL?"":value);
         emit_content_headers(client);
     } else if (injected_response != NULL) {
@@ -292,11 +264,7 @@ int esp_http_client_get_status_code(esp_http_client_handle_t client) { return cl
 esp_err_t esp_http_client_set_timeout_ms(esp_http_client_handle_t client,int timeout)
 { if (strstr(client->url,"/events?")) stream_timeout_ms=timeout;return ESP_OK; }
 esp_err_t esp_http_client_close(esp_http_client_handle_t client) { (void)client;return ESP_OK; }
-esp_err_t esp_http_client_cleanup(esp_http_client_handle_t client)
-{
-    if(capture_mode && strstr(client->url,"/audio?"))upload_closed=true;
-    free(client);return ESP_OK;
-}
+esp_err_t esp_http_client_cleanup(esp_http_client_handle_t client) { free(client);return ESP_OK; }
 
 static void dispatch(void)
 {
@@ -308,15 +276,35 @@ static void dispatch(void)
 static void setup(void)
 {
     clear_message_cache();
+    discard_draft();
     memset(&s_view,0,sizeof(s_view));
     strcpy(s_view.session_id,session_id);strcpy(s_view.text_id,session_id);
-    s_view.selection=1;s_view.connected=true;s_view.text_kind=AGENT_TEXT_DRAFT;
+    s_view.selection=1;s_view.connected=true;s_view.text_kind=AGENT_TEXT_REPLY;
     s_view.text_request=1;s_view.chat_request=1;
-    s_view.draft_revision=s_view.text.revision=8;
-    queue_fixture.count=0;response_hook=NULL;capture_mode=false;naming_mode=false;
-    injected_response=NULL;response_status=200;declared_extra=0;stream_timeout_ms=0;
-    whole_input="user question";whole_reply="assistant answer";whole_draft="reviewed draft";
+    queue_fixture.count=0;response_hook=NULL;capture_mode=false;capture_case=CAPTURE_NORMAL;
+    injected_response=NULL;response_status=200;declared_extra=0;stream_timeout_ms=0;dropped_sends=0;
+    whole_input="user question";whole_reply="assistant answer";whole_other="other content";
+    request_log[0]=0;requests=0;last_body[0]=0;
+    s_pending_message[0]=0;
     s_resync=false;
+}
+// A draft the device already holds in RAM, shown on the voice page.
+static void hold_draft(const char *text)
+{
+    discard_draft();
+    s_draft=malloc(strlen(text)+1);assert(s_draft);strcpy(s_draft,text);
+    s_view.draft_chars=utf8_chars(text);
+    s_view.draft_serial++;
+    s_view.text_kind=AGENT_TEXT_DRAFT;
+    strcpy(s_view.text_id,s_view.session_id);
+}
+// Arms the capture fake for one recording through record().
+static void arm_capture(enum capture_case test_case)
+{
+    capture_mode=true;capture_case=test_case;
+    capture_running=cancel_accepted=audio_eof=false;
+    chunks_read=cancel_attempts=0;
+    s_cancelled=false;
 }
 
 static const char turn_response[]=
@@ -389,88 +377,16 @@ static void test_oversized_content_is_bounded(void)
     CHECK(utf8_complete_prefix("你",1)==0&&utf8_complete_prefix("你",3)==3&&utf8_complete_prefix("a你",2)==1);
 }
 
-static void send_during_draft_response(void)
+static void test_raw_content_integrity(void)
 {
-    const char *previous=injected_response;
-    injected_response="{\"id\":\"00000000-0000-4000-8000-000000000002\",\"state\":\"queued\",\"revision\":1,\"input_bytes\":14,\"reply_bytes\":0}";
-    response_status=202;
-    CHECK(agent_client_send(s_view.draft_revision,s_view.selection)==ESP_OK);dispatch();
-    injected_response=previous;
-}
-static void test_send_rejects_inflight_draft_response(void)
-{
-    setup();s_view.segment_count=s_view.segment_total=1;
-    s_input_text=malloc(15);assert(s_input_text);strcpy(s_input_text,"reviewed draft");s_input_loaded=true;
-    s_view.text.total=14;
-    agent_view_t before=s_view;
-    injected_response="{\"revision\":8,\"total\":1,\"items\":[{\"id\":\"00000000-0000-4000-8000-000000000003\",\"state\":\"ready\",\"bytes\":14,\"text\":\"reviewed draft\"}]}";
-    response_hook=send_during_draft_response;
-    CHECK(poll_draft(&before));
-    CHECK(s_view.text_kind==AGENT_TEXT_REPLY&&s_view.segment_total==0);
-    CHECK(strcmp(s_input_text,"reviewed draft")==0&&s_view.turn.present);
-    CHECK(s_view.text_request>before.text_request);
-}
-
-static void test_cached_draft_review_and_reopen(void)
-{
-    setup();s_view.segment_count=s_view.segment_total=1;s_view.text_loading=s_view.chat_loading=true;
-    agent_view_t view=s_view;CHECK(poll_full_draft(&view));
-    CHECK(!s_view.text_loading&&!s_view.chat_loading&&s_view.text.total==14&&s_view.text.revision==8);
-    CHECK(agent_client_review_draft()==ESP_OK);dispatch();
-    view=s_view;CHECK(poll_full_draft(&view));
-    CHECK(!s_view.text_loading&&!s_view.chat_loading&&s_view.text.total==14&&s_view.text.revision==8);
-    command_t close={.kind=CMD_CLOSE};execute(&close);
-    CHECK(s_input_text==NULL&&s_reply_text==NULL);
-    agent_session_t session={0};strcpy(session.id,session_id);strcpy(session.title,"saved draft");
-    CHECK(agent_client_open(&session)==ESP_OK);dispatch();
-    CHECK(s_view.segments_loading);
-    injected_response="{\"revision\":8,\"total\":1,\"items\":[{\"id\":\"00000000-0000-4000-8000-000000000003\",\"state\":\"ready\",\"bytes\":14,\"text\":\"reviewed draft\"}]}";
-    view=s_view;CHECK(poll_draft(&view));
-    CHECK(s_view.text_kind==AGENT_TEXT_DRAFT);
-    view=s_view;CHECK(poll_full_draft(&view));
-    CHECK(strcmp(s_input_text,"reviewed draft")==0);
-}
-
-// Long Down clears only the draft revision on screen, like a send.
-static void test_clear_draft_uses_shown_revision(void)
-{
-    setup();s_view.segment_count=s_view.segment_total=1;s_view.draft_clear=true;
-    s_view.draft_revision=9; // A newer draft was listed but its text is not loaded yet.
-    CHECK(agent_client_clear_draft()==ESP_ERR_INVALID_STATE);
-    s_view.text.revision=9;
-    injected_response="{\"revision\":10}";
-    CHECK(agent_client_clear_draft()==ESP_OK);dispatch();
-    CHECK(s_view.draft_revision==10&&s_resync);
-    s_view.draft_clear=false;
-    CHECK(agent_client_clear_draft()==ESP_ERR_INVALID_STATE);
-}
-
-// A new session is titled from its first sent message, not from a recording
-// that may still be replaced or cleared before sending.
-static void test_first_send_names_session(void)
-{
-    setup();naming_mode=true;naming_reads=naming_patches=0;
-    s_view.segment_count=s_view.segment_total=1;s_view.text.total=18;
-    strcpy(s_view.title,"新会话");
-    CHECK(agent_client_send(8,s_view.selection)==ESP_OK);dispatch();
-    CHECK(naming_reads==1&&naming_patches==1);
-    CHECK(strcmp(naming_title,"{\"title\":\"打开客厅的灯\"}")==0);
-    CHECK(strcmp(s_view.title,"打开客厅的灯")==0);
-
-    setup();naming_mode=true;naming_reads=naming_patches=0;
-    s_view.segment_count=s_view.segment_total=1;s_view.text.total=18;
-    strcpy(s_view.title,"已有标题");
-    CHECK(agent_client_send(8,s_view.selection)==ESP_OK);dispatch();
-    CHECK(naming_reads==0&&naming_patches==0&&strcmp(s_view.title,"已有标题")==0);
-}
-
-static void test_empty_draft_returns_to_whole_turn(void)
-{
-    setup();s_view.text_loading=true;
-    injected_response="{\"revision\":9,\"total\":0,\"items\":[]}";
-    agent_view_t view=s_view;
-    CHECK(poll_draft(&view));
-    CHECK(s_view.text_kind==AGENT_TEXT_REPLY&&!s_view.text_loading&&s_view.chat_loading&&s_resync);
+    setup();char *text=NULL;content_headers_t headers;
+    const char *path="/sessions/x/messages/y/content";
+    CHECK(read_content(path,&text,&headers)==200);
+    CHECK(text&&strcmp(text,"other content")==0&&headers.revision==8);free(text);
+    whole_other="\xC3";
+    CHECK(read_content(path,&text,&headers)==0&&text==NULL);
+    whole_other="short";declared_extra=3;
+    CHECK(read_content(path,&text,&headers)==0&&text==NULL);
 }
 
 static void test_active_reply_is_fetched_once_complete(void)
@@ -494,17 +410,6 @@ static void test_active_reply_is_fetched_once_complete(void)
     CHECK(s_reply_loaded&&strcmp(s_reply_text,"hello")==0&&strcmp(s_view.message.state,"completed")==0);
 }
 
-static void test_raw_content_integrity(void)
-{
-    setup();char *text=NULL;content_headers_t headers;
-    CHECK(read_content("/draft/content",&text,&headers)==200);
-    CHECK(text&&strcmp(text,"reviewed draft")==0&&headers.revision==8);free(text);
-    whole_draft="\xC3";
-    CHECK(read_content("/draft/content",&text,&headers)==0&&text==NULL);
-    whole_draft="short";declared_extra=3;
-    CHECK(read_content("/draft/content",&text,&headers)==0&&text==NULL);
-}
-
 static void test_retry_accepts_server_message(void)
 {
     setup();s_view.text_kind=AGENT_TEXT_REPLY;
@@ -513,51 +418,150 @@ static void test_retry_accepts_server_message(void)
     CHECK(strcmp(s_view.message.id,message_id)==0&&strcmp(s_view.message.state,"queued")==0);
     CHECK(s_view.chat_loading);
 }
-static void test_capture(enum capture_case test_case)
+
+static void test_upload(enum capture_case test_case)
 {
-    setup();capture_mode=true;capture_case=test_case;
-    s_view.capture=AGENT_PREPARING;s_held=true;s_cancelled=false;
-    capture_running=upload_closed=stage_ready=stage_exists=server_committed=false;
-    cancel_accepted=audio_eof=false;
-    chunks_read=cancel_attempts=commit_requests=commit_applies=abort_requests=0;
-    server_draft='A';
-    bool success=upload_audio(session_id,"00000000-0000-4000-8000-000000000002",1);
+    setup();arm_capture(test_case);
+    s_view.capture=AGENT_PREPARING;s_held=true;
+    int status=-1;
+    char *text=upload_audio("00000000-0000-4000-8000-000000000009",&status);
+    CHECK(strstr(request_log,"P /transcriptions/00000000-0000-4000-8000-000000000009/audio?sample_rate=16000")!=NULL);
     switch(test_case) {
     case CAPTURE_NORMAL:
-        CHECK(success && audio_eof && !s_cancelled);
-        CHECK(commit_requests==1 && commit_applies==1 && server_draft=='B');
+        CHECK(text&&strcmp(text,"测试转写")==0&&status==200&&audio_eof&&!s_cancelled);
         break;
     case CAPTURE_CANCEL_RECORDING:
     case CAPTURE_CANCEL_FINALIZING:
-    case CAPTURE_CANCEL_BEFORE_COMMIT: {
-        CHECK(!success && cancel_accepted && s_cancelled);
-        CHECK(commit_requests==0 && server_draft=='A');
-        bool committed=true;
-        CHECK(resolve_recording(session_id,"00000000-0000-4000-8000-000000000002",&committed));
-        CHECK(!committed && abort_requests==1 && !stage_exists && server_draft=='A');
+        CHECK(!text&&cancel_accepted&&s_cancelled);
         break;
-    }
-    case CAPTURE_EXIT_COMMITTING:
-        CHECK(success && cancel_attempts==1 && !cancel_accepted && !s_cancelled);
-        CHECK(commit_requests==1 && commit_applies==1 && abort_requests==0 && server_draft=='B');
-        break;
-    case CAPTURE_LOST_ACK_ONCE:
-        CHECK(success && commit_requests==2 && commit_applies==1 && server_draft=='B');
-        break;
-    case CAPTURE_LOST_ACK_TWICE: {
-        CHECK(!success && commit_requests==2 && commit_applies==1 && server_draft=='B');
-        bool committed=false;
-        CHECK(resolve_recording(session_id,"00000000-0000-4000-8000-000000000002",&committed));
-        CHECK(committed && server_draft=='B' && abort_requests==1);
-        break;
-    }
     case CAPTURE_SHORT:
-        CHECK(!success && commit_requests==0 && server_draft=='A');
+        CHECK(!text&&status==0&&!audio_eof);
+        break;
+    case CAPTURE_NO_SPEECH:
+        CHECK(!text&&status==422);
+        break;
+    case CAPTURE_TOO_LARGE:
+        CHECK(!text&&status==413);
+        break;
+    case CAPTURE_TOO_MANY_CHARS:
+        CHECK(text&&utf8_chars(text)==AGENT_DRAFT_MAX_CHARS+1); // record() rejects it.
         break;
     }
-    printf("capture case=%d success=%d cancel_accepted=%d commit_requests=%u applies=%u draft=%c\n",
-        test_case,success,cancel_accepted,commit_requests,commit_applies,server_draft);
+    printf("upload case=%d status=%d text=%d cancel_accepted=%d\n",test_case,status,text!=NULL,cancel_accepted);
+    free(text);
     capture_mode=false;
+}
+
+// From the session list: the new chat stays local while recording and
+// reviewing; the first send creates and names it on the gateway.
+static void test_new_chat_is_created_by_its_first_send(void)
+{
+    setup();s_view.session_id[0]=0;s_view.text_id[0]=0;
+    arm_capture(CAPTURE_NORMAL);
+    CHECK(agent_client_record(true)==ESP_OK);dispatch();
+    CHECK(s_view.session_local&&strcmp(s_view.title,"新会话")==0&&agent_valid_id(s_view.session_id));
+    CHECK(s_view.capture==AGENT_IDLE&&s_view.text_kind==AGENT_TEXT_DRAFT&&s_view.draft_chars==4);
+    CHECK(s_view.capture_serial==1&&strstr(request_log,"/sessions")==NULL);
+    char *shown=agent_client_text_copy(s_view.selection,s_view.text_generation);
+    CHECK(shown&&strcmp(shown,"测试转写")==0);free(shown);
+    char session[37];strcpy(session,s_view.session_id);
+    capture_mode=false;
+    request_log[0]=0;
+    injected_response=send_response;response_status=202;
+    CHECK(agent_client_send(s_view.draft_serial,s_view.selection)==ESP_OK);dispatch();
+    char expected[96];snprintf(expected,sizeof(expected),"P /sessions/%s/messages\n",session);
+    CHECK(strcmp(request_log,expected)==0);
+    cJSON *body=cJSON_Parse(last_body);
+    CHECK(body&&strcmp(cJSON_GetObjectItem(body,"text")->valuestring,"测试转写")==0&&
+          cJSON_IsTrue(cJSON_GetObjectItem(body,"new_session"))&&agent_valid_id(cJSON_GetObjectItem(body,"id")->valuestring));
+    cJSON_Delete(body);
+    CHECK(!s_view.session_local&&strcmp(s_view.title,"测试转写")==0);
+    CHECK(s_view.draft_chars==0&&s_draft==NULL&&s_view.text_kind==AGENT_TEXT_REPLY);
+    CHECK(strcmp(s_input_text,"测试转写")==0&&s_view.turn.present&&s_view.chat_loading);
+}
+
+// A recording that fails, hears nothing or is too long leaves the shown draft.
+static void test_failed_rerecord_keeps_draft(enum capture_case test_case, const char *notice_text)
+{
+    setup();hold_draft("旧草稿");
+    const uint32_t serial=s_view.draft_serial;
+    arm_capture(test_case);
+    CHECK(agent_client_record(false)==ESP_OK);dispatch();
+    CHECK(s_draft&&strcmp(s_draft,"旧草稿")==0&&s_view.draft_serial==serial&&s_view.draft_chars==3);
+    CHECK(s_view.text_kind==AGENT_TEXT_DRAFT&&s_view.capture==AGENT_IDLE&&s_view.capture_serial==0);
+    CHECK(strcmp(s_view.notice,notice_text)==0);
+    capture_mode=false;
+}
+
+static void test_rerecord_replaces_draft(void)
+{
+    setup();hold_draft("旧草稿");
+    const uint32_t serial=s_view.draft_serial;
+    arm_capture(CAPTURE_NORMAL);
+    CHECK(agent_client_record(false)==ESP_OK);dispatch();
+    CHECK(strcmp(s_draft,"测试转写")==0&&s_view.draft_serial!=serial&&s_view.draft_chars==4);
+    CHECK(strstr(request_log,"P /transcriptions\n")!=NULL&&strstr(request_log,"/sessions")==NULL);
+    capture_mode=false;
+}
+
+// The sends of one draft share a message ID, so a lost response is retried
+// without storing the message twice; a new draft gets a new ID.
+static void test_lost_send_response_reuses_ids(void)
+{
+    setup();hold_draft("再说一遍");
+    injected_response=send_response;response_status=202;dropped_sends=1;
+    CHECK(agent_client_send(s_view.draft_serial,s_view.selection)==ESP_OK);dispatch();
+    char expected[160];
+    snprintf(expected,sizeof(expected),"P /sessions/%s/messages\nP /sessions/%s/messages\n",session_id,session_id);
+    CHECK(strcmp(request_log,expected)==0&&s_draft==NULL);
+    cJSON *body=cJSON_Parse(last_body);
+    CHECK(body&&!cJSON_IsTrue(cJSON_GetObjectItem(body,"new_session")));
+    char first[37];strcpy(first,cJSON_GetObjectItem(body,"id")->valuestring);
+    cJSON_Delete(body);
+    // Both attempts failing keeps the draft and its ID for the next press.
+    hold_draft("第二条");dropped_sends=2;request_log[0]=0;
+    CHECK(agent_client_send(s_view.draft_serial,s_view.selection)==ESP_OK);dispatch();
+    CHECK(s_draft&&strcmp(s_draft,"第二条")==0&&strcmp(s_view.notice,"连接失败，请重试")==0);
+    char retained[37];strcpy(retained,s_pending_message);
+    CHECK(strcmp(retained,first)!=0);
+    CHECK(agent_client_send(s_view.draft_serial,s_view.selection)==ESP_OK);dispatch();
+    body=cJSON_Parse(last_body);
+    CHECK(body&&strcmp(cJSON_GetObjectItem(body,"id")->valuestring,retained)==0);
+    cJSON_Delete(body);
+}
+
+// Clearing is local and invalidates a send still waiting in the queue.
+static void test_clear_is_local_and_cancels_queued_send(void)
+{
+    setup();hold_draft("不要了");
+    CHECK(agent_client_send(s_view.draft_serial,s_view.selection)==ESP_OK);
+    CHECK(agent_client_clear_draft()==ESP_OK);
+    CHECK(s_draft==NULL&&s_view.draft_chars==0&&s_view.text_kind==AGENT_TEXT_REPLY);
+    dispatch();
+    CHECK(requests==0&&strcmp(s_view.notice,"内容已更新，请稍候")==0);
+    CHECK(agent_client_clear_draft()==ESP_ERR_INVALID_STATE);
+    CHECK(agent_client_send(s_view.draft_serial,s_view.selection)==ESP_ERR_INVALID_STATE);
+}
+
+static void test_leaving_session_discards_draft(void)
+{
+    setup();hold_draft("离开就丢");
+    CHECK(agent_client_close_session()==ESP_OK);dispatch();
+    CHECK(s_draft==NULL&&s_view.draft_chars==0&&s_view.session_id[0]==0&&!s_view.session_local);
+}
+
+// The live transcript is polled by transcription ID while recording.
+static void test_live_transcript_polls_side_channel(void)
+{
+    setup();
+    s_view.capture=AGENT_RECORDING;s_view.text_kind=AGENT_TEXT_SEGMENT;
+    strcpy(s_view.text_id,"00000000-0000-4000-8000-000000000009");
+    agent_view_t view=s_view;
+    CHECK(poll_text(&view));
+    CHECK(strcmp(request_log,"G /transcriptions/00000000-0000-4000-8000-000000000009/text?limit=512&tail=1\n")==0);
+    CHECK(s_view.text.total==1536&&!s_view.text_loading);
+    response_status=404;view=s_view;
+    CHECK(poll_text(&view)); // Not streaming yet: not a read failure.
 }
 
 // Undo HTTP/1.1 chunked framing written by the trace upload.
@@ -649,18 +653,23 @@ int main(void)
     assert(agent_client_init()==ESP_OK);
     test_whole_pair_and_history();
     test_oversized_content_is_bounded();
-    test_send_rejects_inflight_draft_response();
-    test_cached_draft_review_and_reopen();
     test_raw_content_integrity();
-    test_empty_draft_returns_to_whole_turn();
-    test_clear_draft_uses_shown_revision();
-    test_first_send_names_session();
     test_active_reply_is_fetched_once_complete();
     test_retry_accepts_server_message();
-    for(enum capture_case item=CAPTURE_NORMAL;item<=CAPTURE_SHORT;item++)test_capture(item);
+    for(enum capture_case item=CAPTURE_NORMAL;item<=CAPTURE_TOO_MANY_CHARS;item++)test_upload(item);
+    test_new_chat_is_created_by_its_first_send();
+    test_rerecord_replaces_draft();
+    test_failed_rerecord_keeps_draft(CAPTURE_NO_SPEECH,"没有听清，请再说一次");
+    test_failed_rerecord_keeps_draft(CAPTURE_TOO_LARGE,"超过 2000 字，请缩短后重录");
+    test_failed_rerecord_keeps_draft(CAPTURE_TOO_MANY_CHARS,"超过 2000 字，请缩短后重录");
+    test_lost_send_response_reuses_ids();
+    test_clear_is_local_and_cancels_queued_send();
+    test_leaving_session_discards_draft();
+    test_live_transcript_polls_side_channel();
     test_failure_report_upload();
     test_follows_newer_turn_from_other_client();
     clear_message_cache();
+    discard_draft();
     printf("client regression assertions failed=%u\n",failed);
     return failed?1:0;
 }

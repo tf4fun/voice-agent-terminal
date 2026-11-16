@@ -3,14 +3,15 @@ package store
 import (
 	"context"
 	"errors"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/tf4fun/voice-agent-terminal/server/internal/model"
 )
 
+// fixture opens a store with one ready session that has no messages yet.
 func fixture(t *testing.T) (*Store, string) {
 	t.Helper()
 	st, err := Open(t.TempDir())
@@ -19,91 +20,118 @@ func fixture(t *testing.T) (*Store, string) {
 	}
 	t.Cleanup(func() { st.Close() })
 	id := model.NewID()
-	if _, err := st.BeginSession(context.Background(), id, "测试会话"); err != nil {
-		t.Fatal(err)
-	}
-	if err := st.SetSessionReady(context.Background(), id); err != nil {
+	now := time.Now().UnixMilli()
+	if _, err := st.db.Exec("INSERT INTO sessions(id,title,state,created_at,updated_at) VALUES(?,?,'ready',?,?)", id, "测试会话", now, now); err != nil {
 		t.Fatal(err)
 	}
 	return st, id
 }
 
-func TestDraftSnapshotAndLateRecognition(t *testing.T) {
+func TestFirstSendCreatesTitledSessionWithItsMessage(t *testing.T) {
 	ctx := context.Background()
-	st, session := fixture(t)
-	first, second := model.NewID(), model.NewID()
-	revision, err := st.AddSegment(ctx, session, first, "第一段", 1)
+	st, err := Open(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	revision, err = st.AddSegment(ctx, session, second, "", revision)
-	if err != nil {
+	defer st.Close()
+	session, id := model.NewID(), model.NewID()
+	if _, _, err := st.Send(ctx, session, id, "m", "scope", "你好", false); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("send to an unknown session without create=%v", err)
+	}
+	message, created, err := st.Send(ctx, session, id, "m", "scope", "\n  推荐一部好电影，理由在三十个字以内。\n第二行", true)
+	if err != nil || !created || message.State != "queued" {
+		t.Fatal(message, created, err)
+	}
+	current, err := st.Session(ctx, session)
+	if err != nil || current.State != "creating" || current.Title != "推荐一部好电影，理由在三十个字以内。" {
+		t.Fatalf("session=%+v %v", current, err)
+	}
+	// The first message waits until Hermes holds its session.
+	if _, err := st.Claim(ctx); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("claimed before the session was ready: %v", err)
+	}
+	if err := st.SetSessionReady(ctx, session); err != nil {
 		t.Fatal(err)
 	}
-	generation, err := st.BeginCaptureMode(ctx, session, second, revision, CaptureAppend)
-	if err != nil {
-		t.Fatal(err)
-	}
-	revision, err = st.UpdateTranscript(ctx, session, second, generation, "还没说完", "capturing")
-	if err != nil {
-		t.Fatal(err)
-	}
-	stale := revision
-	revision, err = st.EditSegment(ctx, session, second, "", revision, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := st.UpdateTranscript(ctx, session, second, generation, "迟到结果", "ready"); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("late update: %v", err)
-	}
-	messageID := model.NewID()
-	if _, err := st.Send(ctx, session, messageID, "hermes-agent", "scope", stale); !errors.Is(err, ErrStale) {
-		t.Fatalf("stale send: %v", err)
-	}
-	message, err := st.Send(ctx, session, messageID, "hermes-agent", "scope", revision)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if message.Input != "第一段" {
-		t.Fatal(message.Input)
-	}
-	repeated, err := st.Send(ctx, session, messageID, "changed-model", "scope", revision)
-	if err != nil || repeated.ID != message.ID || repeated.Model != "hermes-agent" {
-		t.Fatalf("repeat changed snapshot: %+v %v", repeated, err)
-	}
-	if _, err := st.Send(ctx, session, messageID, "hermes-agent", "scope", revision+1); !errors.Is(err, ErrConflict) {
-		t.Fatal(err)
-	}
-	current, parts, _, err := st.Draft(ctx, session, 4, 0)
-	if err != nil || len(parts) != 0 {
-		t.Fatalf("draft after send: %+v %v", parts, err)
-	}
-	if _, err := st.AddSegment(ctx, session, model.NewID(), "接下来再说", current.Revision); err != nil {
-		t.Fatal(err)
+	claimed, err := st.Claim(ctx)
+	if err != nil || claimed.ID != id {
+		t.Fatal(claimed, err)
 	}
 }
 
-func TestConcurrentSendAdmitsOneSnapshot(t *testing.T) {
+func TestSendIsIdempotentByMessageID(t *testing.T) {
 	ctx := context.Background()
 	st, session := fixture(t)
-	revision, err := st.AddSegment(ctx, session, model.NewID(), "共同草稿", 1)
+	id := model.NewID()
+	first, created, err := st.Send(ctx, session, id, "m", "scope", "同一条", true)
+	if err != nil || created {
+		t.Fatal(first, created, err)
+	}
+	again, created, err := st.Send(ctx, session, id, "m", "scope", "同一条", true)
+	if err != nil || created || again.ID != first.ID || again.Revision != first.Revision {
+		t.Fatalf("lost-response retry: %+v %v %v", again, created, err)
+	}
+	if _, _, err := st.Send(ctx, session, id, "m", "scope", "改过的文字", false); !errors.Is(err, ErrConflict) {
+		t.Fatalf("reused ID with other input=%v", err)
+	}
+	other := model.NewID()
+	if _, _, err := st.Send(ctx, other, id, "m", "scope", "同一条", true); !errors.Is(err, ErrConflict) {
+		t.Fatalf("reused ID in another session=%v", err)
+	}
+	if _, err := st.Session(ctx, other); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("a rejected send left a session behind: %v", err)
+	}
+}
+
+func TestSendRejectsEmptyOversizedBusyAndDeleted(t *testing.T) {
+	ctx := context.Background()
+	st, session := fixture(t)
+	if _, _, err := st.Send(ctx, session, model.NewID(), "m", "scope", "", false); !errors.Is(err, ErrConflict) {
+		t.Fatalf("empty input=%v", err)
+	}
+	if _, _, err := st.Send(ctx, session, model.NewID(), "m", "scope", string(make([]byte, model.MaxInputBytes+1)), false); !errors.Is(err, ErrLimit) {
+		t.Fatalf("oversized input=%v", err)
+	}
+	if _, _, err := st.Send(ctx, session, model.NewID(), "m", "scope", "第一条", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := st.Send(ctx, session, model.NewID(), "m", "scope", "第二条", false); !errors.Is(err, ErrBusy) {
+		t.Fatalf("second active message=%v", err)
+	}
+	empty, other := fixture(t)
+	if err := empty.BeginDelete(ctx, other); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := empty.Send(ctx, other, model.NewID(), "m", "scope", "迟到", true); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("send to a deleting session=%v", err)
+	}
+}
+
+func TestConcurrentSendAdmitsOneMessage(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	var accepted atomic.Int32
+	defer st.Close()
+	session := model.NewID() // Concurrent first sends race to create it.
+	var accepted, created atomic.Int32
 	var workers sync.WaitGroup
 	for index := 0; index < 12; index++ {
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
-			if _, err := st.Send(ctx, session, model.NewID(), "hermes-agent", "scope", revision); err == nil {
+			if _, made, err := st.Send(ctx, session, model.NewID(), "hermes-agent", "scope", "共同输入", true); err == nil {
 				accepted.Add(1)
+				if made {
+					created.Add(1)
+				}
 			}
 		}()
 	}
 	workers.Wait()
-	if accepted.Load() != 1 {
-		t.Fatalf("accepted %d sends", accepted.Load())
+	if accepted.Load() != 1 || created.Load() != 1 {
+		t.Fatalf("accepted %d sends, created %d sessions", accepted.Load(), created.Load())
 	}
 }
 
@@ -114,17 +142,12 @@ func TestRestartKeepsInputAndRequiresSameMessageRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	session, segment := model.NewID(), model.NewID()
-	_, _ = st.BeginSession(ctx, session, "恢复")
+	session := model.NewID()
+	message, _, err := st.Send(ctx, session, model.NewID(), "hermes-agent", "scope", "保留文字", true)
+	if err != nil {
+		t.Fatal(err)
+	}
 	_ = st.SetSessionReady(ctx, session)
-	revision, err := st.AddSegment(ctx, session, segment, "保留文字", 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	message, err := st.Send(ctx, session, model.NewID(), "hermes-agent", "scope", revision)
-	if err != nil {
-		t.Fatal(err)
-	}
 	if _, err := st.Claim(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -156,108 +179,5 @@ func TestRestartKeepsInputAndRequiresSameMessageRecovery(t *testing.T) {
 	claimed, err := st.Claim(ctx)
 	if err != nil || claimed.ID != message.ID {
 		t.Fatalf("retry: %+v %v", claimed, err)
-	}
-}
-
-func TestEditingRetiresRecognitionGenerationAndLimitsDraft(t *testing.T) {
-	ctx := context.Background()
-	st, session := fixture(t)
-	segment := model.NewID()
-	revision, err := st.AddSegment(ctx, session, segment, "", 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	generation, err := st.BeginCaptureMode(ctx, session, segment, revision, CaptureAppend)
-	if err != nil {
-		t.Fatal(err)
-	}
-	current, _, _, _ := st.Draft(ctx, session, 4, 0)
-	revision, err = st.EditSegment(ctx, session, segment, "手动编辑", current.Revision, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := st.UpdateTranscript(ctx, session, segment, generation, "迟到覆盖", "ready"); !errors.Is(err, ErrStale) {
-		t.Fatal(err)
-	}
-	if _, err := st.AddSegment(ctx, session, model.NewID(), strings.Repeat("a", model.MaxDraftBytes), revision); !errors.Is(err, ErrLimit) {
-		t.Fatal(err)
-	}
-}
-
-func TestRerecordReplacesOnlyAfterSuccessfulFinalText(t *testing.T) {
-	ctx := context.Background()
-	st, session := fixture(t)
-	old, next := model.NewID(), model.NewID()
-	revision, err := st.AddSegment(ctx, session, old, "原稿", 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	revision, err = st.AddSegment(ctx, session, next, "", revision)
-	if err != nil {
-		t.Fatal(err)
-	}
-	generation, err := st.BeginCaptureMode(ctx, session, next, revision, CaptureReplace)
-	if err != nil {
-		t.Fatal(err)
-	}
-	revision, err = st.UpdateTranscript(ctx, session, next, generation, "临时", "capturing")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := st.Send(ctx, session, model.NewID(), "model", "scope", revision); !errors.Is(err, ErrBusy) {
-		t.Fatalf("send while recording: %v", err)
-	}
-	text, _, err := st.DraftText(ctx, session)
-	if err != nil || text != "原稿" {
-		t.Fatalf("old text lost during capture: %q %v", text, err)
-	}
-	revision, err = st.UpdateTranscript(ctx, session, next, generation, "重说的新稿", "ready")
-	if err != nil {
-		t.Fatal(err)
-	}
-	text, observedRevision, err := st.DraftText(ctx, session)
-	if err != nil || text != "重说的新稿" || observedRevision != revision {
-		t.Fatalf("replacement: %q %d %v", text, observedRevision, err)
-	}
-	if _, err := st.Segment(ctx, session, old); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("old segment remains: %v", err)
-	}
-	if _, err := st.UpdateTranscript(ctx, session, next, generation, "迟到", "ready"); !errors.Is(err, ErrStale) {
-		t.Fatalf("late final: %v", err)
-	}
-	message, err := st.Send(ctx, session, model.NewID(), "model", "scope", revision)
-	if err != nil || message.Input != "重说的新稿" {
-		t.Fatalf("send snapshot: %q %v", message.Input, err)
-	}
-}
-
-func TestFailedOrEmptyRerecordPreservesOriginalDraft(t *testing.T) {
-	for _, emptyFinal := range []bool{false, true} {
-		t.Run(map[bool]string{false: "failed", true: "empty"}[emptyFinal], func(t *testing.T) {
-			ctx := context.Background()
-			st, session := fixture(t)
-			old, next := model.NewID(), model.NewID()
-			revision, _ := st.AddSegment(ctx, session, old, "保留原稿", 1)
-			revision, _ = st.AddSegment(ctx, session, next, "", revision)
-			generation, err := st.BeginCaptureMode(ctx, session, next, revision, CaptureReplace)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if emptyFinal {
-				if _, err := st.UpdateTranscript(ctx, session, next, generation, "  ", "ready"); !errors.Is(err, ErrConflict) {
-					t.Fatalf("empty replacement: %v", err)
-				}
-			}
-			if _, err := st.UpdateTranscript(ctx, session, next, generation, "失败的临时内容", "failed"); err != nil {
-				t.Fatal(err)
-			}
-			text, _, err := st.DraftText(ctx, session)
-			if err != nil || text != "保留原稿" {
-				t.Fatalf("rollback: %q %v", text, err)
-			}
-			if _, err := st.Segment(ctx, session, next); !errors.Is(err, ErrNotFound) {
-				t.Fatalf("failed replacement retained: %v", err)
-			}
-		})
 	}
 }

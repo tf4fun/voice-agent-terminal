@@ -238,12 +238,13 @@ static void scene_voice(const char *out, const char *suffix)
 
     voice_session(true, "completed");
     s_view.text_kind = AGENT_TEXT_DRAFT;
-    s_view.segment_total = 1;
     g_chat_text = voice_draft;
+    s_view.draft_chars = 43; // Characters in voice_draft.
     show(AGENT_PAGE_VOICE);
     frame(out, "15-voice-draft", suffix);
 
     g_chat_text = "帮我查一下这周六白云山的天气，如果不下雨，推荐一条半天能走完的路线，最好顺路吃个早茶。我们一共四个人，有一位膝盖不太好，尽量少走台阶。另外想知道停车方不方便，南门和西门哪边更好停。";
+    s_view.draft_chars = 88;
     s_view.text_generation++;
     render();
     lv_obj_scroll_to_y(s_voice_panel_scroll, 2 * memo_font_label()->line_height + 2 * AGENT_CHAT_LINE_SPACE, LV_ANIM_OFF);

@@ -49,12 +49,10 @@ func readSpeech(t *testing.T, e *environment, path string) []speechFrame {
 
 func TestReplySpeechStreamsSentencesAndAudio(t *testing.T) {
 	e := setup(t)
-	session, segment, message := model.NewID(), model.NewID(), model.NewID()
+	session, message := model.NewID(), model.NewID()
 	base := "/api/v1/sessions/" + session
-	e.request(t, "POST", "/api/v1/sessions", map[string]string{"id": session, "title": "朗读"}, 201)
 	path := base + "/messages/" + message + "/speech"
-	e.request(t, "POST", base+"/segments", map[string]any{"id": segment, "revision": 1, "text": "读一下"}, 201)
-	e.request(t, "POST", base+"/messages", map[string]any{"id": message, "revision": 2}, 202)
+	e.request(t, "POST", base+"/messages", map[string]any{"id": message, "text": "读一下", "new_session": true}, 202)
 	e.request(t, "GET", path, nil, 503) // No synthesizer configured.
 	e.service.TTS = tts.Fake{}
 	// Opened while the reply may still be streaming; speech starts once it is complete.
@@ -97,18 +95,4 @@ func TestReplySpeechStreamsSentencesAndAudio(t *testing.T) {
 	}
 	e.request(t, "GET", path+"?offset=x", nil, 400)
 	e.request(t, "GET", base+"/messages/"+model.NewID()+"/speech", nil, 404)
-}
-
-func TestClearDraftRetiresAllSegmentsAtTheReviewedRevision(t *testing.T) {
-	e := setup(t)
-	session := model.NewID()
-	base := "/api/v1/sessions/" + session
-	e.request(t, "POST", "/api/v1/sessions", map[string]string{"id": session, "title": "清空"}, 201)
-	e.request(t, "POST", base+"/segments", map[string]any{"id": model.NewID(), "revision": 1, "text": "第一段"}, 201)
-	e.request(t, "POST", base+"/segments", map[string]any{"id": model.NewID(), "revision": 2, "text": "第二段"}, 201)
-	e.request(t, "DELETE", base+"/draft", map[string]any{"revision": 2}, 409) // Stale review.
-	e.request(t, "DELETE", base+"/draft", map[string]any{"revision": 3}, 200)
-	if text := string(e.request(t, "GET", base+"/draft/content", nil, 200)); text != "" {
-		t.Fatalf("draft after clear: %q", text)
-	}
 }

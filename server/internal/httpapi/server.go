@@ -34,7 +34,7 @@ func New(service *gateway.Service) http.Handler {
 	mux.HandleFunc("GET /ui/icon.svg", managementAsset(managementIcon, "image/svg+xml"))
 	handle := func(pattern string, handler http.HandlerFunc) {
 		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
-			for _, parameter := range []string{"session", "segment", "message"} {
+			for _, parameter := range []string{"session", "transcription", "message"} {
 				if value := r.PathValue(parameter); value != "" && !model.ValidID(value) {
 					writeError(w, 400, "invalid_id")
 					return
@@ -50,21 +50,9 @@ func New(service *gateway.Service) http.Handler {
 	handle("GET /api/v1/server", s.capabilities)
 	handle("GET /api/v1/events", s.events)
 	handle("GET /api/v1/sessions", s.sessions)
-	handle("POST /api/v1/sessions", s.createSession)
 	handle("GET /api/v1/sessions/{session}", s.session)
 	handle("PATCH /api/v1/sessions/{session}", s.renameSession)
 	handle("DELETE /api/v1/sessions/{session}", s.deleteSession)
-	handle("GET /api/v1/sessions/{session}/draft", s.draft)
-	handle("GET /api/v1/sessions/{session}/draft/text", s.draftText)
-	handle("GET /api/v1/sessions/{session}/draft/content", s.draftContent)
-	handle("DELETE /api/v1/sessions/{session}/draft", s.clearDraft)
-	handle("POST /api/v1/sessions/{session}/segments", s.addSegment)
-	handle("PATCH /api/v1/sessions/{session}/segments/{segment}", s.editSegment)
-	handle("DELETE /api/v1/sessions/{session}/segments/{segment}", s.editSegment)
-	handle("GET /api/v1/sessions/{session}/segments/{segment}/text", s.segmentText)
-	handle("POST /api/v1/sessions/{session}/segments/{segment}/audio", s.audio)
-	handle("POST /api/v1/sessions/{session}/segments/{segment}/commit", s.commitSegment)
-	handle("POST /api/v1/sessions/{session}/segments/{segment}/abort", s.abortSegment)
 	handle("POST /api/v1/sessions/{session}/messages", s.send)
 	handle("GET /api/v1/sessions/{session}/messages", s.messages)
 	handle("GET /api/v1/sessions/{session}/conversation", s.conversation)
@@ -74,6 +62,9 @@ func New(service *gateway.Service) http.Handler {
 	handle("GET /api/v1/sessions/{session}/messages/{message}/text", s.messageText)
 	handle("POST /api/v1/sessions/{session}/messages/{message}/retry", s.retry)
 	handle("GET /api/v1/sessions/{session}/messages/{message}/speech", s.speech)
+	handle("POST /api/v1/transcriptions", s.prepareTranscription)
+	handle("POST /api/v1/transcriptions/{transcription}/audio", s.audio)
+	handle("GET /api/v1/transcriptions/{transcription}/text", s.transcriptText)
 	handle("POST /api/v1/device/logs", s.addDeviceReport)
 	handle("GET /api/v1/device/logs", s.deviceReports)
 	handle("GET /api/v1/device/logs/{report}", s.deviceReport)
@@ -179,14 +170,14 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) capabilities(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{
-		"service": "voice-agent-server", "protocol": 1, "version": Version,
+		"service": "voice-agent-server", "protocol": 2, "version": Version,
 		"chat": s.service.Hermes.Enabled(), "transcription": s.service.ASR.Enabled(), "asr_provider": s.service.Config.ASRProvider,
-		"drafts": true, "audio_format": "pcm_s16le", "sample_rates": []int{16000, 24000},
-		"bounded_paging": true, "text_before": true, "text_tail": true, "session_titles": true,
-		"draft_text": true, "replace_recording": true, "staged_recording": true, "replacement_reservation": true, "conversation_windows": true, "whole_messages": true, "reply_sse": true,
-		"max_draft_bytes": model.MaxDraftBytes, "max_segments": model.MaxSegments,
+		"audio_format": "pcm_s16le", "sample_rates": []int{16000, 24000},
+		"bounded_paging": true, "text_before": true, "text_tail": true,
+		"conversation_windows": true, "whole_messages": true, "reply_sse": true,
+		"max_input_bytes": model.MaxInputBytes, "max_transcript_bytes": model.MaxTranscriptBytes,
 		"max_text_window_bytes": model.WindowBytes, "max_event_bytes": 1024,
-		"max_audio_ms": s.service.Config.CaptureTimeout.Milliseconds(), "device_logs": true, "draft_clear": true,
+		"max_audio_ms": s.service.Config.CaptureTimeout.Milliseconds(), "device_logs": true,
 		"speech": s.service.SpeechEnabled(), "speech_format": "pcm_s16le", "speech_rate": 16000,
 	})
 }
@@ -206,39 +197,6 @@ func (s *Server) sessions(w http.ResponseWriter, r *http.Request) {
 		items = items[:limit]
 	}
 	writeJSON(w, 200, map[string]any{"items": items, "limit": limit, "offset": offset, "has_more": hasMore})
-}
-
-func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		ID    string `json:"id"`
-		Title string `json:"title"`
-	}
-	if !readJSON(w, r, &body) {
-		return
-	}
-	body.Title = strings.TrimSpace(body.Title)
-	if !model.ValidID(body.ID) || body.Title == "" || len(body.Title) > 256 {
-		writeError(w, 400, "invalid_session")
-		return
-	}
-	session, err := s.service.Store.BeginSession(r.Context(), body.ID, body.Title)
-	if err != nil {
-		storeError(w, err)
-		return
-	}
-	status := 201
-	if !s.service.Hermes.Enabled() && session.State == "creating" {
-		status = 202
-		_ = s.service.Store.SessionError(r.Context(), session.ID, "hermes_not_configured")
-	} else if err := s.service.Reconcile(r.Context(), session); err != nil {
-		status = 202
-	}
-	session, err = s.service.Store.Session(r.Context(), body.ID)
-	if err != nil {
-		storeError(w, err)
-		return
-	}
-	writeJSON(w, status, session)
 }
 
 func (s *Server) session(w http.ResponseWriter, r *http.Request) {
@@ -293,29 +251,15 @@ func (s *Server) deleteSession(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]string{"id": id, "state": "deleted"})
 }
 
-func (s *Server) draft(w http.ResponseWriter, r *http.Request) {
-	limit, offset, ok := paging(w, r)
-	if !ok {
-		return
-	}
-	session, items, total, err := s.service.Store.Draft(r.Context(), r.PathValue("session"), limit, offset)
-	if err != nil {
-		storeError(w, err)
-		return
-	}
-	hasMore := offset+len(items) < total
-	writeJSON(w, 200, map[string]any{"revision": session.Revision, "items": items, "limit": limit, "offset": offset, "has_more": hasMore, "total": total})
-}
-
-// prepareWait bounds the transcriber handshake during segment creation.
+// prepareWait bounds the transcriber handshake while the device shows its
+// preparing animation, below the device's 4 s request timeout.
 const prepareWait = 3 * time.Second
 
-func (s *Server) addSegment(w http.ResponseWriter, r *http.Request) {
+// prepareTranscription opens the upstream transcriber for the recording that
+// follows, so it starts against a ready session. It stores nothing.
+func (s *Server) prepareTranscription(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		ID       string `json:"id"`
-		Revision int64  `json:"revision"`
-		Text     string `json:"text"`
-		Replace  bool   `json:"replace"`
+		ID string `json:"id"`
 	}
 	if !readJSON(w, r, &body) {
 		return
@@ -324,112 +268,21 @@ func (s *Server) addSegment(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "invalid_id")
 		return
 	}
-	var revision int64
-	var err error
-	if body.Replace {
-		if body.Text != "" {
-			writeError(w, 400, "invalid_replacement")
-			return
-		}
-		revision, err = s.service.Store.ReserveReplacement(r.Context(), r.PathValue("session"), body.ID, body.Revision)
-	} else {
-		revision, err = s.service.Store.AddSegment(r.Context(), r.PathValue("session"), body.ID, body.Text, body.Revision)
-	}
-	if err != nil {
-		storeError(w, err)
+	if !s.service.ASR.Enabled() {
+		writeError(w, 503, "openai_not_configured")
 		return
 	}
-	s.service.Events.Publish(events.Event{Type: "draft.updated", SessionID: r.PathValue("session"), SegmentID: body.ID, Revision: revision})
-	if body.Text == "" {
-		// The device is still on its preparing screen; open the transcriber now
-		// so recording starts against a ready session. Bounded below the
-		// device's 4 s request timeout.
-		s.service.PrepareCapture(body.ID, prepareWait)
-	}
-	writeJSON(w, 201, map[string]any{"id": body.ID, "revision": revision})
+	s.service.PrepareCapture(body.ID, prepareWait)
+	writeJSON(w, 201, map[string]string{"id": body.ID})
 }
 
-// clearDraft discards the whole reviewed draft (the device's long-press Down).
-func (s *Server) clearDraft(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Revision int64 `json:"revision"`
-	}
-	if !readJSON(w, r, &body) {
-		return
-	}
-	revision, err := s.service.Store.ClearDraft(r.Context(), r.PathValue("session"), body.Revision)
-	if err != nil {
-		storeError(w, err)
-		return
-	}
-	s.service.Events.Publish(events.Event{Type: "draft.updated", SessionID: r.PathValue("session"), Revision: revision})
-	writeJSON(w, 200, map[string]any{"revision": revision})
-}
-
-func (s *Server) editSegment(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Revision int64  `json:"revision"`
-		Text     string `json:"text"`
-	}
-	if !readJSON(w, r, &body) {
-		return
-	}
-	revision, retiredGeneration, err := s.service.Store.EditSegmentWithGeneration(r.Context(), r.PathValue("session"), r.PathValue("segment"), body.Text, body.Revision, r.Method == "DELETE")
-	if err != nil {
-		storeError(w, err)
-		return
-	}
-	s.service.CancelCaptureGeneration(r.PathValue("segment"), retiredGeneration)
-	s.service.Events.Publish(events.Event{Type: "draft.updated", SessionID: r.PathValue("session"), SegmentID: r.PathValue("segment"), Revision: revision})
-	writeJSON(w, 200, map[string]any{"revision": revision})
-}
-
-func (s *Server) commitSegment(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Revision int64 `json:"revision"`
-	}
-	if !readJSON(w, r, &body) {
-		return
-	}
-	revision, err := s.service.Store.CommitReplacement(r.Context(), r.PathValue("session"), r.PathValue("segment"), body.Revision)
-	if err != nil {
-		storeError(w, err)
-		return
-	}
-	s.service.Events.Publish(events.Event{Type: "draft.updated", SessionID: r.PathValue("session"), SegmentID: r.PathValue("segment"), Revision: revision, Status: "ready"})
-	writeJSON(w, 200, map[string]any{"revision": revision})
-}
-
-func (s *Server) abortSegment(w http.ResponseWriter, r *http.Request) {
-	defer r.Body.Close()
-	status, revision, err := s.service.Store.AbortReplacement(r.Context(), r.PathValue("session"), r.PathValue("segment"))
-	if err != nil {
-		storeError(w, err)
-		return
-	}
-	if status == "cancelled" {
-		s.service.CancelCapture(r.PathValue("segment"))
-		s.service.Events.Publish(events.Event{Type: "draft.updated", SessionID: r.PathValue("session"), SegmentID: r.PathValue("segment"), Revision: revision, Status: status})
-	}
-	writeJSON(w, 200, map[string]any{"status": status, "revision": revision})
-}
-
-func (s *Server) draftText(w http.ResponseWriter, r *http.Request) {
-	text, revision, err := s.service.Store.DraftText(r.Context(), r.PathValue("session"))
-	if err != nil {
-		storeError(w, err)
+func (s *Server) transcriptText(w http.ResponseWriter, r *http.Request) {
+	text, revision, ok := s.service.TranscriptText(r.PathValue("transcription"))
+	if !ok {
+		writeError(w, 404, "not_found")
 		return
 	}
 	textWindow(w, r, text, revision)
-}
-
-func (s *Server) segmentText(w http.ResponseWriter, r *http.Request) {
-	segment, revision, err := s.service.Store.DraftSegment(r.Context(), r.PathValue("session"), r.PathValue("segment"))
-	if err != nil {
-		storeError(w, err)
-		return
-	}
-	textWindow(w, r, segment.Text, revision)
 }
 
 func textWindow(w http.ResponseWriter, r *http.Request, text string, revision int64) {
@@ -525,46 +378,32 @@ func (s *Server) audio(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "invalid_sample_rate")
 		return
 	}
-	revision, err := strconv.ParseInt(r.URL.Query().Get("revision"), 10, 64)
-	if err != nil {
-		writeError(w, 400, "invalid_revision")
-		return
-	}
 	controller := http.NewResponseController(w)
 	_ = controller.SetReadDeadline(time.Now().Add(s.service.Config.CaptureRequestTimeout()))
 	_ = controller.EnableFullDuplex()
 	maximum := min(s.service.Config.MaxAudioBytes, int64(rate)*2*int64(s.service.Config.CaptureTimeout/time.Second))
 	input := &audioBody{ReadCloser: http.MaxBytesReader(w, r.Body, maximum), controller: controller}
-	replace := r.URL.Query().Get("replace")
-	if replace != "" && replace != "0" && replace != "1" {
-		writeError(w, 400, "invalid_replace")
-		return
-	}
-	deferCommit := r.URL.Query().Get("defer_commit")
-	if (deferCommit != "" && deferCommit != "0" && deferCommit != "1") || (deferCommit == "1" && replace != "1") {
-		writeError(w, 400, "invalid_defer_commit")
-		return
-	}
-	err = s.service.Capture(r.Context(), r.PathValue("session"), r.PathValue("segment"), revision, input, rate, replace == "1", deferCommit == "1")
+	text, err := s.service.Transcribe(r.Context(), r.PathValue("transcription"), input, rate)
 	if err != nil {
 		var maximum *http.MaxBytesError
-		if errors.As(err, &maximum) {
+		switch {
+		case errors.As(err, &maximum):
 			writeError(w, 413, "audio_too_large")
-			return
-		}
-		if errors.Is(err, store.ErrStale) || errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrBusy) || errors.Is(err, store.ErrConflict) || errors.Is(err, store.ErrLimit) {
+		case errors.Is(err, gateway.ErrNoSpeech):
+			writeError(w, 422, "no_speech")
+		case errors.Is(err, store.ErrBusy) || errors.Is(err, store.ErrConflict) || errors.Is(err, store.ErrLimit):
 			storeError(w, err)
-			return
+		default:
+			writeError(w, 502, "transcription_failed")
 		}
-		writeError(w, 502, "transcription_failed")
 		return
 	}
-	session, err := s.service.Store.Session(r.Context(), r.PathValue("session"))
-	if err != nil {
-		storeError(w, err)
-		return
-	}
-	writeJSON(w, 200, map[string]any{"status": "ready", "revision": session.Revision})
+	// The final text is the whole body, so the device reads it as its draft.
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Content-Length", strconv.Itoa(len(text)))
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(200)
+	_, _ = io.WriteString(w, text)
 }
 
 type audioBody struct {
@@ -589,10 +428,13 @@ func (body *audioBody) Close() error {
 	return body.ReadCloser.Close()
 }
 
+// send queues one complete input. NewSession creates the session with it, so
+// a session exists only once its first message does.
 func (s *Server) send(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		ID       string `json:"id"`
-		Revision int64  `json:"revision"`
+		ID         string `json:"id"`
+		Text       string `json:"text"`
+		NewSession bool   `json:"new_session"`
 	}
 	if !readJSON(w, r, &body) {
 		return
@@ -601,17 +443,44 @@ func (s *Server) send(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "invalid_id")
 		return
 	}
+	if strings.TrimSpace(body.Text) == "" {
+		writeError(w, 400, "empty_input")
+		return
+	}
+	if len(body.Text) > model.MaxInputBytes {
+		writeError(w, 413, "input_too_large")
+		return
+	}
 	if !s.service.Hermes.Enabled() {
 		writeError(w, 503, "hermes_not_configured")
 		return
 	}
-	message, err := s.service.Store.Send(r.Context(), r.PathValue("session"), body.ID, s.service.Config.HermesModel, s.service.Hermes.Scope(), body.Revision)
+	sessionID := r.PathValue("session")
+	message, created, err := s.service.Store.Send(r.Context(), sessionID, body.ID, s.service.Config.HermesModel, s.service.Hermes.Scope(), body.Text, body.NewSession)
 	if err != nil {
 		storeError(w, err)
 		return
 	}
+	session, err := s.service.Store.Session(r.Context(), sessionID)
+	if err != nil {
+		storeError(w, err)
+		return
+	}
+	if session.State == "creating" {
+		// A failed Hermes create leaves the message queued for the reconcile loop.
+		_ = s.service.Reconcile(r.Context(), session)
+		if refreshed, err := s.service.Store.Session(r.Context(), sessionID); err == nil {
+			session = refreshed
+		}
+	}
+	if created {
+		s.service.Events.Publish(events.Event{Type: "session.updated", SessionID: sessionID})
+	}
 	s.service.Wake()
-	writeJSON(w, 202, message)
+	writeJSON(w, 202, struct {
+		model.Message
+		Session model.Session `json:"session"`
+	}{message, session})
 }
 
 func (s *Server) messages(w http.ResponseWriter, r *http.Request) {

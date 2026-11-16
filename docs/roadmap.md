@@ -6,6 +6,17 @@
 
 ## Current increment
 
+Protocol 2 (2026-11-16) makes voice input equivalent to typing. Transcription is
+a gateway side channel that returns text and stores nothing; the draft stays on
+the composing client (device RAM, bounded to 2000 characters with a visible
+count; web page memory). A send carries the complete text, and a new session is
+created and titled by its first send, so no empty sessions arise and neither the
+gateway nor Hermes needs to reclaim any. Drafts no longer synchronize between
+the device and the web page. An unsent device draft blocks deep sleep but not
+screen-off; a reboot loses it. Gateway SQLite moved to schema v4 without
+migration. Server tests, firmware host tests and the UI preview cover it; device
+acceptance of this build is NOT RUN.
+
 Sessions open on a voice-first view (orb, status line, one-line strip and key
 hints) with the text card as a second view; the firmware guide describes it.
 The gateway synthesizes each completed reply in one OpenAI Realtime request and
@@ -99,8 +110,8 @@ model described above.
 | Milestone | Deliverable | Acceptance |
 | --- | --- | --- |
 | M1 Gateway and protocol | Go service, configuration, mDNS, capabilities, whole-message API and bounded SSE | Discovery reaches the advertised service; complete body, neighbor and recovery contracts are documented; startup and shutdown are clean |
-| M2 Drafts and sessions | Persistent draft segments, revision checks, paginated session index, Hermes session mapping | Append/delete/reconnect work; late ASR updates respect segment lifetime; sending commits the displayed revision |
-| M3 OpenAI transcription | Incremental audio intake, upstream realtime session, transcript events | Representative Chinese audio produces partial and final text; segment identities remain correct; backpressure stays bounded |
+| M2 Drafts and sessions | Client-held drafts, first-send session creation, paginated session index, Hermes session mapping | No session exists without a message; a lost send response is retried without duplication; the sent text is the text shown |
+| M3 OpenAI transcription | Incremental audio intake, upstream realtime session, side-channel live and final text | Representative Chinese audio produces partial and final text; nothing is persisted; backpressure stays bounded |
 | M4 Hermes chat | Explicit draft submission, session continuation, filtered SSE and complete-message recovery | One reviewed draft produces one logical message; full snapshots, offset deduplication, exact retries, media filtering and reconnects are exercised |
 | M5 AI Passport client | Discovery, recording, direct draft review/send, whole input/reply RAM cache, local scrolling, completed reply display and thinking animation | Complete-message journeys and waiting/manual reading behavior pass on the device; measured heap, largest block and stack margins support capture and reply delivery |
 | M6 Integrated validation | Repeated full interactions and recovery tests | Reboot during draft/send, upstream loss, slow links, duplicate requests and long replies have observable outcomes |

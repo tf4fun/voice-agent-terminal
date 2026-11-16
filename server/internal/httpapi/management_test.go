@@ -2,10 +2,12 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/tf4fun/voice-agent-terminal/server/internal/model"
 )
@@ -54,7 +56,19 @@ func TestManagementDeleteUsesExistingSameOriginSessionFlow(t *testing.T) {
 	e := setup(t)
 	id := model.NewID()
 	path := "/api/v1/sessions/" + id
-	e.request(t, "POST", "/api/v1/sessions", map[string]string{"id": id, "title": "管理页删除测试"}, 201)
+	message := model.NewID()
+	e.request(t, "POST", path+"/messages", map[string]any{"id": message, "text": "管理页删除测试", "new_session": true}, 202)
+	// Deleting waits until the session's message has settled.
+	for deadline := time.Now().Add(3 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		var state model.Message
+		_ = json.Unmarshal(e.request(t, "GET", path+"/messages/"+message, nil, 200), &state)
+		if state.State == "completed" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("message stayed %+v", state)
+		}
+	}
 	request, err := http.NewRequest("DELETE", e.server.URL+path, nil)
 	if err != nil {
 		t.Fatal(err)

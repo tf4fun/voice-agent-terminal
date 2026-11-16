@@ -3,44 +3,32 @@ package model
 import (
 	"crypto/rand"
 	"fmt"
+	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
 const (
-	MaxDraftBytes = 64 << 10
-	MaxSegments   = 64
-	MaxReplyBytes = 2 << 20
-	WindowBytes   = 2048
+	MaxInputBytes      = 64 << 10
+	MaxTranscriptBytes = 16 << 10
+	MaxReplyBytes      = 2 << 20
+	WindowBytes        = 2048
+	// MaxTitleRunes bounds a title derived from a session's first message.
+	MaxTitleRunes = 24
 )
 
 type Session struct {
 	ID        string `json:"id"`
 	Title     string `json:"title"`
 	State     string `json:"state"`
-	Revision  int64  `json:"draft_revision"`
 	CreatedAt int64  `json:"created_at"`
 	UpdatedAt int64  `json:"updated_at"`
 	Error     string `json:"error,omitempty"`
 }
 
-type Segment struct {
-	ID             string `json:"id"`
-	SessionID      string `json:"session_id"`
-	Position       int64  `json:"position"`
-	Generation     int64  `json:"generation"`
-	State          string `json:"state"`
-	Text           string `json:"-"`
-	MessageID      string `json:"-"`
-	CaptureMode    int    `json:"-"`
-	CommitRevision int64  `json:"-"`
-	Bytes          int    `json:"bytes"`
-	Preview        string `json:"preview"`
-}
-
 type Message struct {
 	ID            string `json:"id"`
 	SessionID     string `json:"session_id"`
-	DraftRevision int64  `json:"draft_revision"`
 	Model         string `json:"-"`
 	UpstreamScope string `json:"-"`
 	Attempts      int    `json:"attempts"`
@@ -109,4 +97,29 @@ func TextWindow(text string, offset, limit int, revision int64) (Window, error) 
 	}
 	part := Prefix(text[offset:], limit)
 	return Window{Text: part, Offset: offset, End: offset + len(part), Total: len(text), Revision: revision}, nil
+}
+
+// TitleFrom names a session after the first non-blank line of its first
+// message, with control characters flattened and long lines shortened.
+func TitleFrom(text string) string {
+	line := ""
+	for _, candidate := range strings.Split(text, "\n") {
+		if candidate = strings.TrimSpace(candidate); candidate != "" {
+			line = candidate
+			break
+		}
+	}
+	line = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, line)
+	if line == "" {
+		return "新会话"
+	}
+	if runes := []rune(line); len(runes) > MaxTitleRunes {
+		return string(runes[:MaxTitleRunes]) + "…"
+	}
+	return line
 }

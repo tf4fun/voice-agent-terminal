@@ -699,7 +699,7 @@ static void voice_orb(bool small, uint32_t fill, lv_opa_t fill_opa, uint32_t rin
 
 static bool voice_has_draft(void)
 {
-    return s_view.text_kind == AGENT_TEXT_DRAFT && s_view.segment_total > 0;
+    return s_view.text_kind == AGENT_TEXT_DRAFT && s_view.draft_chars > 0;
 }
 
 
@@ -1034,11 +1034,11 @@ static void render_voice(void)
             s_voice_draft = draft;
             s_voice_draft_selection = s_view.selection;
             s_voice_draft_generation = s_view.text_generation;
-            size_t runes = 0;
-            for (const char *c = draft; *c; c++) if (((unsigned char)*c & 0xC0) != 0x80) runes++;
+            // The draft lives only in RAM and is bounded by characters.
             char count[24];
-            snprintf(count, sizeof(count), "%u 字", (unsigned)runes);
+            snprintf(count, sizeof(count), "%u/%u 字", (unsigned)s_view.draft_chars, (unsigned)AGENT_DRAFT_MAX_CHARS);
             set_text(s_voice_panel_count, count, false);
+            set_text_color(s_voice_panel_count, s_view.draft_chars * 10 >= AGENT_DRAFT_MAX_CHARS * 9 ? UI_RECORDING : UI_DIM);
             lv_obj_update_layout(s_voice_panel_scroll);
             lv_obj_scroll_to_y(s_voice_panel_scroll, 0, LV_ANIM_OFF);
         }
@@ -1252,7 +1252,7 @@ static void voice_key(bsp_btn_t button)
     const agent_voice_mode_t mode = (agent_voice_mode_t)s_voice_mode;
     if (button == BSP_BTN_OK) {
         if (mode == AGENT_VOICE_DRAFT) {
-            if (agent_client_send(s_view.text.revision, s_view.selection) != ESP_OK && bsp_lvgl_lock(1000)) {
+            if (agent_client_send(s_view.draft_serial, s_view.selection) != ESP_OK && bsp_lvgl_lock(1000)) {
                 ui_notice("内容已更新，请稍候");
                 bsp_lvgl_unlock();
             }
@@ -1383,8 +1383,11 @@ static void power_tick(int64_t now)
     agent_speech_copy(&speech);
     const bool active = s_view.capture != AGENT_IDLE || (s_view.busy && !s_sleep_requested) || s_edit.active || s_page == AGENT_PAGE_PROVISION ||
         agent_message_active(s_view.message.state) || speech.active || bsp_button_read_mv() < BSP_BTN_MV_RELEASED_MIN;
+    // An unsent voice draft lives only in RAM: the screen may go dark, but deep
+    // sleep, which loses RAM, waits until it is sent or cleared.
+    const bool keep_ram = (s_view.busy && !s_sleep_requested) || s_view.draft_chars > 0;
     const memo_power_action_t action = s_manual_sleep ? MEMO_POWER_SLEEP : memo_power_poll(&s_power, now / 1000, settings->screen_timeout_s,
-                                                      settings->sleep_min, active, s_view.busy && !s_sleep_requested);
+                                                      settings->sleep_min, active, keep_ram);
     const int brightness = action == MEMO_POWER_ON ? (s_edit.active ? s_edit.value.brightness : settings->brightness) : 0;
     if (brightness != s_backlight) { bsp_display_backlight(brightness); s_backlight = brightness; }
     if (action == MEMO_POWER_SLEEP && !s_sleep_requested) s_sleep_requested = agent_client_pause() == ESP_OK;

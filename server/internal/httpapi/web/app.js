@@ -1,14 +1,15 @@
 "use strict";
 
 // Voice Agent web client. Talks to the same gateway API as the device, so the
-// conversation, the shared draft and live replies stay consistent with it.
+// conversation and live replies stay consistent with it. Like the device's
+// voice draft, the composer text stays in this page until it is sent.
 
 const $ = id => document.getElementById(id);
 const ui = {};
 for (const id of [
   "app", "sidebar", "close-sidebar", "open-sidebar", "scrim", "new-chat", "search", "session-list",
   "connection", "connection-dot", "theme", "sign-out", "title", "title-state", "rename", "delete",
-  "thread", "thread-inner", "live", "live-text", "composer", "input", "send", "draft-note",
+  "thread", "thread-inner", "composer", "input", "send",
   "auth", "auth-form", "api-key", "remember", "auth-error", "rename-dialog", "rename-form",
   "rename-input", "rename-cancel", "rename-confirm", "delete-dialog", "delete-name", "delete-cancel",
   "delete-confirm", "toast", "device-logs", "logs-dialog", "logs-back", "logs-close", "logs-title",
@@ -20,7 +21,6 @@ const THEME_STORE = "voice-agent.theme";
 const PAGE = 20;
 const ACTIVE = new Set(["queued", "sending", "waiting", "receiving"]);
 const RETRYABLE = new Set(["failed", "unconfirmed"]);
-const DEFAULT_TITLE = "新会话";
 const encoder = new TextEncoder();
 const byteLength = text => encoder.encode(text).length;
 
@@ -35,11 +35,10 @@ const state = {
   messages: [],
   messagesMore: false,
   threadSequence: 0,
-  draft: { text: "", revision: 0, dirty: false, sequence: 0 },
-  localDrafts: new Map(),
+  localDrafts: new Map(), // Unsent composer text per session ("" = new chat).
+  pending: null, // IDs of the last send, reused when its response was lost.
   sending: false,
   events: null,
-  live: { segment: "", timer: 0, fetching: false, again: false },
 };
 
 /* ---------- storage, theme, helpers ---------- */
@@ -334,12 +333,6 @@ function refreshSessionsSoon() {
   sessionsRefreshTimer = setTimeout(() => loadSessions(false).catch(report), 400);
 }
 
-let draftRefreshTimer = 0;
-function refreshDraftSoon() {
-  clearTimeout(draftRefreshTimer);
-  draftRefreshTimer = setTimeout(() => loadDraft().catch(report), 250);
-}
-
 function handleEvent(event) {
   switch (event.type) {
     case "resync":
@@ -347,13 +340,6 @@ function handleEvent(event) {
       if (state.currentId) reconcileThread();
       break;
     case "session.updated":
-      refreshSessionsSoon();
-      break;
-    case "draft.updated":
-      if (event.session_id === state.currentId) {
-        trackLive(event);
-        refreshDraftSoon();
-      }
       refreshSessionsSoon();
       break;
     case "chat.delta":
@@ -514,7 +500,7 @@ function setRoute(id) {
 function rememberLocalDraft() {
   if (state.currentId === undefined) return;
   const key = state.currentId || "";
-  if (state.draft.dirty || (!state.currentId && ui.input.value)) state.localDrafts.set(key, ui.input.value);
+  if (ui.input.value) state.localDrafts.set(key, ui.input.value);
   else state.localDrafts.delete(key);
 }
 
@@ -524,8 +510,6 @@ function showWelcome(options = {}) {
   state.threadSequence++;
   state.messages = [];
   state.messagesMore = false;
-  state.draft = { text: "", revision: 0, dirty: false, sequence: state.draft.sequence + 1 };
-  setLive(null);
   if (!options.keepRoute) setRoute("");
   syncHeader();
   renderSessions();
@@ -535,7 +519,7 @@ function showWelcome(options = {}) {
   const big = mark();
   big.classList.add("large");
   welcome.append(big, el("h2", "", `${greeting}，有什么可以帮你？`),
-    el("p", "", "这里和设备共用同一组会话。设备上长按 OK 说话，草稿也会同步出现在输入框里。"));
+    el("p", "", "这里和设备共用同一组会话。新会话在发出第一条消息时创建，草稿只留在各自的输入端。"));
   const cards = el("div", "welcome-cards");
   for (const [title, hint] of [
     ["帮我整理今天的待办", "按优先级列出来"],
@@ -566,8 +550,6 @@ async function openSession(id, options = {}) {
   const sequence = ++state.threadSequence;
   state.messages = [];
   state.messagesMore = false;
-  state.draft = { text: "", revision: 0, dirty: false, sequence: state.draft.sequence + 1 };
-  setLive(null);
   setRoute(id);
   if (!currentSession()) {
     try {
@@ -582,15 +564,13 @@ async function openSession(id, options = {}) {
   }
   syncHeader();
   renderSessions();
-  const local = state.localDrafts.get(id);
-  ui.input.value = local || "";
-  state.draft.dirty = !!local;
+  ui.input.value = state.localDrafts.get(id) || "";
   composerChanged();
   const loading = el("div", "state-line");
   loading.append(typing(), el("span", "", "正在载入对话…"));
   ui["thread-inner"].replaceChildren(loading);
   try {
-    await Promise.all([loadMessages(id, sequence, 0), loadDraft()]);
+    await loadMessages(id, sequence, 0);
   } catch (error) {
     if (sequence === state.threadSequence) {
       ui["thread-inner"].replaceChildren(el("div", "state-line error", "对话载入失败"));
@@ -904,75 +884,6 @@ async function retryMessage(message, button) {
   }
 }
 
-/* ---------- shared draft and live recording ---------- */
-
-async function loadDraft() {
-  const id = state.currentId;
-  if (!id || state.sending) return; // send() reloads the draft once it settles.
-  const sequence = ++state.draft.sequence;
-  const result = await request(`/sessions/${id}/draft/content`, { raw: true });
-  if (id !== state.currentId || sequence !== state.draft.sequence) return;
-  const text = result.data;
-  state.draft.revision = Number(result.headers.get("X-Revision")) || 0;
-  const previous = state.draft.text;
-  state.draft.text = text;
-  if (!state.draft.dirty || ui.input.value === text) {
-    ui.input.value = text;
-    state.draft.dirty = false;
-  }
-  if (text && text !== previous && state.draft.dirty) toast("设备更新了草稿；发送时将以输入框中的内容为准。");
-  composerChanged();
-}
-
-function trackLive(event) {
-  if (event.status === "capturing" && event.segment_id) {
-    if (event.segment_id !== state.live.segment || ui.live.hidden) {
-      state.live.segment = event.segment_id;
-      setLive("设备正在录音…", true); // Interim events keep the last fetched text.
-    }
-    fetchLiveText();
-  } else if (event.segment_id && event.segment_id === state.live.segment) {
-    if (event.status === "staged" || event.status === "ready") setLive("转写完成，正在保存…", false);
-    else setLive(null);
-    clearTimeout(state.live.timer);
-    state.live.timer = setTimeout(() => setLive(null), 2500);
-    return;
-  }
-  clearTimeout(state.live.timer);
-  state.live.timer = setTimeout(() => setLive(null), 12000);
-}
-
-async function fetchLiveText() {
-  if (!state.live.segment) return;
-  if (state.live.fetching) { state.live.again = true; return; }
-  state.live.fetching = true;
-  state.live.again = false;
-  const id = state.currentId;
-  const segment = state.live.segment;
-  try {
-    const win = await request(`/sessions/${id}/segments/${segment}/text?tail=1&limit=600`);
-    if (id === state.currentId && segment === state.live.segment && !ui.live.hidden && win.text) {
-      setLive("设备正在录音：" + win.text, true);
-    }
-  } catch { /* the segment may already be retired */ }
-  finally {
-    await sleep(350);
-    state.live.fetching = false;
-    if (state.live.again) fetchLiveText();
-  }
-}
-
-function setLive(text, recording) {
-  if (!text) {
-    ui.live.hidden = true;
-    state.live.segment = "";
-    return;
-  }
-  ui["live-text"].textContent = text;
-  ui.live.classList.toggle("rec", !!recording);
-  ui.live.hidden = false;
-}
-
 /* ---------- composer and sending ---------- */
 
 function lastMessageActive() {
@@ -984,95 +895,47 @@ function composerChanged() {
   const area = ui.input;
   area.style.height = "auto";
   area.style.height = Math.min(area.scrollHeight, Math.round(window.innerHeight * 0.4)) + "px";
-  state.draft.dirty = area.value !== state.draft.text;
   const hasText = area.value.trim().length > 0;
   const session = currentSession();
   const blocked = state.sending || lastMessageActive() || (session && session.state === "deleting");
   ui.send.disabled = !hasText || blocked;
   ui.send.title = lastMessageActive() ? "等待当前回复完成" : "发送";
-  let note = "";
-  if (state.draft.text && !state.draft.dirty) note = "来自共享草稿（设备语音）";
-  else if (state.draft.text && state.draft.dirty) note = "已修改共享草稿，发送时将替换";
-  ui["draft-note"].textContent = note;
-  ui["draft-note"].hidden = !note;
 }
 
-async function draftItems(id) {
-  for (let attempt = 0; attempt < 3; attempt++) {
-    const items = [];
-    let revision = 0;
-    let consistent = true;
-    for (let offset = 0; ; offset += PAGE) {
-      const page = await request(`/sessions/${id}/draft?limit=${PAGE}&offset=${offset}`);
-      if (offset === 0) revision = page.revision;
-      else if (page.revision !== revision) { consistent = false; break; }
-      items.push(...page.items);
-      if (!page.has_more) break;
-    }
-    if (consistent) return { items, revision };
-  }
-  throw apiError(409, "stale_revision");
-}
-
-// Make the shared draft equal the composer text and return its revision.
-async function syncDraft(id, text) {
-  for (let attempt = 0; attempt < 3; attempt++) {
-    const { items, revision } = await draftItems(id);
-    if (items.some(item => item.state === "capturing" || item.state === "staged")) {
-      throw Object.assign(new Error("设备正在录音，请等它完成后再发送。"), { code: "busy" });
-    }
-    try {
-      const current = await request(`/sessions/${id}/draft/content?revision=${revision}`, { raw: true });
-      if (current.data === text) return revision;
-      let next = revision;
-      if (!items.length) {
-        next = (await request(`/sessions/${id}/segments`, { method: "POST", json: { id: uuid(), revision: next, text } })).revision;
-      } else {
-        next = (await request(`/sessions/${id}/segments/${items[0].id}`, { method: "PATCH", json: { revision: next, text } })).revision;
-        for (const item of items.slice(1)) {
-          next = (await request(`/sessions/${id}/segments/${item.id}`, { method: "DELETE", json: { revision: next } })).revision;
-        }
-      }
-      return next;
-    } catch (error) {
-      if (error.code === "stale_revision" && attempt < 2) continue;
-      throw error;
-    }
-  }
-  throw apiError(409, "stale_revision");
-}
-
-function titleFrom(text) {
-  const line = text.split("\n").map(s => s.trim()).find(Boolean) || DEFAULT_TITLE;
-  const chars = Array.from(line);
-  return chars.length > 24 ? chars.slice(0, 24).join("") + "…" : line;
-}
-
+// Sends the composer text as one message. A new chat has no session yet: the
+// gateway creates and titles it with this first message, so an abandoned new
+// chat leaves nothing behind. A lost response is retried with the same IDs.
 async function send() {
   const text = ui.input.value.trim();
   if (!text || state.sending || lastMessageActive()) return;
   if (byteLength(text) > 64 * 1024) { toast("内容超过 64 KiB 上限。"); return; }
+  let pending = state.pending;
+  const fresh = !state.currentId;
+  if (!pending || pending.text !== text || pending.fresh !== fresh || (!fresh && pending.session !== state.currentId)) {
+    pending = state.pending = { session: state.currentId || uuid(), message: uuid(), text, fresh };
+  }
+  const id = pending.session;
   state.sending = true;
   composerChanged();
-  let id = state.currentId;
   try {
-    if (!id) {
-      id = uuid();
-      const created = await request("/sessions", { method: "POST", json: { id, title: titleFrom(text) } });
-      state.sessions.unshift(created);
-      await openSession(id, { force: true });
-      state.localDrafts.delete("");
-      ui.input.value = text;
-    }
-    const revision = await syncDraft(id, text);
-    const messageId = uuid();
-    const payload = { method: "POST", json: { id: messageId, revision } };
+    const payload = { method: "POST", json: { id: pending.message, text, new_session: fresh } };
     let meta;
     try {
       meta = await request(`/sessions/${id}/messages`, payload);
     } catch (error) {
       if (!(error instanceof TypeError)) throw error;
-      meta = await request(`/sessions/${id}/messages`, payload); // Same ID and revision are idempotent.
+      meta = await request(`/sessions/${id}/messages`, payload); // Same IDs are idempotent.
+    }
+    state.pending = null;
+    if (fresh) {
+      state.localDrafts.delete("");
+      if (meta.session && !state.sessions.some(s => s.id === id)) state.sessions.unshift(meta.session);
+      if (state.currentId === null) {
+        ui.input.value = "";
+        await openSession(id, { force: true });
+      }
+      refreshSessionsSoon();
+      return;
     }
     if (id !== state.currentId) return;
     let message = findMessage(meta.id);
@@ -1082,25 +945,15 @@ async function send() {
       state.messages.push(message);
     }
     state.localDrafts.delete(id);
-    state.draft.text = "";
-    state.draft.dirty = false;
     ui.input.value = "";
     renderThread();
     scrollToBottom(true);
-    const session = currentSession();
-    if (session && session.title === DEFAULT_TITLE) {
-      request(`/sessions/${id}`, { method: "PATCH", json: { title: titleFrom(text) } })
-        .then(updated => { Object.assign(session, updated); renderSessions(); syncHeader(); })
-        .catch(() => {});
-    }
     refreshSessionsSoon();
   } catch (error) {
-    if (error.code === "stale_revision") loadDraft().catch(() => {});
     report(error);
   } finally {
     state.sending = false;
     composerChanged();
-    if (state.currentId) loadDraft().catch(() => {});
   }
 }
 

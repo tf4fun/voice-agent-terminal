@@ -459,7 +459,7 @@ func (o *OpenAI) stream(parent context.Context, s *session, input io.ReadCloser,
 		case "conversation.item.input_audio_transcription.failed":
 			return ErrUpstream
 		case "conversation.item.input_audio_transcription.delta":
-			if len(text)+len(event.Delta) > model.MaxDraftBytes || !utf8.ValidString(event.Delta) {
+			if len(text)+len(event.Delta) > model.MaxTranscriptBytes || !utf8.ValidString(event.Delta) {
 				return ErrUpstream
 			}
 			text += event.Delta
@@ -467,7 +467,7 @@ func (o *OpenAI) stream(parent context.Context, s *session, input io.ReadCloser,
 				return err
 			}
 		case "conversation.item.input_audio_transcription.completed":
-			if len(event.Transcript) > model.MaxDraftBytes || !utf8.ValidString(event.Transcript) {
+			if len(event.Transcript) > model.MaxTranscriptBytes || !utf8.ValidString(event.Transcript) {
 				return ErrUpstream
 			}
 			return emit(Update{Text: event.Transcript, Final: true})
