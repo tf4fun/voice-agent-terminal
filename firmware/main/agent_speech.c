@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #include "agent_pcm_pool.h"
 #include "agent_speech_frames.h"
@@ -159,20 +160,48 @@ static void writer_task(void *arg)
     }
 }
 
+typedef struct {
+    char *id;
+    size_t capacity;
+} speech_header_t;
+
+static esp_err_t speech_header(esp_http_client_event_t *event)
+{
+    speech_header_t *target = event->user_data;
+    if (target == NULL || target->id == NULL || target->capacity == 0 ||
+        event->event_id != HTTP_EVENT_ON_HEADER ||
+        event->header_key == NULL || event->header_value == NULL) return ESP_OK;
+    if (strcasecmp(event->header_key, "X-Speech-Stream") == 0)
+        snprintf(target->id, target->capacity, "%s", event->header_value);
+    return ESP_OK;
+}
+
 // *status is the HTTP status, or 0 when no response arrived.
-static esp_http_client_handle_t open_stream(const char *session, const char *message, size_t offset, int *status)
+static esp_http_client_handle_t open_stream(const char *session, const char *message, size_t offset,
+                                            const char *stream_id, char *received_id, size_t received_cap,
+                                            int *status)
 {
     *status = 0;
+    if (received_id != NULL && received_cap > 0) received_id[0] = '\0';
+    if (offset > 0 && (stream_id == NULL || stream_id[0] == '\0')) {
+        *status = 409;
+        return NULL;
+    }
     memo_endpoint_t endpoint;
     if (!memo_net_has_ip() || !memo_discovery_endpoint(&endpoint)) return NULL;
-    char url[280];
-    const int length = snprintf(url, sizeof(url), "http://%s:%u/api/v1/sessions/%s/messages/%s/speech?offset=%u",
-                                endpoint.host, endpoint.port, session, message, (unsigned)offset);
+    char url[320];
+    const int length = offset > 0
+        ? snprintf(url, sizeof(url), "http://%s:%u/api/v1/sessions/%s/messages/%s/speech?offset=%u&stream=%s",
+                   endpoint.host, endpoint.port, session, message, (unsigned)offset, stream_id)
+        : snprintf(url, sizeof(url), "http://%s:%u/api/v1/sessions/%s/messages/%s/speech?offset=0",
+                   endpoint.host, endpoint.port, session, message);
     if (length < 0 || length >= (int)sizeof(url)) return NULL;
+    speech_header_t header = {.id = received_id, .capacity = received_cap};
     // Keepalive frames arrive every 5 s while the reply is still being thought about.
     const esp_http_client_config_t config = {
         .url = url, .method = HTTP_METHOD_GET, .timeout_ms = 12000, .buffer_size = 1024,
         .buffer_size_tx = 512, .disable_auto_redirect = true, .keep_alive_enable = false,
+        .event_handler = speech_header, .user_data = &header,
     };
     esp_http_client_handle_t client = esp_http_client_init(&config);
     if (client == NULL) return NULL;
@@ -183,6 +212,10 @@ static esp_http_client_handle_t open_stream(const char *session, const char *mes
     }
     if (esp_http_client_open(client, 0) == ESP_OK && esp_http_client_fetch_headers(client) >= 0)
         *status = esp_http_client_get_status_code(client);
+    if (*status == 200 && offset > 0 && received_id != NULL && received_id[0] != '\0' &&
+        strcmp(received_id, stream_id) != 0) {
+        *status = 409;
+    }
     if (*status != 200) {
         ESP_LOGW(TAG, "speech stream unavailable status=%d", *status);
         esp_http_client_close(client);
@@ -262,6 +295,7 @@ static void play(unsigned request, const char *session, const char *message)
     uint8_t status = 1;
     int outcome = STREAM_BROKEN, resumes = 0;
     size_t offset = 0;
+    char stream_id[37] = "";
     agent_speech_parser_reset(&s_parser);
     // Recording owns the shared buffer while it runs; a reply never plays over it.
     s_pcm = agent_pcm_pool_take(AGENT_PCM_PLAYBACK);
@@ -276,12 +310,17 @@ static void play(unsigned request, const char *session, const char *message)
         xTaskNotifyGive(s_writer);
         for (;;) {
             agent_speech_resume(&s_parser, &offset);
+            if (offset == 0) stream_id[0] = '\0';
             int http_status;
-            esp_http_client_handle_t client = open_stream(session, message, offset, &http_status);
+            char next_stream[37] = "";
+            esp_http_client_handle_t client = open_stream(session, message, offset, stream_id,
+                                                          next_stream, sizeof(next_stream), &http_status);
             // 409: the stream this playback started on is gone; new audio
             // would not continue it, so playback ends here.
             if (http_status == 409) break;
             if (client != NULL) {
+                if (offset == 0 && next_stream[0] != '\0')
+                    snprintf(stream_id, sizeof(stream_id), "%s", next_stream);
                 outcome = read_stream(client, request, &offset, &status);
                 esp_http_client_close(client);
                 esp_http_client_cleanup(client);

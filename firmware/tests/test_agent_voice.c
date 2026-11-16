@@ -14,11 +14,15 @@ static void test_modes(void)
     assert(agent_voice_mode(0, false, true, "completed", true) == AGENT_VOICE_SPEAKING);
     assert(agent_voice_mode(0, false, true, "waiting", false) == AGENT_VOICE_THINKING);
     assert(agent_voice_mode(0, false, true, "receiving", false) == AGENT_VOICE_THINKING);
+    assert(agent_voice_mode(0, false, true, "attention", false) == AGENT_VOICE_ATTENTION);
+    assert(agent_voice_mode(0, false, true, "attention", true) == AGENT_VOICE_SPEAKING);
+    assert(agent_voice_mode(2, false, true, "attention", false) == AGENT_VOICE_RECORDING);
     assert(agent_voice_mode(0, false, true, "failed", false) == AGENT_VOICE_FAILED);
     assert(agent_voice_mode(0, false, true, "completed", false) == AGENT_VOICE_IDLE);
     assert(agent_voice_mode(0, false, false, "", false) == AGENT_VOICE_IDLE);
     // Trace codes stay stable for stored diagnostic reports.
-    assert(AGENT_VOICE_THINKING == 5 && AGENT_VOICE_SPEAKING == 7 && AGENT_VOICE_FAILED == 8);
+    assert(AGENT_VOICE_THINKING == 5 && AGENT_VOICE_SPEAKING == 7 &&
+           AGENT_VOICE_FAILED == 8 && AGENT_VOICE_ATTENTION == 9);
 }
 
 static void test_text(void)

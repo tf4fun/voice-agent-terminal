@@ -3,6 +3,7 @@ package asr
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/tf4fun/voice-agent-terminal/server/internal/model"
 )
 
 func TestRealtimeTranscribesBeforeAudioEOFAndCommitsOneItem(t *testing.T) {
@@ -152,5 +154,64 @@ func TestCancellationClosesBlockedAudioRead(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("audio worker did not stop")
+	}
+}
+
+func TestOversizedTranscriptReturnsErrLimit(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		send func(*websocket.Conn)
+	}{
+		{
+			name: "delta_overflow",
+			send: func(c *websocket.Conn) {
+				_ = c.WriteJSON(map[string]string{
+					"type":    "conversation.item.input_audio_transcription.delta",
+					"item_id": "item-1",
+					"delta":   strings.Repeat("a", model.MaxTranscriptBytes+1),
+				})
+			},
+		},
+		{
+			name: "completed_overflow",
+			send: func(c *websocket.Conn) {
+				_ = c.WriteJSON(map[string]string{
+					"type":       "conversation.item.input_audio_transcription.completed",
+					"item_id":    "item-1",
+					"transcript": strings.Repeat("b", model.MaxTranscriptBytes+1),
+				})
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				conn, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+				if err != nil {
+					return
+				}
+				defer conn.Close()
+				var setup any
+				_ = conn.ReadJSON(&setup)
+				_ = conn.WriteJSON(map[string]string{"type": "session.updated"})
+				for {
+					var event struct {
+						Type string `json:"type"`
+					}
+					if conn.ReadJSON(&event) != nil {
+						return
+					}
+					if event.Type == "input_audio_buffer.commit" {
+						tc.send(conn)
+						return
+					}
+				}
+			}))
+			defer upstream.Close()
+			client := OpenAI{URL: "ws" + strings.TrimPrefix(upstream.URL, "http"), APIKey: "test", Model: "gpt-live-transcribe"}
+			err := client.Transcribe(context.Background(), io.NopCloser(strings.NewReader(strings.Repeat("\x00", 6400))), 16000, func(Update) error { return nil })
+			if !errors.Is(err, ErrLimit) {
+				t.Fatalf("got err=%v, want ErrLimit", err)
+			}
+		})
 	}
 }

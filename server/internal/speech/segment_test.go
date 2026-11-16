@@ -46,3 +46,39 @@ func TestLongRunsSplitAtSoftBreaks(t *testing.T) {
 		t.Fatalf("lost text: %q", got)
 	}
 }
+
+func TestMarkdownCleanedBeforePausesPreservesLinksAndCodeSpans(t *testing.T) {
+	// Link text containing sentence-ending punctuation must stay intact instead
+	// of splitting mid-link and exposing "](链接".
+	input := "详情：[说明。](https://example.com/path)"
+	if got := SpokenText(input); got != "详情：说明。" {
+		t.Fatalf("SpokenText=%q", got)
+	}
+	if got := Sentences(input); !reflect.DeepEqual(got, []string{"详情：说明。"}) {
+		t.Fatalf("Sentences=%q", got)
+	}
+
+	// Links and inline code longer than 80 runes must be cleaned whole.
+	longLabel := strings.Repeat("长标题说明文字", 15) + "。还有补充！"
+	longLink := "请查看[" + longLabel + "](https://en.wikipedia.org/wiki/Go_(programming_language))。"
+	if got := SpokenText(longLink); got != "请查看"+longLabel+"。" {
+		t.Fatalf("long link SpokenText=%q", got)
+	}
+	for _, unit := range Sentences(longLink) {
+		if strings.Contains(unit, "http") || strings.Contains(unit, "](") || strings.Contains(unit, "链接") {
+			t.Fatalf("leaked link markup in unit: %q", unit)
+		}
+	}
+
+	longCode := strings.Repeat("identifier_segment_", 6)
+	codeText := "运行 `" + longCode + "` 完成。"
+	if got := SpokenText(codeText); got != "运行 "+longCode+" 完成。" {
+		t.Fatalf("long inline code SpokenText=%q", got)
+	}
+
+	// Fenced code blocks with tilde fences, indented fences, or nested backticks.
+	fenced := "前文。\n   ~~~markdown\n```not-closing\n[inside](https://skip.example)\n~~~\n后文。"
+	if got := SpokenText(fenced); got != "前文。\n后文。" {
+		t.Fatalf("fenced SpokenText=%q", got)
+	}
+}

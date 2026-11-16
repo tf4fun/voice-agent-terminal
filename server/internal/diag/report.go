@@ -144,7 +144,7 @@ var (
 	buttons    = []string{"上", "下", "OK"}
 	keyEvents  = []string{"按下", "单击", "双击", "长按（驱动）", "松开"}
 	pages      = []string{"会话列表", "文字卡片", "设置", "配网", "准备录音", "录音", "语音"}
-	voiceModes = []string{"待机", "准备录音", "录音中", "转写中", "草稿", "思考中", "回复中", "朗读中", "回复失败"} // 6: older builds only
+	voiceModes = []string{"待机", "准备录音", "录音中", "转写中", "草稿", "思考中", "回复中", "朗读中", "回复失败", "等待审批"} // 6: older builds only
 	speechEnds = []string{"读完", "失败", "被停止", "超出上限"}
 	captures   = []string{"空闲", "准备中", "录音中", "结束中", "提交中"}
 	httpMethod = map[byte]string{'G': "GET", 'P': "POST", 'U': "PATCH", 'D': "DELETE"}

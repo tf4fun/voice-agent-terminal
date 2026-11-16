@@ -183,6 +183,10 @@ kbd { font: 11px var(--mono); color: var(--dim); border: 1px solid var(--border)
 .msg-time { font-size: 12px; color: var(--dim); padding: 0 6px; }
 .state-line { display: inline-flex; align-items: center; gap: 8px; color: var(--dim); font-size: 14px; }
 .state-line.error { color: var(--recording); }
+.state-line.attention { color: var(--accent); }
+.failed-sends { display: flex; flex-direction: column; gap: 10px; margin-top: 12px; width: 100%; }
+.msg.failed-send .bubble { border: 1px dashed var(--recording); background: color-mix(in srgb, var(--recording) 8%, var(--surface)); }
+.msg.failed-send .msg-tools { opacity: 1; }
 .typing { display: inline-flex; gap: 4px; }
 .typing i { width: 6px; height: 6px; border-radius: 50%; background: var(--dim); animation: blink 1.2s infinite ease-in-out; }
 .typing i:nth-child(2) { animation-delay: .15s; }

@@ -17,6 +17,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/tf4fun/voice-agent-terminal/server/internal/audio"
+	"github.com/tf4fun/voice-agent-terminal/server/internal/realtime"
 )
 
 // Output format delivered to callers and devices.
@@ -41,23 +42,16 @@ const (
 )
 
 var (
-	pingInterval  = 20 * time.Second
-	pongWait      = 50 * time.Second
-	sessionMaxAge = 50 * time.Minute
-	openTimeout   = 15 * time.Second
-	speakTimeout  = 10 * time.Minute // A whole reply, read aloud.
-	speakIdle     = 20 * time.Second // Upstream silence that fails a request.
+	speakTimeout = 10 * time.Minute // A whole reply, read aloud.
+	speakIdle    = 20 * time.Second // Upstream silence that fails a request.
 )
 
 type OpenAI struct {
 	URL, APIKey, Model, Voice string
 	Log                       *slog.Logger
 
-	mu      sync.Mutex
-	idle    *session
-	inUse   int
-	running bool
-	wake    chan struct{}
+	once sync.Once
+	pool *realtime.Pool[event]
 }
 
 func (o *OpenAI) Enabled() bool { return o.APIKey != "" && o.Model != "" }
@@ -74,66 +68,18 @@ type event struct {
 	} `json:"error"`
 }
 
-type session struct {
-	connection *websocket.Conn
-	events     chan event
-	done, stop chan struct{}
-	created    time.Time
-	closeOnce  sync.Once
-	writeMu    sync.Mutex
-}
-
-func newSession(connection *websocket.Conn) *session {
-	s := &session{connection: connection, events: make(chan event, 128), done: make(chan struct{}), stop: make(chan struct{}), created: time.Now()}
-	connection.SetReadLimit(1 << 20)
-	_ = connection.SetReadDeadline(time.Now().Add(pongWait))
-	connection.SetPongHandler(func(string) error { return connection.SetReadDeadline(time.Now().Add(pongWait)) })
-	go s.read()
-	return s
-}
-
-func (s *session) read() {
-	defer close(s.done)
-	defer close(s.events)
-	for {
-		var e event
-		if err := s.connection.ReadJSON(&e); err != nil {
-			return
+func (o *OpenAI) getPool() *realtime.Pool[event] {
+	o.once.Do(func() {
+		o.pool = &realtime.Pool[event]{
+			Name: "speech",
+			Open: o.open,
+			Log:  o.Log,
 		}
-		_ = s.connection.SetReadDeadline(time.Now().Add(pongWait))
-		select {
-		case s.events <- e:
-		case <-s.stop:
-			return
-		}
-	}
+	})
+	return o.pool
 }
 
-func (s *session) write(value any) error {
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-	_ = s.connection.SetWriteDeadline(time.Now().Add(15 * time.Second))
-	return s.connection.WriteJSON(value)
-}
-
-func (s *session) ping() error {
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-	return s.connection.WriteControl(websocket.PingMessage, nil, time.Now().Add(5*time.Second))
-}
-
-func (s *session) Close() {
-	s.closeOnce.Do(func() { close(s.stop); _ = s.connection.Close() })
-}
-
-func (s *session) healthy() bool {
-	select {
-	case <-s.done:
-		return false
-	default:
-		return time.Since(s.created) < sessionMaxAge
-	}
-}
+func (o *OpenAI) hasWarmSession() bool { return o.getPool().HasIdle() }
 
 func (o *OpenAI) endpoint() string {
 	parsed, err := url.Parse(o.URL)
@@ -148,7 +94,7 @@ func (o *OpenAI) endpoint() string {
 	return parsed.String()
 }
 
-func (o *OpenAI) open(ctx context.Context) (*session, error) {
+func (o *OpenAI) open(ctx context.Context) (*realtime.Conn[event], error) {
 	connection, response, err := websocket.DefaultDialer.DialContext(ctx, o.endpoint(), http.Header{"Authorization": {"Bearer " + o.APIKey}})
 	if err != nil {
 		if response != nil {
@@ -156,27 +102,27 @@ func (o *OpenAI) open(ctx context.Context) (*session, error) {
 		}
 		return nil, ErrUpstream
 	}
-	s := newSession(connection)
-	if err := s.write(map[string]any{"type": "session.update", "session": map[string]any{
+	s := realtime.NewConn[event](connection, 1<<20, 128, realtime.DefaultPongWait, realtime.DefaultMaxAge)
+	if err := s.Write(map[string]any{"type": "session.update", "session": map[string]any{
 		"type": "realtime", "output_modalities": []string{"audio"}, "instructions": sessionInstructions,
 		"audio": map[string]any{"output": map[string]any{
 			"format": map[string]any{"type": "audio/pcm", "rate": 24000}, "voice": o.Voice,
 		}},
 	}}); err != nil {
-		s.Close()
+		_ = s.Close()
 		return nil, ErrUpstream
 	}
 	for {
 		select {
 		case <-ctx.Done():
-			s.Close()
+			_ = s.Close()
 			return nil, ErrUpstream
-		case e, ok := <-s.events:
+		case e, ok := <-s.Events:
 			if !ok || e.Type == "error" {
 				if ok {
 					o.warn("speech session rejected", "code", e.Error.Code)
 				}
-				s.Close()
+				_ = s.Close()
 				return nil, ErrUpstream
 			}
 			if e.Type == "session.updated" {
@@ -186,77 +132,23 @@ func (o *OpenAI) open(ctx context.Context) (*session, error) {
 	}
 }
 
-func (o *OpenAI) signal() {
-	o.mu.Lock()
-	wake := o.wake
-	o.mu.Unlock()
-	if wake != nil {
-		select {
-		case wake <- struct{}{}:
-		default:
-		}
-	}
-}
-
-func (o *OpenAI) acquire(ctx context.Context) (*session, error) {
-	o.mu.Lock()
-	s := o.idle
-	o.idle = nil
-	if s != nil && s.healthy() {
-		o.inUse++
-		o.mu.Unlock()
-		return s, nil
-	}
-	o.mu.Unlock()
-	if s != nil {
-		s.Close()
-		o.signal()
-	}
-	openCtx, cancel := context.WithTimeout(ctx, openTimeout)
-	defer cancel()
-	fresh, err := o.open(openCtx)
-	if err != nil {
-		return nil, err
-	}
-	o.mu.Lock()
-	o.inUse++
-	o.mu.Unlock()
-	return fresh, nil
-}
-
-// release keeps a session only after a cleanly finished response; anything
-// else may leave audio in flight, so that session is closed and replaced.
-func (o *OpenAI) release(s *session, clean bool) {
-	o.mu.Lock()
-	o.inUse--
-	keep := clean && s.healthy() && o.running && o.idle == nil
-	if keep {
-		o.idle = s
-	}
-	o.mu.Unlock()
-	if !keep {
-		s.Close()
-	}
-	o.signal()
-}
-
 func (o *OpenAI) Speak(parent context.Context, text string, emit func([]byte) error) error {
 	if text == "" || len(text) > MaxText || !utf8.ValidString(text) {
 		return ErrUpstream
 	}
 	ctx, cancel := context.WithTimeout(parent, speakTimeout)
 	defer cancel()
-	s, err := o.acquire(ctx)
+	s, err := o.getPool().Acquire(ctx)
 	if err != nil {
 		return err
 	}
 	err = o.speak(ctx, s, text, emit)
-	o.release(s, err == nil)
+	o.getPool().Release(s, err == nil)
 	return err
 }
 
-func (o *OpenAI) speak(ctx context.Context, s *session, text string, emit func([]byte) error) error {
-	if err := s.write(map[string]any{"type": "response.create", "response": map[string]any{
+func (o *OpenAI) speak(ctx context.Context, s *realtime.Conn[event], text string, emit func([]byte) error) error {
+	if err := s.Write(map[string]any{"type": "response.create", "response": map[string]any{
 		"conversation": "none", "output_modalities": []string{"audio"}, "input": []any{},
 		"instructions": responsePrefix + text,
 	}}); err != nil {
@@ -272,7 +164,7 @@ func (o *OpenAI) speak(ctx context.Context, s *session, text string, emit func([
 		case <-idle.C:
 			o.warn("speech response stalled")
 			return ErrUpstream
-		case e, ok := <-s.events:
+		case e, ok := <-s.Events:
 			idle.Reset(speakIdle)
 			if !ok {
 				return ErrUpstream
@@ -307,96 +199,7 @@ func (o *OpenAI) speak(ctx context.Context, s *session, text string, emit func([
 
 // Run keeps one configured session warm so a reply's speech skips the
 // handshake (about 3.7 s through the proxy).
-func (o *OpenAI) Run(ctx context.Context) {
-	o.mu.Lock()
-	o.running = true
-	if o.wake == nil {
-		o.wake = make(chan struct{}, 1)
-	}
-	wake := o.wake
-	o.mu.Unlock()
-	defer func() {
-		o.mu.Lock()
-		s := o.idle
-		o.idle = nil
-		o.running = false
-		o.mu.Unlock()
-		if s != nil {
-			s.Close()
-		}
-	}()
-	ticker := time.NewTicker(pingInterval)
-	defer ticker.Stop()
-	backoff := time.Second
-	for ctx.Err() == nil {
-		o.mu.Lock()
-		current := o.idle
-		if current != nil && !current.healthy() {
-			o.idle = nil
-		} else {
-			current = nil
-		}
-		needed := o.idle == nil && o.inUse == 0
-		o.mu.Unlock()
-		if current != nil {
-			current.Close()
-		}
-		if needed {
-			openCtx, cancel := context.WithTimeout(ctx, openTimeout)
-			started := time.Now()
-			fresh, err := o.open(openCtx)
-			cancel()
-			if err != nil {
-				if ctx.Err() != nil {
-					return
-				}
-				o.warn("warm speech session failed", "retry_ms", backoff.Milliseconds())
-				select {
-				case <-ctx.Done():
-					return
-				case <-time.After(backoff):
-				}
-				backoff = min(backoff*2, time.Minute)
-				continue
-			}
-			backoff = time.Second
-			o.info("warm speech session ready", "elapsed_ms", time.Since(started).Milliseconds())
-			o.mu.Lock()
-			if o.idle == nil && o.inUse == 0 {
-				o.idle, fresh = fresh, nil
-			}
-			o.mu.Unlock()
-			if fresh != nil {
-				fresh.Close()
-			}
-		}
-		var dropped <-chan struct{}
-		o.mu.Lock()
-		if o.idle != nil {
-			dropped = o.idle.done
-		}
-		o.mu.Unlock()
-		select {
-		case <-ctx.Done():
-			return
-		case <-dropped:
-		case <-wake:
-		case <-ticker.C:
-			o.mu.Lock()
-			idle := o.idle
-			o.mu.Unlock()
-			if idle != nil && idle.ping() != nil {
-				idle.Close()
-			}
-		}
-	}
-}
-
-func (o *OpenAI) info(message string, args ...any) {
-	if o.Log != nil {
-		o.Log.Info(message, args...)
-	}
-}
+func (o *OpenAI) Run(ctx context.Context) { o.getPool().Run(ctx) }
 
 func (o *OpenAI) warn(message string, args ...any) {
 	if o.Log != nil {

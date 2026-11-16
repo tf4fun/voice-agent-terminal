@@ -51,6 +51,7 @@ var (
 // one synthesis goroutine and read by any number of listeners, each from the
 // start, so a reconnecting device resumes without a second synthesis.
 type speechStream struct {
+	id       string
 	mu       sync.Mutex
 	frames   [][]byte
 	bytes    int
@@ -167,6 +168,8 @@ func (r *SpeechReader) Next(ctx context.Context) ([]byte, bool, error) {
 // being redone), so nothing may be inserted between frames until it is reached.
 func (r *SpeechReader) Resuming() bool { return r.skip > 0 }
 
+func (r *SpeechReader) StreamID() string { return r.stream.id }
+
 func (r *SpeechReader) Close() { r.once.Do(r.closer) }
 
 type speechStreams struct {
@@ -181,8 +184,9 @@ func speechKey(messageID string, attempts int) string {
 }
 
 // OpenSpeech starts or joins the synthesis of a reply. A resume (offset > 0)
-// only joins the cached stream it started on.
-func (s *Service) OpenSpeech(ctx context.Context, sessionID, messageID string, offset int) (*SpeechReader, error) {
+// requires the exact stream ID it started on; any replaced or missing stream
+// returns ErrSpeechRestarted without touching a replacement stream.
+func (s *Service) OpenSpeech(ctx context.Context, sessionID, messageID, streamID string, offset int) (*SpeechReader, error) {
 	if s.TTS == nil || !s.TTS.Enabled() {
 		return nil, ErrSpeechUnavailable
 	}
@@ -205,17 +209,21 @@ func (s *Service) OpenSpeech(ctx context.Context, sessionID, messageID string, o
 		stream.mu.Lock()
 		retry := stream.readers == 0 && (stream.abandoned && !stream.done ||
 			stream.done && stream.status != SpeechDone && stream.status != SpeechLimit)
-		if !retry {
+		match := streamID == "" || stream.id == streamID
+		canJoin := !retry && match && (offset == 0 || streamID != "")
+		if canJoin {
 			stream.join()
 		}
 		stream.mu.Unlock()
 		if retry {
 			delete(s.speech.streams, key)
 			stream = nil
+		} else if !match || (offset > 0 && streamID == "") {
+			return nil, ErrSpeechRestarted
 		}
 	}
 	if stream == nil {
-		if offset > 0 {
+		if offset > 0 || streamID != "" {
 			return nil, ErrSpeechRestarted
 		}
 		if len(s.speech.streams) >= speechMaxStreams {
@@ -223,7 +231,7 @@ func (s *Service) OpenSpeech(ctx context.Context, sessionID, messageID string, o
 		}
 		base := s.baseContext()
 		synthCtx, cancel := context.WithCancel(base)
-		stream = &speechStream{changed: make(chan struct{}), cancel: cancel, readers: 1}
+		stream = &speechStream{id: model.NewID(), changed: make(chan struct{}), cancel: cancel, readers: 1}
 		s.speech.streams[key] = stream
 		go s.synthesize(synthCtx, stream, sessionID, messageID)
 	}
@@ -311,9 +319,9 @@ func (s *Service) synthesize(ctx context.Context, stream *speechStream, sessionI
 		case <-time.After(500 * time.Millisecond):
 		}
 	}
-	// Markdown, code blocks and links are cleaned line by line, then the
-	// whole reply goes upstream as one text.
-	text := strings.Join(speech.Sentences(message.Reply), "\n")
+	// Markdown, code blocks and link targets are cleaned from the full reply,
+	// then the whole text goes upstream in one request.
+	text := speech.SpokenText(message.Reply)
 	if text == "" {
 		stream.end(SpeechDone)
 		return

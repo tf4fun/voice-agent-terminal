@@ -86,10 +86,7 @@ func waitWarm(t *testing.T, client *OpenAI) {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		client.mu.Lock()
-		ready := client.idle != nil && client.idle.healthy()
-		client.mu.Unlock()
-		if ready {
+		if client.hasWarmSession() {
 			return
 		}
 		time.Sleep(5 * time.Millisecond)

@@ -599,3 +599,88 @@ func TestTranscriptionTableIsBounded(t *testing.T) {
 		t.Fatalf("the newest transcription was evicted: %q %v", text, ok)
 	}
 }
+
+func TestPendingSessionReconcileDoesNotStarveBeyondPageLimit(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	// First 16 sessions always fail upstream; sessions 17..19 succeed (17 creating, 18 creating, 19 deleting).
+	failing := make(map[string]bool)
+	var mu sync.Mutex
+	callsPerRound := make([]int, 0, 4)
+	var roundCalls atomic.Int32
+	transport := lifecycleTransport(func(r *http.Request) (*http.Response, error) {
+		roundCalls.Add(1)
+		id := strings.TrimPrefix(r.URL.Path, "/api/sessions/")
+		mu.Lock()
+		bad := failing[id]
+		mu.Unlock()
+		if bad {
+			return lifecycleResponse(503, `{}`), nil
+		}
+		if r.Method == "GET" {
+			return lifecycleResponse(200, `{"session":{"id":"`+id+`","source":"api_server"}}`), nil
+		}
+		return lifecycleResponse(200, `{}`), nil
+	})
+	service := New(st, config.Config{}, &hermes.Client{BaseURL: "http://lifecycle.invalid", APIKey: "test", HTTP: &http.Client{Transport: transport}},
+		nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	ids := make([]string, 19)
+	for i := range ids {
+		ids[i] = model.NewID()
+		if _, _, err := st.Send(ctx, ids[i], model.NewID(), "m", "scope", "", "pending", true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Put the 16 failing sessions first in (created_at, id) order by sorting the created list or inspecting page 1.
+	firstPage, err := st.PendingSessions(ctx, nil, 16)
+	if err != nil || len(firstPage) != 16 {
+		t.Fatalf("first page=%d err=%v", len(firstPage), err)
+	}
+	firstSet := make(map[string]bool)
+	for _, s := range firstPage {
+		firstSet[s.ID] = true
+		failing[s.ID] = true
+	}
+	var tail []string
+	for _, id := range ids {
+		if !firstSet[id] {
+			tail = append(tail, id)
+		}
+	}
+	// Mark one tail session as deleting to test both creating and deleting tail recovery.
+	if err := st.BeginDelete(ctx, tail[2]); err != nil {
+		t.Fatal(err)
+	}
+
+	// Round 1: processes at most 16 entries (the failing ones), none of the tail yet.
+	roundCalls.Store(0)
+	service.reconcilePending(ctx)
+	callsPerRound = append(callsPerRound, int(roundCalls.Load()))
+	for _, id := range tail {
+		if got, err := st.Session(ctx, id); err != nil || got.State == "ready" {
+			t.Fatalf("tail session %s settled prematurely in round 1: %+v %v", id, got, err)
+		}
+	}
+
+	// Round 2: cursor advances past the 16 failing entries and settles all 3 tail sessions.
+	roundCalls.Store(0)
+	service.reconcilePending(ctx)
+	callsPerRound = append(callsPerRound, int(roundCalls.Load()))
+	if callsPerRound[0] > 16 || callsPerRound[1] > 16 {
+		t.Fatalf("per-round reconcile calls exceeded batch limit: %v", callsPerRound)
+	}
+	for _, id := range tail[:2] {
+		got, err := st.Session(ctx, id)
+		if err != nil || got.State != "ready" {
+			t.Fatalf("tail creating session %s not recovered: %+v %v", id, got, err)
+		}
+	}
+	if _, err := st.Session(ctx, tail[2]); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("tail deleting session %s not finished: err=%v", tail[2], err)
+	}
+}

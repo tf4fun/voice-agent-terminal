@@ -14,6 +14,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/tf4fun/voice-agent-terminal/server/internal/asr"
 	"github.com/tf4fun/voice-agent-terminal/server/internal/events"
 	"github.com/tf4fun/voice-agent-terminal/server/internal/gateway"
 	"github.com/tf4fun/voice-agent-terminal/server/internal/hermes"
@@ -385,6 +386,8 @@ func (s *Server) audio(w http.ResponseWriter, r *http.Request) {
 			writeError(w, 413, "audio_too_large")
 		case errors.Is(err, gateway.ErrNoSpeech):
 			writeError(w, 422, "no_speech")
+		case errors.Is(err, asr.ErrLimit):
+			writeError(w, 413, "limit_exceeded")
 		case errors.Is(err, store.ErrBusy) || errors.Is(err, store.ErrConflict) || errors.Is(err, store.ErrLimit):
 			storeError(w, err)
 		default:

@@ -181,3 +181,42 @@ func TestRestartKeepsInputAndRequiresSameMessageRecovery(t *testing.T) {
 		t.Fatalf("retry: %+v %v", claimed, err)
 	}
 }
+
+func TestPendingSessionsCursorCoversAllRowsWithoutStarvation(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ids := make([]string, 19)
+	for i := range ids {
+		ids[i] = model.NewID()
+		if _, _, err := st.Send(ctx, ids[i], model.NewID(), "m", "scope", "", "pending", true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var seen []string
+	var cursor *PendingCursor
+	for round := 0; round < 3; round++ {
+		page, err := st.PendingSessions(ctx, cursor, 16)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(page) > 16 {
+			t.Fatalf("page size %d exceeds limit", len(page))
+		}
+		for _, s := range page {
+			seen = append(seen, s.ID)
+		}
+		if len(page) < 16 {
+			cursor = nil
+			break
+		}
+		last := page[len(page)-1]
+		cursor = &PendingCursor{CreatedAt: last.CreatedAt, ID: last.ID}
+	}
+	if len(seen) != len(ids) {
+		t.Fatalf("visited %d/%d pending sessions", len(seen), len(ids))
+	}
+}

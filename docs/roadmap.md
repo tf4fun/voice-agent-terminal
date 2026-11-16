@@ -36,11 +36,30 @@ never touches it on the response, so text typed meanwhile stays (a failed send
 puts its text back); reconnecting refetches a reply whose revision changed even
 in the same state; the device reloads the newest message when another client
 retried it under the same ID; and a speech resume whose stream would have to be
-synthesized again is refused with 409, ending playback. Conversation windows,
-`/api/v1/ping` and unused firmware commands were removed, discovery now
+synthesized again is refused with 409, ending playback. The old session-level
+conversation window endpoint (`/api/v1/sessions/{id}/conversation`,
+`conversation_windows`), `/api/v1/ping` and unused firmware commands were removed
+(message and transcription `/text` window routes remain), discovery now
 advertises protocol 2, and turn polling reads metadata only. `tools/test-web.mjs`
 runs the web page's regressions in Node. Concurrent transcription preparation
 is left unbounded on purpose: one device prepares at a time. Device acceptance
+of the firmware changes is NOT RUN.
+
+Review issue #5 fixes: the web client guards late session metadata fetches against
+the active thread sequence and session ID, coalesces and revision-guards
+concurrent reply reads, preserves failed or uncertain (`TypeError`) sends
+independently of any newly typed draft for retry or recovery, and treats
+`attention` as active (blocking sends and showing the approval prompt). Speech
+streams bind a per-stream `X-Speech-Stream` identity checked on `?offset=&stream=`
+resumes across retries, same-attempt re-synthesis, eviction and restarts;
+spoken-reply formatting cleans complete Markdown structures before pauses;
+background pending-session recovery rotates a keyset cursor (`LIMIT 16` per
+round) without starving later entries; ASR and TTS share the warm WebSocket pool
+lifecycle in `internal/realtime`; oversized transcripts return `413
+limit_exceeded` rather than `502 transcription_failed`; unused helpers in
+`memo_browse.h` were removed; and the firmware voice view displays `等待审批`
+for `attention` while continuing to poll and blocking new sends. Server tests,
+firmware host tests and `tools/test-web.mjs` cover each fix; device acceptance
 of the firmware changes is NOT RUN.
 
 Sessions open on a voice-first view (orb, status line, one-line strip and key
