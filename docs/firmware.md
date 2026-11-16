@@ -52,7 +52,11 @@ reads into a 16 KiB buffer (about 512 ms) shared with recording
 (`agent_pcm_pool.c`; the two never run together, since recording ends
 playback), and a writer task at the capture task's priority feeds the codec
 after 400 ms of prebuffer, refilling 200 ms after running dry, with short fades
-around each dry spell so it does not click. A dropped connection resumes at the
+around each dry spell so it does not click. Before the codec, a 200 Hz
+second-order high-pass (`agent_speech_filter.h`, fixed point) removes the low
+end the small speaker cannot reproduce: about a third of synthesized speech
+energy lies below 250 Hz, and driving it made heavy syllables crackle at high
+volume. A dropped connection resumes at the
 exact stream byte it stopped at (`?offset=<bytes>&stream=<id>` using the
 `X-Speech-Stream` response header, up to three times, keepalives not
 counted), with the frame parser carried over. If the gateway would have to

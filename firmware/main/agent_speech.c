@@ -7,6 +7,7 @@
 #include <strings.h>
 
 #include "agent_pcm_pool.h"
+#include "agent_speech_filter.h"
 #include "agent_speech_frames.h"
 #include "agent_trace.h"
 #include "bsp_audio.h"
@@ -52,6 +53,7 @@ static atomic_uint s_played;    // PCM bytes sent to the speaker for this stream
 static _Atomic int64_t s_heard_us; // Last time stream bytes arrived.
 static atomic_uint s_longest_gap_ms; // Longest wait for stream bytes in this reply.
 static uint8_t s_chunk[1024];
+static agent_speech_filter_t s_filter; // Writer-owned; reset per stream.
 static agent_speech_parser_t s_parser;
 
 static void lock(void) { xSemaphoreTake(s_lock, portMAX_DELAY); }
@@ -110,6 +112,7 @@ static void writer_task(void *arg)
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
         bool primed = false, fade_in = true;
         size_t carry = 0; // A received odd byte waits for the rest of its sample.
+        agent_speech_filter_reset(&s_filter);
         for (;;) {
             if (atomic_load(&s_stop)) break;
             const size_t queued = xStreamBufferBytesAvailable(s_pcm);
@@ -139,6 +142,7 @@ static void writer_task(void *arg)
                 continue;
             }
             const size_t total = carry + got, even = total & ~(size_t)1;
+            agent_speech_filter_apply(&s_filter, s_chunk, even);
             // Fade into sound after silence, and out of it when this chunk
             // empties the buffer before the stream has ended.
             if (fade_in) { ramp(s_chunk, even, true); fade_in = false; }

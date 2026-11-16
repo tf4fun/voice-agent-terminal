@@ -20,6 +20,9 @@ for test in test_memo_key test_key_guard test_memo_power; do
         "firmware/tests/$test.c" -o "$test_dir/$test"
     "$test_dir/$test"
 done
+"${CC:-cc}" -std=c11 -D_DEFAULT_SOURCE -Wall -Wextra -Werror -Ifirmware/main \
+    firmware/tests/test_agent_speech_filter.c -lm -o "$test_dir/speech_filter"
+"$test_dir/speech_filter"
 "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Ifirmware/main -Ifirmware/tests/settings_stubs \
     firmware/tests/test_memo_settings.c -o "$test_dir/settings"
 "$test_dir/settings"
