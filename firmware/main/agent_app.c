@@ -997,7 +997,7 @@ static void render_voice(void)
 
     // The strip: one line of words, or the expanded draft panel.
     bool strip = false, tag = false, circular = false;
-    uint32_t strip_tone = UI_FG, border = UI_BORDER;
+    uint32_t strip_tone = UI_FG, border = UI_BORDER, fill = UI_SURFACE;
     line[0] = '\0';
     if (mode == AGENT_VOICE_RECORDING || mode == AGENT_VOICE_TRANSCRIBING) {
         strip = true;
@@ -1026,6 +1026,7 @@ static void render_voice(void)
         strip = s_voice_question != NULL && s_voice_question[0] != '\0';
         if (strip) agent_copy_text(line, sizeof(line), s_voice_question);
         strip_tone = UI_DIM;
+        fill = border = UI_SELECTED; // A flat grey field: sent, and no longer editable.
     } else if ((mode == AGENT_VOICE_IDLE || mode == AGENT_VOICE_FAILED) && s_view.turn.present &&
                s_voice_display != NULL && s_voice_line_count > 0) {
         // At rest a ticker steps through the reply line by line; while the
@@ -1051,6 +1052,8 @@ static void render_voice(void)
         set_text_color(s_voice_strip_text, strip_tone);
         if ((lv_color_to_u32(lv_obj_get_style_border_color(s_voice_strip, 0)) & 0xFFFFFF) != border)
             lv_obj_set_style_border_color(s_voice_strip, lv_color_hex(border), 0);
+        if ((lv_color_to_u32(lv_obj_get_style_bg_color(s_voice_strip, 0)) & 0xFFFFFF) != fill)
+            lv_obj_set_style_bg_color(s_voice_strip, lv_color_hex(fill), 0);
     }
 
     reveal(s_voice_panel, mode == AGENT_VOICE_DRAFT);
