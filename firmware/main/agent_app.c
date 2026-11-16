@@ -1026,7 +1026,7 @@ static void render_voice(void)
         strip = s_voice_question != NULL && s_voice_question[0] != '\0';
         if (strip) agent_copy_text(line, sizeof(line), s_voice_question);
         strip_tone = UI_DIM;
-        fill = border = UI_SELECTED; // A flat grey field: sent, and no longer editable.
+        fill = border = UI_BORDER; // A flat grey field: sent, and no longer editable.
     } else if ((mode == AGENT_VOICE_IDLE || mode == AGENT_VOICE_FAILED) && s_view.turn.present &&
                s_voice_display != NULL && s_voice_line_count > 0) {
         // At rest a ticker steps through the reply line by line; while the
