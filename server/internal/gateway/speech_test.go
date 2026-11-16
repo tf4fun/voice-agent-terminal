@@ -78,12 +78,8 @@ func TestAbandonedSpeechIsRedoneForANewListener(t *testing.T) {
 	if err := service.Store.SetSessionReady(ctx, session.ID); err != nil {
 		t.Fatal(err)
 	}
-	revision, err := service.Store.AddSegment(ctx, session.ID, model.NewID(), "读一下", 1)
-	if err != nil {
-		t.Fatal(err)
-	}
 	id := model.NewID()
-	if _, err := service.Store.Send(ctx, session.ID, id, "hermes-agent", service.Hermes.Scope(), revision); err != nil {
+	if _, _, err := service.Store.Send(ctx, session.ID, id, "hermes-agent", service.Hermes.Scope(), "读一下", false); err != nil {
 		t.Fatal(err)
 	}
 	// The idle timer has stopped synthesis but the stream has not ended yet:

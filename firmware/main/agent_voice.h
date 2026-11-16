@@ -21,7 +21,7 @@ typedef enum {
     AGENT_VOICE_FAILED,        // The newest reply failed or is unconfirmed: OK retries.
 } agent_voice_mode_t;
 
-// capture: 0 idle, 1 preparing, 2 recording, 3 finalizing, 4 committing (agent_capture_state_t).
+// capture: 0 idle, 1 preparing, 2 recording, 3 finalizing (agent_capture_state_t).
 static inline agent_voice_mode_t agent_voice_mode(int capture, bool has_draft, bool has_turn,
                                                   const char *state, bool speaking)
 {

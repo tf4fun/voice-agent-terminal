@@ -220,20 +220,11 @@ kbd { font: 11px var(--mono); color: var(--dim); border: 1px solid var(--border)
 /* Composer */
 .composer-area { flex: none; padding: 0 24px 14px; }
 .composer-area > * { max-width: 780px; margin-left: auto; margin-right: auto; }
-.composer-area > .live { display: flex; align-items: center; gap: 10px; width: fit-content; max-width: min(780px, 100%); margin: 0 auto 8px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; padding: 5px 12px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); font-size: 13px; }
-.composer-area > .live.rec { background: color-mix(in srgb, var(--recording) 14%, transparent); color: var(--recording); }
-#live-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.live-bars { display: inline-flex; align-items: center; gap: 2px; height: 14px; }
-.live-bars i { width: 3px; border-radius: 2px; background: currentColor; animation: level 0.9s infinite ease-in-out; }
-.live-bars i:nth-child(1), .live-bars i:nth-child(3) { height: 8px; animation-delay: .15s; }
-.live-bars i:nth-child(2) { height: 14px; }
-@keyframes level { 50% { transform: scaleY(.45); } }
 .composer { border: 1px solid var(--border); background: var(--surface); border-radius: 22px; padding: 10px 10px 8px 16px; box-shadow: var(--shadow); transition: border-color .15s; }
 .composer:focus-within { border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); }
 .composer textarea { display: block; width: 100%; border: 0; outline: none; resize: none; background: transparent; max-height: 40vh; min-height: 26px; line-height: 1.55; padding: 4px 4px 0 0; }
 .composer textarea::placeholder { color: var(--dim); }
 .composer-row { display: flex; align-items: center; justify-content: flex-end; gap: 10px; margin-top: 4px; }
-.draft-note { flex: 1; font-size: 12px; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .send { width: 36px; height: 36px; border-radius: 50%; border: 0; display: grid; place-items: center; background: var(--accent); color: var(--on-accent); transition: opacity .15s, transform .1s; }
 .send:disabled { opacity: .3; }
 .send:not(:disabled):active { transform: scale(.94); }

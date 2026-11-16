@@ -32,7 +32,16 @@ func lifecycleFixture(t *testing.T, transport http.RoundTripper) (*Service, mode
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { st.Close() })
-	session, err := st.BeginSession(context.Background(), model.NewID(), "lifecycle")
+	// A session is created by its first message. Failing that message leaves a
+	// still-creating session that create, delete and rename can race over.
+	id, first := model.NewID(), model.NewID()
+	if _, _, err := st.Send(context.Background(), id, first, "m", "scope", "lifecycle", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetMessageState(context.Background(), first, "failed", "", "test"); err != nil {
+		t.Fatal(err)
+	}
+	session, err := st.Session(context.Background(), id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -307,7 +316,7 @@ func (a *timedCaptureASR) Transcribe(ctx context.Context, in io.ReadCloser, rate
 	}
 	return emit(asr.Update{Text: "complete transcript", Final: true})
 }
-func TestCaptureHasSetupAndFinalizationBudget(t *testing.T) {
+func TestTranscriptionHasSetupAndFinalizationBudget(t *testing.T) {
 	for _, tc := range []struct {
 		name                 string
 		setup, audio, finish time.Duration
@@ -316,20 +325,22 @@ func TestCaptureHasSetupAndFinalizationBudget(t *testing.T) {
 		{"below_maximum_audio_plus_finalization", 0, 100 * time.Millisecond, 40 * time.Millisecond},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			svc, session := lifecycleFixture(t, nil)
-			id := model.NewID()
-			rev, err := svc.Store.AddSegment(context.Background(), session.ID, id, "", session.Revision)
-			if err != nil {
-				t.Fatal(err)
-			}
+			svc, _ := lifecycleFixture(t, nil)
 			svc.Config.CaptureTimeout = 120 * time.Millisecond
 			provider := &timedCaptureASR{started: make(chan struct{}), setup: tc.setup, finish: tc.finish}
 			svc.ASR = provider
 			input, producer := io.Pipe()
 			defer input.Close()
 			defer producer.Close()
-			done := make(chan error, 1)
-			go func() { done <- svc.Capture(context.Background(), session.ID, id, rev, input, 16000, true, true) }()
+			type result struct {
+				text string
+				err  error
+			}
+			done := make(chan result, 1)
+			go func() {
+				text, err := svc.Transcribe(context.Background(), model.NewID(), input, 16000)
+				done <- result{text, err}
+			}()
 			<-provider.started
 			go func() {
 				time.Sleep(tc.setup)
@@ -337,96 +348,84 @@ func TestCaptureHasSetupAndFinalizationBudget(t *testing.T) {
 				time.Sleep(tc.audio)
 				_ = producer.Close()
 			}()
-			err = <-done
-			if err != nil {
-				t.Fatalf("supported audio duration %s failed with request budget %s: %v", tc.audio, svc.Config.CaptureTimeout, err)
+			got := <-done
+			if got.err != nil || got.text != "complete transcript" {
+				t.Fatalf("supported audio duration %s failed with request budget %s: %q %v", tc.audio, svc.Config.CaptureTimeout, got.text, got.err)
 			}
 		})
 	}
 }
 
-type blockingCaptureASR struct {
-	entered chan struct{}
-	ctx     context.Context
+// scriptedASR emits a live partial, waits for release, then emits final.
+type scriptedASR struct {
+	partial, final string
+	release        chan struct{}
 }
 
-func (*blockingCaptureASR) Enabled() bool { return true }
-func (a *blockingCaptureASR) Transcribe(ctx context.Context, _ io.ReadCloser, _ int, _ func(asr.Update) error) error {
-	a.ctx = ctx
-	close(a.entered)
-	<-ctx.Done()
-	return ctx.Err()
+func (*scriptedASR) Enabled() bool { return true }
+func (a *scriptedASR) Transcribe(ctx context.Context, in io.ReadCloser, _ int, emit func(asr.Update) error) error {
+	if err := emit(asr.Update{Text: a.partial}); err != nil {
+		return err
+	}
+	select {
+	case <-a.release:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	_, _ = io.Copy(io.Discard, in)
+	return emit(asr.Update{Text: a.final, Final: true})
 }
 
-func TestDelayedEditCancellationPreservesNewCapture(t *testing.T) {
-	ctx := context.Background()
-	service, session := lifecycleFixture(t, nil)
+func TestTranscriptionLiveTextIsMemoryOnlyAndExpires(t *testing.T) {
+	previous := transcriptKeep
+	transcriptKeep = 30 * time.Millisecond
+	defer func() { transcriptKeep = previous }()
+	svc, _ := lifecycleFixture(t, nil)
+	svc.Config.CaptureTimeout = time.Second
+	provider := &scriptedASR{partial: "正在", final: "  正在说话  ", release: make(chan struct{})}
+	svc.ASR = provider
 	id := model.NewID()
-	revision, err := service.Store.AddSegment(ctx, session.ID, id, "", session.Revision)
-	if err != nil {
-		t.Fatal(err)
-	}
-	revision, retired, err := service.Store.EditSegmentWithGeneration(ctx, session.ID, id, "", revision, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	provider := &blockingCaptureASR{entered: make(chan struct{})}
-	service.ASR = provider
-	captureCtx, stop := context.WithCancel(ctx)
-	defer stop()
-	finished := make(chan error, 1)
+	done := make(chan string, 1)
 	go func() {
-		finished <- service.Capture(captureCtx, session.ID, id, revision, io.NopCloser(strings.NewReader("pcm")), 16000, false, false)
+		text, _ := svc.Transcribe(context.Background(), id, io.NopCloser(strings.NewReader("pcm")), 16000)
+		done <- text
 	}()
-	select {
-	case <-provider.entered:
-	case <-time.After(time.Second):
-		t.Fatal("capture did not enter recognition")
-	}
-	service.CancelCaptureGeneration(id, retired)
-	if provider.ctx.Err() != nil {
-		t.Fatalf("old edit cancelled new capture: %v", provider.ctx.Err())
-	}
-	service.mu.Lock()
-	generation := service.captures[id].generation
-	service.mu.Unlock()
-	if generation <= retired {
-		t.Fatalf("generation did not advance: %d %d", generation, retired)
-	}
-	service.CancelCaptureGeneration(id, generation)
-	select {
-	case err := <-finished:
-		if !errors.Is(err, context.Canceled) {
-			t.Fatal(err)
+	deadline := time.Now().Add(time.Second)
+	for {
+		if text, revision, ok := svc.TranscriptText(id); ok && text == "正在" && revision == 1 {
+			break
 		}
-	case <-time.After(time.Second):
-		t.Fatal("matching cancellation did not stop capture")
+		if time.Now().After(deadline) {
+			t.Fatal("live text not readable while recording")
+		}
+		time.Sleep(time.Millisecond)
 	}
+	if _, err := svc.Transcribe(context.Background(), id, io.NopCloser(strings.NewReader("pcm")), 16000); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("a transcription ID is single use: %v", err)
+	}
+	close(provider.release)
+	if text := <-done; text != "正在说话" {
+		t.Fatalf("final text=%q", text)
+	}
+	if text, _, ok := svc.TranscriptText(id); !ok || text != "  正在说话  " {
+		t.Fatalf("final text must stay readable briefly: %q %v", text, ok)
+	}
+	for deadline = time.Now().Add(time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+		if _, _, ok := svc.TranscriptText(id); !ok {
+			return
+		}
+	}
+	t.Fatal("finished transcript was not released")
 }
 
-func TestCaptureRegistrationRejectsRetiredGeneration(t *testing.T) {
-	service, _ := lifecycleFixture(t, nil)
-	id := model.NewID()
-	current, currentCancel := context.WithCancel(context.Background())
-	defer currentCancel()
-	if !service.registerCapture(id, 4, currentCancel) {
-		t.Fatal("current registration failed")
-	}
-	stale, staleCancel := context.WithCancel(context.Background())
-	defer staleCancel()
-	if service.registerCapture(id, 2, staleCancel) {
-		t.Fatal("older registration accepted")
-	}
-	if service.registerCapture(id, 4, staleCancel) {
-		t.Fatal("duplicate registration accepted")
-	}
-	if current.Err() != nil || stale.Err() != nil || service.captures[id].generation != 4 {
-		t.Fatal("stale registration changed active capture")
-	}
-	newest, newestCancel := context.WithCancel(context.Background())
-	defer newestCancel()
-	if !service.registerCapture(id, 6, newestCancel) || current.Err() != context.Canceled || newest.Err() != nil {
-		t.Fatal("newer registration did not replace older capture")
+func TestTranscriptionWithoutSpeechReportsNoSpeech(t *testing.T) {
+	svc, _ := lifecycleFixture(t, nil)
+	svc.Config.CaptureTimeout = time.Second
+	release := make(chan struct{})
+	close(release)
+	svc.ASR = &scriptedASR{final: " ", release: release}
+	if _, err := svc.Transcribe(context.Background(), model.NewID(), io.NopCloser(strings.NewReader("pcm")), 16000); !errors.Is(err, ErrNoSpeech) {
+		t.Fatalf("blank transcript=%v", err)
 	}
 }
 
@@ -439,12 +438,8 @@ func TestRetryRescopesMessageAfterHermesIdentityChange(t *testing.T) {
 	if err := service.Store.SetSessionReady(ctx, session.ID); err != nil {
 		t.Fatal(err)
 	}
-	revision, err := service.Store.AddSegment(ctx, session.ID, model.NewID(), "旧身份消息", 1)
-	if err != nil {
-		t.Fatal(err)
-	}
 	id := model.NewID()
-	if _, err := service.Store.Send(ctx, session.ID, id, "hermes-agent", "retired-scope", revision); err != nil {
+	if _, _, err := service.Store.Send(ctx, session.ID, id, "hermes-agent", "retired-scope", "旧身份消息", false); err != nil {
 		t.Fatal(err)
 	}
 	claimed, err := service.Store.Claim(ctx)
@@ -492,20 +487,20 @@ func TestPreparedCaptureIsTakenOnceAndExpires(t *testing.T) {
 	}))
 	fake := &preparingASR{}
 	service.ASR = fake
-	segment := model.NewID()
-	service.PrepareCapture(segment, time.Second)
-	if service.takePrepared(segment) != fake.sessions[0] || service.takePrepared(segment) != nil {
+	recording := model.NewID()
+	service.PrepareCapture(recording, time.Second)
+	if service.takePrepared(recording) != fake.sessions[0] || service.takePrepared(recording) != nil {
 		t.Fatal("a prepared session must be handed to exactly one upload")
 	}
 	previous := preparedTTL
 	preparedTTL = 20 * time.Millisecond
 	defer func() { preparedTTL = previous }()
-	service.PrepareCapture(segment, time.Second)
+	service.PrepareCapture(recording, time.Second)
 	deadline := time.Now().Add(2 * time.Second)
 	for fake.sessions[1].closed.Load() == 0 && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
 	}
-	if fake.sessions[1].closed.Load() != 1 || service.takePrepared(segment) != nil {
+	if fake.sessions[1].closed.Load() != 1 || service.takePrepared(recording) != nil {
 		t.Fatal("an unused prepared session must expire and close")
 	}
 	preparedTTL = time.Minute

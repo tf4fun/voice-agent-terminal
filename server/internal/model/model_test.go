@@ -26,3 +26,16 @@ func TestWindowsRetainUTF8AndIDShape(t *testing.T) {
 		t.Fatal("invalid UUID handling")
 	}
 }
+
+func TestTitleFromFirstLine(t *testing.T) {
+	for input, want := range map[string]string{
+		"\n  推荐一本书 \n第二行": "推荐一本书",
+		"   ":             "新会话",
+		"a\tb":            "a b",
+		"一二三四五六七八九十一二三四五六七八九十一二三四五": "一二三四五六七八九十一二三四五六七八九十一二三四…",
+	} {
+		if got := TitleFrom(input); got != want {
+			t.Errorf("TitleFrom(%q)=%q, want %q", input, got, want)
+		}
+	}
+}

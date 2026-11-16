@@ -15,7 +15,7 @@ func TestBoundedPayloadAndSlowSubscriberRecovery(t *testing.T) {
 		t.Fatal("subscription refused")
 	}
 	defer cancel()
-	hub.Publish(Event{Type: "chat.delta", SessionID: model.NewID(), SegmentID: model.NewID(), MessageID: model.NewID(), Text: strings.Repeat("\x00<你好", 1000)})
+	hub.Publish(Event{Type: "chat.delta", SessionID: model.NewID(), MessageID: model.NewID(), Text: strings.Repeat("\x00<你好", 1000)})
 	payload, err := json.Marshal(<-channel)
 	if err != nil || len(payload)+8 > 1024 {
 		t.Fatalf("payload %d: %v", len(payload), err)

@@ -10,13 +10,13 @@ import (
 	"github.com/tf4fun/voice-agent-terminal/server/internal/model"
 )
 
-const messageColumns = "id,session_id,draft_revision,model,upstream_scope,attempts,input,reply,state,finish_reason,error,revision,created_at,updated_at"
+const messageColumns = "id,session_id,model,upstream_scope,attempts,input,reply,state,finish_reason,error,revision,created_at,updated_at"
 
 type scanner interface{ Scan(...any) error }
 
 func scanMessage(row scanner) (model.Message, error) {
 	var message model.Message
-	err := row.Scan(&message.ID, &message.SessionID, &message.DraftRevision, &message.Model, &message.UpstreamScope, &message.Attempts, &message.Input, &message.Reply,
+	err := row.Scan(&message.ID, &message.SessionID, &message.Model, &message.UpstreamScope, &message.Attempts, &message.Input, &message.Reply,
 		&message.State, &message.FinishReason, &message.Error, &message.Revision, &message.CreatedAt, &message.UpdatedAt)
 	message.InputBytes, message.ReplyBytes = len(message.Input), len(message.Reply)
 	return message, missing(err)
@@ -26,11 +26,16 @@ func (s *Store) Message(ctx context.Context, sessionID, id string) (model.Messag
 	return scanMessage(s.db.QueryRowContext(ctx, "SELECT "+messageColumns+" FROM messages WHERE id=? AND session_id=?", id, sessionID))
 }
 
-func (s *Store) Send(ctx context.Context, sessionID, id, modelName, scope string, revision int64) (model.Message, error) {
+// Send stores one complete user input as a queued message. With create, an
+// unknown session is created in the same transaction and titled after the
+// input, so a session never exists without its first message. A repeated
+// message ID with the same session and input returns the stored message.
+func (s *Store) Send(ctx context.Context, sessionID, id, modelName, scope, input string, create bool) (model.Message, bool, error) {
+	created := false
 	err := s.transaction(ctx, func(tx *sql.Tx) error {
 		existing, err := scanMessage(tx.QueryRowContext(ctx, "SELECT "+messageColumns+" FROM messages WHERE id=?", id))
 		if err == nil {
-			if existing.SessionID != sessionID || existing.DraftRevision != revision {
+			if existing.SessionID != sessionID || existing.Input != input {
 				return ErrConflict
 			}
 			return nil
@@ -38,18 +43,29 @@ func (s *Store) Send(ctx context.Context, sessionID, id, modelName, scope string
 		if !errors.Is(err, ErrNotFound) {
 			return err
 		}
-		if err := checkDraft(ctx, tx, sessionID, revision); err != nil {
-			return err
+		if input == "" {
+			return ErrConflict
 		}
-		if err := checkNoReplacement(ctx, tx, sessionID, ""); err != nil {
-			return err
+		if len(input) > model.MaxInputBytes {
+			return ErrLimit
 		}
-		session, err := readSession(ctx, tx, sessionID)
-		if err != nil {
+		now := time.Now().UnixMilli()
+		var state string
+		err = tx.QueryRowContext(ctx, "SELECT state FROM sessions WHERE id=?", sessionID).Scan(&state)
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			if !create {
+				return ErrNotFound
+			}
+			if _, err := tx.ExecContext(ctx, "INSERT INTO sessions(id,title,state,created_at,updated_at) VALUES(?,?,'creating',?,?)",
+				sessionID, model.TitleFrom(input), now, now); err != nil {
+				return err
+			}
+			created = true
+		case err != nil:
 			return err
-		}
-		if session.State != "ready" {
-			return ErrBusy
+		case state == "deleted" || state == "deleting":
+			return ErrNotFound
 		}
 		var active int
 		if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM messages WHERE session_id=? AND state IN ('queued','sending','waiting','receiving','attention','unconfirmed')", sessionID).Scan(&active); err != nil {
@@ -58,42 +74,25 @@ func (s *Store) Send(ctx context.Context, sessionID, id, modelName, scope string
 		if active > 0 {
 			return ErrBusy
 		}
-		var capturing int
-		if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM segments WHERE session_id=? AND message_id IS NULL AND state IN ('capturing','staged')", sessionID).Scan(&capturing); err != nil {
+		if _, err := tx.ExecContext(ctx, "INSERT INTO messages(id,session_id,model,upstream_scope,input,state,created_at,updated_at) VALUES(?,?,?,?,?,'queued',?,?)", id, sessionID, modelName, scope, input, now, now); err != nil {
 			return err
 		}
-		if capturing > 0 {
-			return ErrBusy
-		}
-		input, err := readDraftText(ctx, tx, sessionID)
-		if err != nil {
-			return err
-		}
-		if input == "" {
-			return ErrConflict
-		}
-		if len(input) > model.MaxDraftBytes {
-			return ErrLimit
-		}
-		now := time.Now().UnixMilli()
-		if _, err := tx.ExecContext(ctx, "INSERT INTO messages(id,session_id,draft_revision,model,upstream_scope,input,state,created_at,updated_at) VALUES(?,?,?,?,?,?,'queued',?,?)", id, sessionID, revision, modelName, scope, input, now, now); err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx, "UPDATE segments SET message_id=?,generation=generation+1 WHERE session_id=? AND message_id IS NULL AND state!='deleted'", id, sessionID); err != nil {
-			return err
-		}
-		_, err = bumpDraft(ctx, tx, sessionID)
+		_, err = tx.ExecContext(ctx, "UPDATE sessions SET updated_at=? WHERE id=?", now, sessionID)
 		return err
 	})
 	if err != nil {
-		return model.Message{}, err
+		return model.Message{}, false, err
 	}
-	return s.Message(ctx, sessionID, id)
+	message, err := s.Message(ctx, sessionID, id)
+	return message, created, err
 }
 
+// Claim takes the oldest queued message whose Hermes session exists; a session
+// still being created keeps its first message queued.
 func (s *Store) Claim(ctx context.Context) (model.Message, error) {
 	return scanMessage(s.db.QueryRowContext(ctx, `UPDATE messages SET state='sending',error='',updated_at=?,revision=revision+1
-		WHERE id=(SELECT id FROM messages WHERE state='queued' ORDER BY rowid LIMIT 1) RETURNING `+messageColumns, time.Now().UnixMilli()))
+		WHERE id=(SELECT m.id FROM messages m JOIN sessions s ON s.id=m.session_id
+			WHERE m.state='queued' AND s.state='ready' ORDER BY m.rowid LIMIT 1) RETURNING `+messageColumns, time.Now().UnixMilli()))
 }
 
 func (s *Store) SetMessageState(ctx context.Context, id, state, reason, code string) error {
@@ -157,7 +156,7 @@ func (s *Store) Retry(ctx context.Context, sessionID, id, scope string) error {
 
 func (s *Store) Messages(ctx context.Context, sessionID string, limit, offset int) ([]model.Message, error) {
 	// Metadata queries leave large inputs and replies inside SQLite.
-	rows, err := s.db.QueryContext(ctx, `SELECT id,session_id,draft_revision,model,upstream_scope,attempts,'','',state,finish_reason,error,revision,created_at,updated_at,
+	rows, err := s.db.QueryContext(ctx, `SELECT id,session_id,model,upstream_scope,attempts,'','',state,finish_reason,error,revision,created_at,updated_at,
 		length(CAST(input AS BLOB)),length(CAST(reply AS BLOB)) FROM messages WHERE session_id=? ORDER BY rowid DESC LIMIT ? OFFSET ?`, sessionID, limit, offset)
 	if err != nil {
 		return nil, err
@@ -166,11 +165,19 @@ func (s *Store) Messages(ctx context.Context, sessionID string, limit, offset in
 	items := make([]model.Message, 0, limit)
 	for rows.Next() {
 		var item model.Message
-		if err := rows.Scan(&item.ID, &item.SessionID, &item.DraftRevision, &item.Model, &item.UpstreamScope, &item.Attempts, &item.Input, &item.Reply, &item.State,
+		if err := rows.Scan(&item.ID, &item.SessionID, &item.Model, &item.UpstreamScope, &item.Attempts, &item.Input, &item.Reply, &item.State,
 			&item.FinishReason, &item.Error, &item.Revision, &item.CreatedAt, &item.UpdatedAt, &item.InputBytes, &item.ReplyBytes); err != nil {
 			return nil, err
 		}
 		items = append(items, item)
 	}
 	return items, rows.Err()
+}
+
+// Recover marks messages interrupted by a gateway restart as unconfirmed, so
+// their outcome is reconciled or retried explicitly.
+func (s *Store) Recover(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE messages SET state='unconfirmed',error='gateway_restarted',revision=revision+1
+		WHERE state IN ('sending','waiting','receiving','attention')`)
+	return err
 }

@@ -19,8 +19,8 @@ against the selected Hermes version before depending on them.
 
 | Owner | Data and responsibilities |
 | --- | --- |
-| Device | Selected session, reviewed draft revision, one complete user input and one complete Hermes reply in RAM, local reading position, bounded audio capture and playback buffers and interaction state |
-| Go | Device-to-Hermes session mapping, paginated session index, persistent drafts and segment order, complete message snapshots and retry identities, bounded SSE delivery, filtered reply storage and the cached spoken-reply streams |
+| Device | Selected session, the unsent voice draft (RAM only, up to 140 characters), one complete user input and one complete Hermes reply in RAM, local reading position, bounded audio capture and playback buffers and interaction state |
+| Go | Device-to-Hermes session mapping, paginated session index, side-channel transcription that stores nothing, complete message snapshots and retry identities, bounded SSE delivery, filtered reply storage and the cached spoken-reply streams |
 | Hermes | Conversation history, model context, session runtime and configured agent capabilities |
 | OpenAI | Transcription of the audio submitted by Go and synthesis of the completed reply text Go submits for speech |
 
@@ -56,52 +56,46 @@ of the compact header/status layout, card spacing, completion waiting, top-of-re
 opening and manual scrolling. Long-message stress and reconnect recovery require
 separate device checks. Measurements and results describe their recorded builds.
 
-## Draft composition
+## Drafts and sessions
 
-Each recording creates a segment ID with an ordered position and a generation.
-Streaming recognition updates that segment while the draft remains editable.
-The gateway API supports appending recordings and deleting selected segments.
-The current device interaction reviews a pending message in the conversation,
-sends it with Short OK, and re-records it with Long OK. Replacement capture keeps
-earlier text until a nonempty final transcript atomically retires it. Complete
-draft reads use the same joining rules and revision as send snapshots.
+Since protocol 2 (2026-11-16) a draft belongs to the client composing it and
+never reaches the gateway before it is sent. Voice input is equivalent to
+typing: transcription is a side channel that returns text and persists nothing.
 
-Edits and transcription updates advance the draft revision. A deleted segment
-is retired, and late updates are checked against its ID, generation and lifetime.
-The device sends its reviewed revision with a send request. Go checks that
-revision and atomically commits the matching text as a message snapshot. A stale
-revision returns the current draft for review before a new send attempt.
-
-This revision check preserves the user's visible text across late recognition
-updates. Explicit send is the sole trigger for submitting draft text to Hermes.
-A message's text is fixed after submission. Draft and send failure recovery
-retain the user's input and its operation identity.
-
-Capture results are staged before the device automatically confirms replacement.
-Cancellation, restart recovery and expiry retire uncommitted staged text while
-preserving the prior draft. Commit and abort reconcile through a transaction and
-persisted commit revision. Text reads isolate late responses by request generation,
-and discovery rotates endpoints after a rejected candidate.
+- The device keeps one pending message in RAM, bounded to 140 characters and
+  shown with its character count. A successful re-recording replaces it, a
+  failed one keeps it, long Down clears it and leaving the session discards it.
+  It does not delay sleep; deep sleep or a reboot loses it.
+- The web page keeps unsent composer text per session in page memory.
+- Sending carries the complete text with a client message ID. A new chat has a
+  client-generated session ID only, and its first send creates the session in
+  the same transaction as the message, titled from the message's first line.
+  No session exists without a message, so an abandoned recording or a dropped
+  connection leaves nothing behind for the gateway or Hermes to clean up.
+- A repeated send with the same IDs and text returns the stored message, so a
+  lost response is retried without duplicating it. A message's text is fixed
+  once stored; explicit send is the sole trigger for submitting it to Hermes.
+- The two clients' drafts do not synchronize; sent messages and replies do.
 
 ## Audio and transcription
 
 The target is incremental audio upload and visible transcription while recording.
 Go owns the OpenAI realtime connection, converts the selected device audio format
-to an accepted upstream format, and associates events with the recording segment.
-Ending a recording commits that audio turn and settles its transcription in the
-draft. Recognition finalization and message sending are separate user-visible
-transitions.
+to an accepted upstream format, and associates events with the recording's
+transcription ID. Ending a recording commits that audio turn; the final text is
+the upload's response and becomes the client's draft. Recognition finalization
+and message sending are separate user-visible transitions.
 
 The initial model candidate is `gpt-live-transcribe`. The official realtime guide
 checked on 2026-11-13 demonstrates mono PCM16 at 24 kHz and explicit audio-turn
 commit. Confirm account access, accepted formats and latency using real audio.
-Match upstream events by item identity and segment generation.
+Match upstream events by item identity.
 
 The device streams mono PCM16 at 16 kHz over chunked HTTP and requires a
 connected gateway. A 16 KiB PCM buffer, shared with spoken-reply playback,
 bounds capture buffering. Bounded live
-transcription previews serve recording, and committed input is read as complete
-text for review. Hardware acceptance of the new complete-message revision
+transcription previews serve recording, and the final text is held in RAM for
+review. Hardware acceptance of the new complete-message revision
 remains NOT RUN.
 Benchmark capture and networking together on AI Passport, including total free
 heap, largest free block, stack high-water marks and bounded-backpressure behavior.
@@ -152,6 +146,21 @@ Represent omitted media with a small resource description. Deliver complete
 message bodies and bounded incremental events. Transport event limits and RAM
 allocation checks preserve the logical identity and complete stored message.
 
+Text has one hard bound per stage. A default system prompt
+(`HERMES_SYSTEM_PROMPT`) asks Hermes for replies within 300 characters unless a
+long one is requested, so the bounds below are a backstop:
+
+| Stage | Bound | Beyond it |
+| --- | --- | --- |
+| Device voice draft | 140 characters | The recording is refused and the earlier draft kept |
+| Message input (any client) | 64 KiB | `413 input_too_large` |
+| One transcript | 16 KiB | `413` |
+| Stored reply | 2 MiB | The message ends `incomplete`; the web page shows what was kept |
+| Spoken text | 8000 bytes (about 2600 Chinese characters) | Not read aloud |
+| Spoken audio | 16 MiB (about 8.7 min), 10 min per reply | Synthesis stops |
+| Device input and reply cache | 8000 bytes each | A notice points to the web page |
+| Voice page ticker | 256 lines (about 7.5 KiB) | Not reachable on that page |
+
 Approval events, reasoning and progress have explicit presentation policies.
 The initial device feature set centers on text chat. Pending approvals retain
 their waiting state and produce a concise attention status; detailed approval
@@ -160,15 +169,15 @@ interaction remains an open product decision.
 ## Discovery and device API
 
 The mDNS record names the Go service and advertises a protocol version. The
-gateway's capability response describes available chat, draft, transcription
-and speech features. The implemented service type, routes, payload bounds and recovery
+gateway's capability response describes available chat, transcription and
+speech features. The implemented service type, routes, payload bounds and recovery
 semantics are recorded in the [server contract](server.md).
 
 The server accepts HTTP PCM16 audio uploads and sends bounded SSE events to the
 web page. Audio upload and reply delivery have independent flow control. The
 device polls turn metadata while a reply is written and then reads the whole
-message snapshot into its selected RAM cache. Metadata polling also supports
-discovery and recording state. Device memory and latency for
+message snapshot into its selected RAM cache. While recording it polls the live
+transcript of its transcription ID. Device memory and latency for
 this revision need hardware measurements. OpenAI's realtime transport runs in Go.
 
 ## References

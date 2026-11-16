@@ -4,12 +4,12 @@
 
 # Voice Agent Terminal
 
-A handheld voice-chat terminal with editable message drafts, a Go gateway,
+A handheld voice-chat terminal with voice drafts reviewed before sending, a Go gateway,
 OpenAI transcription and speech, and Hermes Chat Completions.
 
 ## Project status
 
-The Go gateway implements mDNS, persistent sessions and editable drafts,
+The Go gateway implements mDNS, persistent sessions, side-channel
 OpenAI realtime transcription, Hermes Chat Completions, media filtering and
 message recovery. Offline adapter tests and a real-binary smoke test exercise
 the server workflow. Real OpenAI transcription and two-turn Hermes chat passed
@@ -39,8 +39,8 @@ precedence. `/api/v1/health` reports local service health and `/api/v1/server`
 reports capabilities. Missing upstream keys leave the corresponding capability
 disabled while the local service remains inspectable.
 
-Open the server root in a browser for a web chat client that shares sessions,
-drafts and replies with the device; deleting a session there also removes it
+Open the server root in a browser for a web chat client that shares sessions
+and replies with the device (drafts stay on each client); deleting a session there also removes it
 from Hermes. See [server configuration and API](docs/server.md) for request examples.
 
 ## Validate and build
@@ -78,10 +78,14 @@ binaries and a combined `SHA256SUMS` as GitHub release assets.
    reply aloud (when the gateway offers speech) and the text card shows it from
    its beginning.
 
-The device keeps one pending message. A successful re-recording replaces its
-earlier text. Sending commits the reviewed draft revision as an immutable message
-snapshot. The gateway also retains its general segment editing API. Transcription
-completion updates the draft. The user's send action triggers Hermes.
+The device keeps one pending message in RAM, bounded to 140 characters and
+shown with its count. A successful re-recording replaces its earlier text, and
+long Down clears it. Transcription is a side channel: the gateway returns the
+text and stores nothing. Sending carries the complete text as an immutable
+message snapshot; a new session is created and titled by its first send, so
+abandoned recordings leave no empty sessions. An unsent draft does not delay
+sleep; deep sleep or a reboot loses it. The user's
+send action triggers Hermes.
 
 ## Architecture
 
@@ -98,7 +102,7 @@ flowchart LR
   uses the OpenAI Realtime API to read completed replies aloud.
 - Hermes manages conversation history and serves Chat Completions through its
   existing API.
-- Go manages the device's session list, drafts, message identities, filtered
+- Go manages the device's session list, message identities, filtered
   reply cache, and reconnect recovery.
 - The device uses bounded audio and text buffers. Media filtering happens in Go.
 

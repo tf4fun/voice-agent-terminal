@@ -29,18 +29,6 @@ static void test_bounded_protocol(void)
     assert(strcmp(title, "中文") == 0);
     agent_copy_text(title, sizeof(title), "\xff");
     assert(title[0] == '\0');
-    agent_segment_t segments[4];
-    uint32_t revision = 0;
-    int total = 0;
-    snprintf(json, sizeof(json), "{\"revision\":25,\"total\":1,\"items\":[{\"id\":\"%s\",\"state\":\"ready\",\"preview\":\"第一段\",\"bytes\":9}]}", id);
-    assert(agent_parse_draft(json, segments, &count, &revision, &total));
-    assert(revision == 25 && count == 1 && segments[0].bytes == 9);
-    assert(agent_parse_draft("{\"revision\":1,\"total\":65,\"items\":[]}", segments, &count, &revision, &total));
-    assert(total == 65);
-    assert(!agent_parse_draft("{\"revision\":1,\"total\":66,\"items\":[]}", segments, &count, &revision, &total));
-    assert(!agent_parse_draft("{\"revision\":-1,\"items\":[]}", segments, &count, &revision, &total));
-    assert(!agent_parse_revision("{\"revision\":4294967296}", &revision));
-    assert(!agent_parse_revision("{\"revision\":1.5}", &revision));
     agent_text_t text;
     assert(agent_parse_text("{\"text\":\"你好\",\"offset\":3,\"end\":9,\"total\":12,\"revision\":4}", &text));
     assert(strcmp(text.text, "你好") == 0 && text.end == 9);

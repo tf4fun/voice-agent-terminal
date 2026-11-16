@@ -82,26 +82,6 @@ bool agent_parse_sessions(const char *json, agent_session_t *items, int *count)
     return valid;
 }
 
-bool agent_parse_draft(const char *json, agent_segment_t *items, int *count, uint32_t *revision, int *total)
-{
-    cJSON *root = cJSON_Parse(json);
-    const cJSON *array;
-    uint32_t size = 0;
-    // Up to 64 draft segments and one reserved replacement operation.
-    bool valid = number_field(root, "revision", revision) && number_field(root, "total", &size) &&
-        size <= 65 && array_count(root, &array, count) && *count <= (int)size;
-    *total = (int)size;
-    for (int i = 0; valid && i < *count; i++) {
-        const cJSON *item = cJSON_GetArrayItem(array, i);
-        memset(&items[i], 0, sizeof(items[i]));
-        valid = object_id(item, items[i].id) && number_field(item, "bytes", &items[i].bytes);
-        agent_copy_text(items[i].state, sizeof(items[i].state), string_field(item, "state"));
-        agent_copy_text(items[i].preview, sizeof(items[i].preview), string_field(item, "preview"));
-    }
-    cJSON_Delete(root);
-    return valid;
-}
-
 static bool message_fields(const cJSON *root, agent_message_t *item)
 {
     memset(item, 0, sizeof(*item));
@@ -165,14 +145,6 @@ bool agent_parse_turn(const char *json, agent_turn_t *turn)
         if (!number_field(root, "index", &turn->index) || !number_field(root, "total", &turn->total) ||
             turn->index > turn->total) turn->index = turn->total = 0;
     }
-    cJSON_Delete(root);
-    return valid;
-}
-
-bool agent_parse_revision(const char *json, uint32_t *revision)
-{
-    cJSON *root = cJSON_Parse(json);
-    bool valid = number_field(root, "revision", revision);
     cJSON_Delete(root);
     return valid;
 }

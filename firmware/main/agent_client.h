@@ -3,20 +3,30 @@
 #include "agent_protocol.h"
 #include "esp_err.h"
 
-typedef enum { AGENT_IDLE, AGENT_PREPARING, AGENT_RECORDING, AGENT_FINALIZING, AGENT_COMMITTING } agent_capture_state_t;
+typedef enum { AGENT_IDLE, AGENT_PREPARING, AGENT_RECORDING, AGENT_FINALIZING } agent_capture_state_t;
+// SEGMENT is the live transcript while recording; DRAFT the unsent voice draft.
 typedef enum { AGENT_TEXT_REPLY, AGENT_TEXT_INPUT, AGENT_TEXT_SEGMENT, AGENT_TEXT_DRAFT } agent_text_kind_t;
+
+// The voice draft lives only in device RAM until it is sent; a reboot loses it.
+// Spoken instructions are short, so it is bounded like a short message.
+#define AGENT_DRAFT_MAX_CHARS 140
+#define AGENT_DRAFT_MAX_BYTES (AGENT_DRAFT_MAX_CHARS * 4)
+#define AGENT_STR_(value) #value
+#define AGENT_STR(value) AGENT_STR_(value)
+#define AGENT_DRAFT_TOO_LONG "超过 " AGENT_STR(AGENT_DRAFT_MAX_CHARS) " 字，请缩短后重录"
 
 typedef struct {
     agent_session_t sessions[AGENT_PAGE_SIZE];
     int session_count, session_offset;
     bool sessions_more;
-    int session_requested, segment_requested;
-    bool sessions_loading, segments_loading, sessions_ready;
+    int session_requested;
+    bool sessions_loading, sessions_ready;
     char session_id[37], title[AGENT_TITLE_BYTES + 1];
-    agent_segment_t segments[AGENT_PAGE_SIZE];
-    int segment_count, segment_offset, segment_total;
-    bool segments_more;
-    uint32_t draft_revision, text_request;
+    // A new chat has a local ID only; the gateway creates it with the first send.
+    bool session_local;
+    // Characters in the unsent draft (0 = none); the serial changes with its text.
+    uint32_t draft_chars, draft_serial;
+    uint32_t text_request;
     char turn_anchor[37];
     uint32_t chat_request;
     bool chat_loading, chat_ready, chat_sending, text_loading;
@@ -28,7 +38,7 @@ typedef struct {
     char text_id[37];
     agent_capture_state_t capture;
     bool connected, busy, provisioning, paused, session_switching;
-    bool speech, draft_clear; // Gateway capabilities: spoken replies, one-step draft clearing.
+    bool speech; // Gateway capability: spoken replies.
     char notice[64];
     uint32_t generation, selection, capture_serial;
 } agent_view_t;
@@ -48,13 +58,17 @@ esp_err_t agent_client_record(bool new_session);
 void agent_client_release_record(void);
 // False once saving has started; leaving that page keeps the save running.
 bool agent_client_cancel_record(void);
-esp_err_t agent_client_send(uint32_t reviewed_revision, uint32_t reviewed_selection);
+// Sends the draft shown with this serial; a new chat's session is created by it.
+esp_err_t agent_client_send(uint32_t draft_serial, uint32_t reviewed_selection);
 esp_err_t agent_client_review_draft(void);
 esp_err_t agent_client_retry(const char *id, uint32_t reviewed_selection);
 // The loaded input or reply of the shown exchange regardless of which one the
 // text card displays (voice page). Caller owns the copy; NULL when not loaded.
 char *agent_client_part_copy(uint32_t selection, bool input);
-// Discards the whole reviewed draft (long Down on the voice page).
+// The opening of that part, cut at a UTF-8 boundary into the caller's buffer;
+// nothing is allocated. False when it is not loaded.
+bool agent_client_part_prefix(uint32_t selection, bool input, char *out, size_t capacity);
+// Discards the unsent draft (long Down on the voice page); nothing is sent.
 esp_err_t agent_client_clear_draft(void);
 // Returns from older history to the newest exchange.
 esp_err_t agent_client_show_latest(void);

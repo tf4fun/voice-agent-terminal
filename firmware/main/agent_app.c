@@ -87,7 +87,9 @@ static lv_obj_t *s_voice_strip, *s_voice_strip_text, *s_voice_strip_spin;
 static lv_obj_t *s_voice_panel, *s_voice_panel_count, *s_voice_panel_scroll, *s_voice_panel_body, *s_voice_hints;
 static int s_voice_mode = -1, s_voice_hint_set = -1, s_voice_review = -1;
 static bool s_voice_small, s_voice_arc_spinning, s_voice_spin_spinning;
-static char *s_voice_reply, *s_voice_draft, *s_voice_question;
+static char *s_voice_draft;
+// The question strip shows one line, so only the input's opening is kept.
+static char s_voice_question[256];
 static char s_voice_reply_key[96], s_voice_question_id[37];
 static uint32_t s_voice_draft_generation = UINT32_MAX, s_voice_draft_selection;
 // Line review: the reply without Markdown marks, wrapped to the strip's width.
@@ -164,11 +166,10 @@ static void delete_screen(void)
     s_voice_review = -1; // Line offsets belong to the reply being left.
     s_voice_mode = s_voice_hint_set = -1;
     s_voice_small = s_voice_arc_spinning = s_voice_spin_spinning = false;
-    free(s_voice_reply);
     free(s_voice_draft);
-    free(s_voice_question);
     free(s_voice_display);
-    s_voice_reply = s_voice_draft = s_voice_question = s_voice_display = NULL;
+    s_voice_draft = s_voice_display = NULL;
+    s_voice_question[0] = '\0';
     s_voice_line_count = 0;
     s_voice_reply_key[0] = s_voice_question_id[0] = '\0';
     s_voice_draft_generation = UINT32_MAX;
@@ -571,18 +572,20 @@ static void render_chat(void)
     }
 
     if (!loading && (different || s_chat_generation != s_view.text_generation)) {
+        // The shown copy is released before the next one is taken, so a long
+        // reply is never held twice beside the client's cache.
+        const int32_t position = lv_obj_get_scroll_y(s_scroll);
+        lv_label_set_text_static(s_chat_body, "");
+        free(s_chat_text);
+        s_chat_text = NULL;
         char *text = agent_client_text_copy(s_view.selection, s_view.text_generation);
         if (text != NULL) {
             char *first = text;
             while (*first == '\n' || *first == '\r') first++;
             if (first != text) memmove(text, first, strlen(first) + 1);
             memo_font_filter_text(text, false);
-            const int32_t position = lv_obj_get_scroll_y(s_scroll);
-            if (s_chat_text == NULL || strcmp(s_chat_text, text) != 0) {
-                lv_label_set_text_static(s_chat_body, text);
-                free(s_chat_text);
-                s_chat_text = text;
-            } else free(text);
+            lv_label_set_text_static(s_chat_body, text);
+            s_chat_text = text;
             lv_obj_update_layout(s_scroll);
             int32_t target = position;
             if (different) {
@@ -699,7 +702,7 @@ static void voice_orb(bool small, uint32_t fill, lv_opa_t fill_opa, uint32_t rin
 
 static bool voice_has_draft(void)
 {
-    return s_view.text_kind == AGENT_TEXT_DRAFT && s_view.segment_total > 0;
+    return s_view.text_kind == AGENT_TEXT_DRAFT && s_view.draft_chars > 0;
 }
 
 
@@ -716,26 +719,29 @@ static uint32_t utf8_codepoint(const char *text, size_t at, size_t *size)
 // Builds the review units: Markdown emphasis, code ticks and line leaders are
 // dropped and blank lines collapse. Every sentence starts a unit, and a
 // sentence wider than the strip continues in further units, so each up/down
-// press shows one still, readable piece.
-static void voice_wrap_lines(void)
+// press shows one still, readable piece. Takes ownership of reply and strips
+// it in place (the display text is never longer), then trims what the line
+// table cannot reach, so a long reply is held once beside the client's cache.
+static void voice_wrap_lines(char *reply)
 {
     free(s_voice_display);
     s_voice_display = NULL;
     s_voice_line_count = 0;
-    const size_t length = strlen(s_voice_reply);
-    char *display = malloc(length + 1);
-    if (display == NULL) return;
+    if (reply == NULL) return;
+    const char *const source = reply; // Read side; every write trails it.
+    char *display = reply;
+    const size_t length = strlen(source);
     size_t used = 0;
     bool line_start = true;
     for (size_t i = 0; i < length;) {
         if (line_start) {
-            while (i < length && (s_voice_reply[i] == ' ' || s_voice_reply[i] == '#')) i++;
-            if (i + 1 < length && strchr("-*>", s_voice_reply[i]) && s_voice_reply[i + 1] == ' ') i += 2;
+            while (i < length && (source[i] == ' ' || source[i] == '#')) i++;
+            if (i + 1 < length && strchr("-*>", source[i]) && source[i + 1] == ' ') i += 2;
             line_start = false;
             continue;
         }
-        const char c = s_voice_reply[i];
-        if ((c == '*' && s_voice_reply[i + 1] == '*') || (c == '_' && s_voice_reply[i + 1] == '_')) { i += 2; continue; }
+        const char c = source[i];
+        if ((c == '*' && source[i + 1] == '*') || (c == '_' && source[i + 1] == '_')) { i += 2; continue; }
         if (c == '`') { i++; continue; }
         if (c == '\n') {
             if (used > 0 && display[used - 1] != '\n') display[used++] = '\n';
@@ -743,10 +749,9 @@ static void voice_wrap_lines(void)
             i++;
             continue;
         }
-        display[used++] = s_voice_reply[i++];
+        display[used++] = source[i++];
     }
     display[used] = '\0';
-    s_voice_display = display;
     static const char closers[] = "，。！？；：、）」』”’》】,.!?;:)\"'";
     const lv_font_t *font = memo_font_label();
     const int32_t width = VOICE_STRIP_W - 28;
@@ -783,6 +788,12 @@ static void voice_wrap_lines(void)
         }
     }
     s_voice_lines[s_voice_line_count] = (uint16_t)(at < UINT16_MAX ? at : UINT16_MAX);
+    if (at < used) { // Past the last reachable line.
+        display[at] = '\0';
+        char *trimmed = realloc(display, at + 1);
+        if (trimmed != NULL) display = trimmed;
+    }
+    s_voice_display = display;
 }
 
 
@@ -849,10 +860,8 @@ static void voice_reply_cache(void)
     char *reply = agent_client_part_copy(s_view.selection, false);
     if (reply == NULL) return; // Not loaded yet; keep the last copy.
     memo_font_filter_text(reply, false);
-    free(s_voice_reply);
-    s_voice_reply = reply;
     agent_copy_text(s_voice_reply_key, sizeof(s_voice_reply_key), key);
-    voice_wrap_lines();
+    voice_wrap_lines(reply);
     if (s_voice_review >= s_voice_line_count) s_voice_review = -1;
 }
 
@@ -983,16 +992,13 @@ static void render_voice(void)
     } else if (mode == AGENT_VOICE_THINKING || mode == AGENT_VOICE_SPEAKING) {
         // The question stays in view, dimmed, until the reply has been heard.
         if (strcmp(s_voice_question_id, s_view.message.id) != 0) {
-            char *question = agent_client_part_copy(s_view.selection, true);
-            if (question != NULL) {
-                memo_font_filter_text(question, false);
-                for (char *c = question; *c; c++) if (*c == '\n') *c = ' ';
-                free(s_voice_question);
-                s_voice_question = question;
+            if (agent_client_part_prefix(s_view.selection, true, s_voice_question, sizeof(s_voice_question))) {
+                memo_font_filter_text(s_voice_question, false);
+                for (char *c = s_voice_question; *c; c++) if (*c == '\n') *c = ' ';
                 agent_copy_text(s_voice_question_id, sizeof(s_voice_question_id), s_view.message.id);
             }
         }
-        strip = s_voice_question != NULL && s_voice_question[0] != '\0';
+        strip = s_voice_question[0] != '\0';
         if (strip) agent_copy_text(line, sizeof(line), s_voice_question);
         strip_tone = UI_DIM;
         fill = border = UI_BORDER; // A flat grey field: sent, and no longer editable.
@@ -1034,11 +1040,11 @@ static void render_voice(void)
             s_voice_draft = draft;
             s_voice_draft_selection = s_view.selection;
             s_voice_draft_generation = s_view.text_generation;
-            size_t runes = 0;
-            for (const char *c = draft; *c; c++) if (((unsigned char)*c & 0xC0) != 0x80) runes++;
+            // The draft lives only in RAM and is bounded by characters.
             char count[24];
-            snprintf(count, sizeof(count), "%u 字", (unsigned)runes);
+            snprintf(count, sizeof(count), "%u/%u 字", (unsigned)s_view.draft_chars, (unsigned)AGENT_DRAFT_MAX_CHARS);
             set_text(s_voice_panel_count, count, false);
+            set_text_color(s_voice_panel_count, s_view.draft_chars * 10 >= AGENT_DRAFT_MAX_CHARS * 9 ? UI_RECORDING : UI_DIM);
             lv_obj_update_layout(s_voice_panel_scroll);
             lv_obj_scroll_to_y(s_voice_panel_scroll, 0, LV_ANIM_OFF);
         }
@@ -1252,7 +1258,7 @@ static void voice_key(bsp_btn_t button)
     const agent_voice_mode_t mode = (agent_voice_mode_t)s_voice_mode;
     if (button == BSP_BTN_OK) {
         if (mode == AGENT_VOICE_DRAFT) {
-            if (agent_client_send(s_view.text.revision, s_view.selection) != ESP_OK && bsp_lvgl_lock(1000)) {
+            if (agent_client_send(s_view.draft_serial, s_view.selection) != ESP_OK && bsp_lvgl_lock(1000)) {
                 ui_notice("内容已更新，请稍候");
                 bsp_lvgl_unlock();
             }

@@ -75,15 +75,3 @@ func (s *Server) messageContent(w http.ResponseWriter, r *http.Request) {
 	}
 	writeContent(w, text, message.Revision)
 }
-
-func (s *Server) draftContent(w http.ResponseWriter, r *http.Request) {
-	text, revision, err := s.service.Store.DraftText(r.Context(), r.PathValue("session"))
-	if err != nil {
-		storeError(w, err)
-		return
-	}
-	if !checkContentRevision(w, r, revision) {
-		return
-	}
-	writeContent(w, text, revision)
-}

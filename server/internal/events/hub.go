@@ -10,9 +10,7 @@ import (
 type Event struct {
 	Type      string `json:"type"`
 	SessionID string `json:"session_id,omitempty"`
-	SegmentID string `json:"segment_id,omitempty"`
 	MessageID string `json:"message_id,omitempty"`
-	Revision  int64  `json:"revision,omitempty"`
 	Status    string `json:"status,omitempty"`
 	Text      string `json:"text,omitempty"`
 	Offset    int    `json:"offset,omitempty"`

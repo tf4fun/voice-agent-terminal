@@ -9,7 +9,7 @@ import (
 
 func TestConfigurationWithoutCredentialsIsInspectable(t *testing.T) {
 	cfg, err := Load(func(string) string { return "" })
-	if err != nil || cfg.OpenAIModel != "gpt-live-transcribe" || cfg.Workers != 2 {
+	if err != nil || cfg.OpenAIModel != "gpt-live-transcribe" || cfg.Workers != 2 || cfg.HermesPrompt != DefaultSystemPrompt {
 		t.Fatalf("%+v %v", cfg, err)
 	}
 	for _, name := range []string{"VOICE_CHAT_WORKERS", "VOICE_ASR_PROVIDER", "VOICE_ADDR", "HERMES_BASE_URL", "OPENAI_REALTIME_URL"} {

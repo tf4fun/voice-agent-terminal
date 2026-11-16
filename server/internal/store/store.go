@@ -18,6 +18,8 @@ import (
 //go:embed schema.sql
 var schema string
 
+const schemaVersion = 4
+
 var (
 	ErrNotFound = errors.New("not_found")
 	ErrConflict = errors.New("conflict")
@@ -56,17 +58,8 @@ func (s *Store) initialize() error {
 		return err
 	}
 	switch version {
-	case 3:
+	case schemaVersion:
 		return nil
-	case 2:
-		// v3 only adds the device diagnostic report table.
-		return s.transaction(context.Background(), func(tx *sql.Tx) error {
-			if _, err := tx.Exec(deviceReportsSchema); err != nil {
-				return err
-			}
-			_, err := tx.Exec("PRAGMA user_version=3")
-			return err
-		})
 	case 0:
 		return s.transaction(context.Background(), func(tx *sql.Tx) error {
 			if _, err := tx.Exec(schema); err != nil {
@@ -75,11 +68,12 @@ func (s *Store) initialize() error {
 			if _, err := tx.Exec(deviceReportsSchema); err != nil {
 				return err
 			}
-			_, err := tx.Exec("PRAGMA user_version=3")
+			_, err := tx.Exec(fmt.Sprintf("PRAGMA user_version=%d", schemaVersion))
 			return err
 		})
 	default:
-		return fmt.Errorf("unsupported database schema %d, expected 3", version)
+		// Schema 4 dropped gateway drafts; earlier databases are not migrated.
+		return fmt.Errorf("unsupported database schema %d, expected %d: remove gateway.db to start empty", version, schemaVersion)
 	}
 }
 
@@ -111,36 +105,13 @@ type rowQuery interface {
 
 func readSession(ctx context.Context, query rowQuery, id string) (model.Session, error) {
 	var session model.Session
-	err := query.QueryRowContext(ctx, `SELECT id,title,state,draft_revision,created_at,updated_at,error FROM sessions WHERE id=? AND state!='deleted'`, id).
-		Scan(&session.ID, &session.Title, &session.State, &session.Revision, &session.CreatedAt, &session.UpdatedAt, &session.Error)
+	err := query.QueryRowContext(ctx, `SELECT id,title,state,created_at,updated_at,error FROM sessions WHERE id=? AND state!='deleted'`, id).
+		Scan(&session.ID, &session.Title, &session.State, &session.CreatedAt, &session.UpdatedAt, &session.Error)
 	return session, missing(err)
 }
 
 func (s *Store) Session(ctx context.Context, id string) (model.Session, error) {
 	return readSession(ctx, s.db, id)
-}
-
-func (s *Store) BeginSession(ctx context.Context, id, title string) (model.Session, error) {
-	err := s.transaction(ctx, func(tx *sql.Tx) error {
-		var existingTitle, state string
-		err := tx.QueryRowContext(ctx, "SELECT title,state FROM sessions WHERE id=?", id).Scan(&existingTitle, &state)
-		if err == nil {
-			if state == "deleted" || state == "deleting" || existingTitle != title {
-				return ErrConflict
-			}
-			return nil
-		}
-		if !errors.Is(err, sql.ErrNoRows) {
-			return err
-		}
-		now := time.Now().UnixMilli()
-		_, err = tx.ExecContext(ctx, "INSERT INTO sessions(id,title,state,created_at,updated_at) VALUES(?,?,'creating',?,?)", id, title, now, now)
-		return err
-	})
-	if err != nil {
-		return model.Session{}, err
-	}
-	return s.Session(ctx, id)
 }
 
 func (s *Store) SetSessionReady(ctx context.Context, id string) error {
@@ -166,7 +137,7 @@ func (s *Store) Rename(ctx context.Context, id, title string) error {
 }
 
 func (s *Store) Sessions(ctx context.Context, limit, offset int) ([]model.Session, error) {
-	rows, err := s.db.QueryContext(ctx, "SELECT id,title,state,draft_revision,created_at,updated_at,error FROM sessions WHERE state!='deleted' ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?", limit, offset)
+	rows, err := s.db.QueryContext(ctx, "SELECT id,title,state,created_at,updated_at,error FROM sessions WHERE state!='deleted' ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?", limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -174,7 +145,7 @@ func (s *Store) Sessions(ctx context.Context, limit, offset int) ([]model.Sessio
 	items := make([]model.Session, 0, limit)
 	for rows.Next() {
 		var item model.Session
-		if err := rows.Scan(&item.ID, &item.Title, &item.State, &item.Revision, &item.CreatedAt, &item.UpdatedAt, &item.Error); err != nil {
+		if err := rows.Scan(&item.ID, &item.Title, &item.State, &item.CreatedAt, &item.UpdatedAt, &item.Error); err != nil {
 			return nil, err
 		}
 		items = append(items, item)
@@ -183,7 +154,7 @@ func (s *Store) Sessions(ctx context.Context, limit, offset int) ([]model.Sessio
 }
 
 func (s *Store) PendingSessions(ctx context.Context) ([]model.Session, error) {
-	rows, err := s.db.QueryContext(ctx, "SELECT id,title,state,draft_revision,created_at,updated_at,error FROM sessions WHERE state IN ('creating','deleting') LIMIT 16")
+	rows, err := s.db.QueryContext(ctx, "SELECT id,title,state,created_at,updated_at,error FROM sessions WHERE state IN ('creating','deleting') LIMIT 16")
 	if err != nil {
 		return nil, err
 	}
@@ -191,7 +162,7 @@ func (s *Store) PendingSessions(ctx context.Context) ([]model.Session, error) {
 	var items []model.Session
 	for rows.Next() {
 		var item model.Session
-		if err := rows.Scan(&item.ID, &item.Title, &item.State, &item.Revision, &item.CreatedAt, &item.UpdatedAt, &item.Error); err != nil {
+		if err := rows.Scan(&item.ID, &item.Title, &item.State, &item.CreatedAt, &item.UpdatedAt, &item.Error); err != nil {
 			return nil, err
 		}
 		items = append(items, item)
@@ -225,32 +196,10 @@ func (s *Store) FinishDelete(ctx context.Context, id string) error {
 		if state != "deleting" {
 			return ErrConflict
 		}
-		for _, statement := range []string{"DELETE FROM segments WHERE session_id=?", "DELETE FROM messages WHERE session_id=?"} {
-			if _, err := tx.ExecContext(ctx, statement, id); err != nil {
-				return err
-			}
+		if _, err := tx.ExecContext(ctx, "DELETE FROM messages WHERE session_id=?", id); err != nil {
+			return err
 		}
 		_, err := tx.ExecContext(ctx, "UPDATE sessions SET state='deleted',title='',error='' WHERE id=?", id)
 		return err
 	})
-}
-
-func bumpDraft(ctx context.Context, tx *sql.Tx, sessionID string) (int64, error) {
-	var revision int64
-	err := tx.QueryRowContext(ctx, "UPDATE sessions SET draft_revision=draft_revision+1,updated_at=? WHERE id=? AND state IN ('ready','creating') RETURNING draft_revision", time.Now().UnixMilli(), sessionID).Scan(&revision)
-	return revision, missing(err)
-}
-
-func checkDraft(ctx context.Context, tx *sql.Tx, sessionID string, revision int64) error {
-	session, err := readSession(ctx, tx, sessionID)
-	if err != nil {
-		return err
-	}
-	if session.State != "ready" && session.State != "creating" {
-		return ErrBusy
-	}
-	if session.Revision != revision {
-		return ErrStale
-	}
-	return nil
 }

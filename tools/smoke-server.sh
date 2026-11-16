@@ -66,13 +66,13 @@ environment.update({
 })
 process = None
 
-def request(method, path, body=None, content_type="application/json"):
+def request(method, path, body=None, content_type="application/json", raw=False):
     data = body if isinstance(body, bytes) else None if body is None else json.dumps(body).encode()
     req = urllib.request.Request(base + path, data=data, method=method, headers={
         "Authorization": "Bearer smoke-device", "Content-Type": content_type,
     })
     with urllib.request.urlopen(req, timeout=5) as response:
-        return json.load(response)
+        return response.read().decode() if raw else json.load(response)
 
 def start():
     child = subprocess.Popen([binary, "-env", str(pathlib.Path(directory) / "missing.env")],
@@ -102,17 +102,17 @@ def stop(child):
 try:
     assert subprocess.check_output([binary, "version"], text=True).strip() == "0.2.0"
     process = start()
-    session, first, second, message = [str(uuid.uuid4()) for _ in range(4)]
+    session, recording, message = [str(uuid.uuid4()) for _ in range(3)]
     path = f"/api/v1/sessions/{session}"
-    request("POST", "/api/v1/sessions", {"id": session, "title": "烟雾测试"})
-    request("POST", path + "/segments", {"id": first, "revision": 1, "text": "第一段"})
-    request("POST", path + "/segments", {"id": second, "revision": 2})
-    request("POST", path + f"/segments/{second}/audio?sample_rate=16000&revision=3", bytes(6400), "audio/pcm")
-    draft = request("GET", path + "/draft")
-    assert len(draft["items"]) == 2 and calls == []
-    revised = request("PATCH", path + f"/segments/{first}", {"revision": draft["revision"], "text": "修改第一段"})
-    send = {"id": message, "revision": revised["revision"]}
-    request("POST", path + "/messages", send)
+    # Transcription is a side channel: it stores nothing and creates no session.
+    request("POST", "/api/v1/transcriptions", {"id": recording})
+    text = request("POST", f"/api/v1/transcriptions/{recording}/audio?sample_rate=16000", bytes(6400), "audio/pcm", raw=True)
+    assert text == "测试转写" and calls == []
+    assert request("GET", "/api/v1/sessions")["items"] == []
+    # The client keeps and edits its draft; the first send creates the session.
+    send = {"id": message, "text": "修改第一段\n\n" + text, "new_session": True}
+    accepted = request("POST", path + "/messages", send)
+    assert accepted["session"]["title"] == "修改第一段", accepted
     request("POST", path + "/messages", send)
     for _ in range(100):
         result = request("GET", path + f"/messages/{message}")
@@ -120,14 +120,15 @@ try:
             break
         time.sleep(0.05)
     assert result["state"] == "completed", result
-    assert len(calls) == 1 and calls[0][0]["messages"][0]["content"] == "修改第一段\n\n测试转写"
+    assert len(calls) == 1 and calls[0][0]["messages"][-1]["content"] == "修改第一段\n\n测试转写"
+    assert calls[0][0]["messages"][0]["role"] == "system"
     assert request("GET", path + f"/messages/{message}/text")["text"] == "你好，测试回复"
     stop(process)
     process = None
     process = start()
     assert request("GET", path + f"/messages/{message}")["state"] == "completed"
     assert len(calls) == 1
-    print("PASS: real binary lifecycle, draft editing, fake audio, explicit send, retry identity and restart persistence")
+    print("PASS: real binary lifecycle, side-channel transcription, first send creates the session, retry identity and restart persistence")
 finally:
     if process is not None:
         stop(process)

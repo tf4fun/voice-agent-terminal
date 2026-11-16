@@ -36,29 +36,18 @@ func wholeMessageEnvironment(t *testing.T) (*environment, string) {
 	service := gateway.New(st, cfg, &hermes.Client{}, &asr.Fake{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	e := &environment{service: service, server: httptest.NewServer(New(service))}
 	t.Cleanup(func() { e.server.Close(); st.Close() })
-	session := model.NewID()
-	if _, err := st.BeginSession(context.Background(), session, "whole messages"); err != nil {
-		t.Fatal(err)
-	}
-	if err := st.SetSessionReady(context.Background(), session); err != nil {
-		t.Fatal(err)
-	}
+	session := model.NewID() // Created by its first whole message.
 	return e, session
 }
 
 func addWholeMessage(t *testing.T, e *environment, session, input, reply string) model.Message {
 	t.Helper()
 	ctx := context.Background()
-	state, err := e.service.Store.Session(ctx, session)
+	message, _, err := e.service.Store.Send(ctx, session, model.NewID(), "test", "scope", input, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	revision, err := e.service.Store.AddSegment(ctx, session, model.NewID(), input, state.Revision)
-	if err != nil {
-		t.Fatal(err)
-	}
-	message, err := e.service.Store.Send(ctx, session, model.NewID(), "test", "scope", revision)
-	if err != nil {
+	if err := e.service.Store.SetSessionReady(ctx, session); err != nil {
 		t.Fatal(err)
 	}
 	if err := e.service.Store.ReplaceReply(ctx, message.ID, reply); err != nil {
@@ -77,10 +66,8 @@ func addWholeMessage(t *testing.T, e *environment, session, input, reply string)
 func TestWholeMessageHistoryAndUncutContent(t *testing.T) {
 	e, session := wholeMessageEnvironment(t)
 	base := "/api/v1/sessions/" + session
+	e.request(t, "GET", base+"/turn", nil, 404) // No session before its first message.
 	var turn store.Turn
-	if err := json.Unmarshal(e.request(t, "GET", base+"/turn", nil, 200), &turn); err != nil || turn.Message != nil {
-		t.Fatalf("empty turn: %+v %v", turn, err)
-	}
 	input := strings.Repeat("完整输入，保留换行。\n", 400)
 	reply := "\n\n" + strings.Repeat("完整回复渥太华 😀 \"escaped\"\\\n", 600)
 	first := addWholeMessage(t, e, session, input, reply)
@@ -118,32 +105,11 @@ func TestWholeMessageHistoryAndUncutContent(t *testing.T) {
 	}
 	e.request(t, "GET", base+"/turn?before="+first.ID, nil, 404)
 	other := model.NewID()
-	if _, err := e.service.Store.BeginSession(context.Background(), other, "other session"); err != nil {
-		t.Fatal(err)
-	}
-	if err := e.service.Store.SetSessionReady(context.Background(), other); err != nil {
-		t.Fatal(err)
-	}
 	foreign := addWholeMessage(t, e, other, "foreign question", "foreign answer")
 	e.request(t, "GET", base+"/turn?message="+foreign.ID, nil, 404)
 	e.request(t, "GET", base+"/turn?before="+foreign.ID, nil, 404)
 	e.request(t, "GET", base+"/messages/"+foreign.ID+"/content?part=reply", nil, 404)
 	e.request(t, "GET", base+"/messages/"+first.ID+"/content?part=invalid", nil, 400)
-}
-
-func TestWholeDraftContentMatchesReviewedRevision(t *testing.T) {
-	e, session := wholeMessageEnvironment(t)
-	input := strings.Repeat("完整待发送内容。\n", 700)
-	revision, err := e.service.Store.AddSegment(context.Background(), session, model.NewID(), input, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	base := "/api/v1/sessions/" + session + "/draft/content"
-	data := e.request(t, "GET", base+"?revision="+strconv.FormatInt(revision, 10), nil, 200)
-	if string(data) != input {
-		t.Fatal("draft content was split or changed")
-	}
-	e.request(t, "GET", base+"?revision=1", nil, 409)
 }
 
 func TestSSEReconnectRecoversWholeMessageAndKeepsDeltas(t *testing.T) {

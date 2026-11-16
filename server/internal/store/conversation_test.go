@@ -18,16 +18,11 @@ func TestConversationPagesBothRolesWithoutGaps(t *testing.T) {
 	if err != nil || len(empty.Items) != 0 {
 		t.Fatalf("empty page: %+v %v", empty, err)
 	}
-	revision := int64(1)
 	inputs, replies := map[string]string{}, map[string]string{}
 	for i := 0; i < 3; i++ {
-		segment, id := model.NewID(), model.NewID()
+		id := model.NewID()
 		input := strings.Repeat("第一个问题你好", i*20+1)
-		revision, err = st.AddSegment(ctx, session, segment, input, revision)
-		if err != nil {
-			t.Fatal(err)
-		}
-		message, err := st.Send(ctx, session, id, "model", "scope", revision)
+		message, _, err := st.Send(ctx, session, id, "model", "scope", input, false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -39,11 +34,6 @@ func TestConversationPagesBothRolesWithoutGaps(t *testing.T) {
 			t.Fatal(err)
 		}
 		inputs[id], replies[id] = message.Input, reply
-		current, err := st.Session(ctx, session)
-		if err != nil {
-			t.Fatal(err)
-		}
-		revision = current.Revision
 	}
 	tail, err := read(ctx, session, "tail", "")
 	if err != nil || len(tail.Items) > 4 || tail.After != "" {
@@ -118,11 +108,7 @@ func TestConversationRefreshesAnInitiallyEmptyReply(t *testing.T) {
 	ctx := context.Background()
 	st, session := fixture(t)
 	id := model.NewID()
-	revision, err := st.AddSegment(ctx, session, model.NewID(), "我的问题", 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := st.Send(ctx, session, id, "model", "scope", revision); err != nil {
+	if _, _, err := st.Send(ctx, session, id, "model", "scope", "我的问题", false); err != nil {
 		t.Fatal(err)
 	}
 	page, err := st.Conversation(ctx, session, "tail", "")

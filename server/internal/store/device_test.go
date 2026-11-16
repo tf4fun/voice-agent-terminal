@@ -34,31 +34,29 @@ func TestDeviceReportsAreBoundedAndOrdered(t *testing.T) {
 	}
 }
 
-func TestSchemaTwoMigratesToThree(t *testing.T) {
+// Schema 4 dropped gateway drafts; an earlier database is refused rather than
+// migrated, and a fresh one starts at the current version.
+func TestEarlierSchemaIsRefused(t *testing.T) {
 	directory := t.TempDir()
 	st, err := Open(directory)
 	if err != nil {
 		t.Fatal(err)
+	}
+	var version int
+	if err := st.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != schemaVersion {
+		t.Fatal("version", version, err)
 	}
 	st.Close()
 	db, err := sql.Open("sqlite", filepath.Join(directory, "gateway.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec("DROP TABLE device_reports; PRAGMA user_version=2"); err != nil {
+	if _, err := db.Exec("PRAGMA user_version=3"); err != nil {
 		t.Fatal(err)
 	}
 	db.Close()
-	st, err = Open(directory)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer st.Close()
-	if err := st.AddDeviceReport(context.Background(), DeviceReport{ID: "a", Trigger: "t", Firmware: "f", ResetReason: "r", Summary: "s", Body: "b"}); err != nil {
-		t.Fatal("migrated store cannot hold reports", err)
-	}
-	var version int
-	if err := st.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 3 {
-		t.Fatal("version", version, err)
+	if st, err = Open(directory); err == nil {
+		st.Close()
+		t.Fatal("schema 3 opened")
 	}
 }

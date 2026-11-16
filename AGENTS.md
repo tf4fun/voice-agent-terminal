@@ -9,10 +9,11 @@ Read [README](README.md), [architecture](docs/architecture.md), and the relevant
 `git status --short --branch` and preserve existing work.
 
 - Keep the Go gateway, device client and upstream adapters in clear components.
-  The gateway owns discovery, transcription, draft persistence, the device session
-  index, content filtering and message recovery.
-- Explicit user send commits the reviewed draft revision. Preserve segment IDs,
-  late-update checks and immutable message snapshots across failures and retries.
+  The gateway owns discovery, transcription (a side channel that stores
+  nothing), the session index, content filtering and message recovery.
+- Drafts stay on the client that composes them. An explicit send carries the
+  complete text, and a new session is created only by its first send. Preserve
+  message IDs and immutable message snapshots across failures and retries.
 - Bound audio, JSON, SSE and text buffers. Validate protocol/state behavior with
   host tests and measure actual device memory before claiming hardware readiness.
 - Follow the hardware reference for pins and peripherals. Keep button callbacks
