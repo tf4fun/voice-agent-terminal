@@ -410,6 +410,20 @@ static void test_cached_draft_review_and_reopen(void)
     CHECK(strcmp(s_input_text,"reviewed draft")==0);
 }
 
+// Long Down clears only the draft revision on screen, like a send.
+static void test_clear_draft_uses_shown_revision(void)
+{
+    setup();s_view.segment_count=s_view.segment_total=1;s_view.draft_clear=true;
+    s_view.draft_revision=9; // A newer draft was listed but its text is not loaded yet.
+    CHECK(agent_client_clear_draft()==ESP_ERR_INVALID_STATE);
+    s_view.text.revision=9;
+    injected_response="{\"revision\":10}";
+    CHECK(agent_client_clear_draft()==ESP_OK);dispatch();
+    CHECK(s_view.draft_revision==10&&s_resync);
+    s_view.draft_clear=false;
+    CHECK(agent_client_clear_draft()==ESP_ERR_INVALID_STATE);
+}
+
 static void test_empty_draft_returns_to_whole_turn(void)
 {
     setup();s_view.text_loading=true;
@@ -599,6 +613,7 @@ int main(void)
     test_cached_draft_review_and_reopen();
     test_raw_content_integrity();
     test_empty_draft_returns_to_whole_turn();
+    test_clear_draft_uses_shown_revision();
     test_active_reply_is_fetched_once_complete();
     test_retry_accepts_server_message();
     for(enum capture_case item=CAPTURE_NORMAL;item<=CAPTURE_SHORT;item++)test_capture(item);

@@ -26,6 +26,8 @@ Existing process variables take precedence.
 | `OPENAI_API_KEY` | OpenAI credential, held by Go |
 | `OPENAI_TRANSCRIBE_MODEL` | Default `gpt-live-transcribe` |
 | `OPENAI_REALTIME_URL` | Default `wss://api.openai.com/v1/realtime?intent=transcription` |
+| `VOICE_TTS_PROVIDER` | Spoken replies: `openai` by default (uses `OPENAI_API_KEY`), `fake` or `off` |
+| `OPENAI_TTS_MODEL`, `OPENAI_TTS_VOICE`, `OPENAI_TTS_URL` | Defaults `gpt-realtime-2.1-mini`, `marin` and `wss://api.openai.com/v1/realtime`; see [Spoken replies](#spoken-replies) |
 
 Local data and environment files are ignored by Git. Bind network exposure and
 device credentials to the intended LAN deployment. A configured Hermes API

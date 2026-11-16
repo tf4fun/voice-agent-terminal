@@ -25,6 +25,8 @@
 | `OPENAI_API_KEY` | Go 持有的 OpenAI 凭据 |
 | `OPENAI_TRANSCRIBE_MODEL` | 默认 `gpt-live-transcribe` |
 | `OPENAI_REALTIME_URL` | 默认 `wss://api.openai.com/v1/realtime?intent=transcription` |
+| `VOICE_TTS_PROVIDER` | 回复朗读：默认 `openai`（使用 `OPENAI_API_KEY`），也可为 `fake` 或 `off` |
+| `OPENAI_TTS_MODEL`、`OPENAI_TTS_VOICE`、`OPENAI_TTS_URL` | 默认 `gpt-realtime-2.1-mini`、`marin` 和 `wss://api.openai.com/v1/realtime`，见[语音回复](#语音回复) |
 
 本地数据与环境文件由 Git 忽略。网络暴露范围和设备凭据按预期的局域网部署配置。
 Hermes API 服务应已启用，并提供对应的 `HERMES_API_KEY` 与 API 会话能力。

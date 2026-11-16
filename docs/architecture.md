@@ -7,8 +7,8 @@
 ## Agreed boundaries
 
 The handheld connects to the Go gateway discovered through mDNS. Go integrates
-with the existing Hermes API and OpenAI transcription. Credentials and upstream
-TLS connections live on the gateway.
+with the existing Hermes API and OpenAI transcription and speech synthesis.
+Credentials and upstream TLS connections live on the gateway.
 
 The initial chat integration uses Hermes `POST /v1/chat/completions` with
 `X-Hermes-Session-Id` and streaming replies. Go coordinates session creation,
@@ -19,10 +19,10 @@ against the selected Hermes version before depending on them.
 
 | Owner | Data and responsibilities |
 | --- | --- |
-| Device | Selected session, reviewed draft revision, one complete user input and one complete Hermes reply in RAM, local reading position, bounded audio transport buffers and interaction state |
-| Go | Device-to-Hermes session mapping, paginated session index, persistent drafts and segment order, complete message snapshots and retry identities, bounded SSE delivery and filtered reply storage |
+| Device | Selected session, reviewed draft revision, one complete user input and one complete Hermes reply in RAM, local reading position, bounded audio capture and playback buffers and interaction state |
+| Go | Device-to-Hermes session mapping, paginated session index, persistent drafts and segment order, complete message snapshots and retry identities, bounded SSE delivery, filtered reply storage and the cached spoken-reply streams |
 | Hermes | Conversation history, model context, session runtime and configured agent capabilities |
-| OpenAI | Transcription of the audio submitted by Go |
+| OpenAI | Transcription of the audio submitted by Go and synthesis of the completed reply text Go submits for speech |
 
 Go's session index serves the device's view of Hermes sessions. Creation and
 deletion have persisted pending states for interrupted-operation recovery.
@@ -107,6 +107,20 @@ Benchmark capture and networking together on AI Passport, including total free
 heap, largest free block, stack high-water marks and bounded-backpressure behavior.
 The current voice-memo recording/upload lifecycle is an implementation reference.
 
+## Spoken replies
+
+When the gateway reports `speech`, the device reads each new newest reply of the
+open session aloud. Go waits until Hermes has finished the reply, removes
+Markdown marks, code blocks and link targets, and synthesizes the whole reply in
+one OpenAI Realtime request. Go frames the 16 kHz PCM16 result and caches the
+stream, so listeners share one synthesis and a dropped connection resumes at its
+exact byte offset. The device plays it through the PCM buffer it shares with
+recording; recording, a long Down and leaving the session stop playback. Framing,
+limits and provider settings are in the [server contract](server.md#spoken-replies)
+and playback buffering is in the
+[firmware guide](firmware.md#voice-first-sessions-and-spoken-replies). Device
+acceptance of spoken replies on the newest build needs its own evidence.
+
 ## Chat and recovery
 
 The gateway submits a committed text snapshot to the mapped Hermes session.
@@ -146,8 +160,8 @@ interaction remains an open product decision.
 ## Discovery and device API
 
 The mDNS record names the Go service and advertises a protocol version. The
-gateway's capability response describes available chat, draft and transcription
-features. The implemented service type, routes, payload bounds and recovery
+gateway's capability response describes available chat, draft, transcription
+and speech features. The implemented service type, routes, payload bounds and recovery
 semantics are recorded in the [server contract](server.md).
 
 The server accepts HTTP PCM16 audio uploads and sends bounded SSE events to the

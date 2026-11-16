@@ -1516,8 +1516,10 @@ esp_err_t agent_client_send(uint32_t revision, uint32_t selection)
 esp_err_t agent_client_clear_draft(void)
 {
     lock();
+    // Like a send, only the draft revision on screen is cleared.
     const bool ready = s_view.draft_clear && !s_view.busy && s_view.capture == AGENT_IDLE &&
-        s_view.segment_total > 0 && s_view.draft_revision > 0;
+        s_view.segment_total > 0 && s_view.text_kind == AGENT_TEXT_DRAFT &&
+        s_view.draft_revision > 0 && s_view.text.revision == s_view.draft_revision;
     command_t c = {.kind = CMD_CLEAR, .revision = s_view.draft_revision, .selection = s_view.selection};
     unlock();
     return ready ? queue(&c) : ESP_ERR_INVALID_STATE;

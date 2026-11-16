@@ -60,6 +60,15 @@ type speechStream struct {
 	abandoned bool
 }
 
+// join adds a listener and cancels a pending idle stop; st.mu is held.
+func (st *speechStream) join() {
+	st.readers++
+	if st.idle != nil {
+		st.idle.Stop()
+		st.idle = nil
+	}
+}
+
 func (st *speechStream) append(frame []byte) bool {
 	st.mu.Lock()
 	defer st.mu.Unlock()
@@ -176,9 +185,14 @@ func (s *Service) OpenSpeech(ctx context.Context, sessionID, messageID string, o
 	stream := s.speech.streams[messageID]
 	if stream != nil {
 		// A stream stopped for lack of listeners, or by a failure, is redone.
+		// The check and the join share one lock, so the idle timer cannot
+		// abandon the stream between them.
 		stream.mu.Lock()
 		retry := stream.readers == 0 && (stream.abandoned && !stream.done ||
 			stream.done && stream.status != SpeechDone && stream.status != SpeechLimit)
+		if !retry {
+			stream.join()
+		}
 		stream.mu.Unlock()
 		if retry {
 			delete(s.speech.streams, messageID)
@@ -191,17 +205,10 @@ func (s *Service) OpenSpeech(ctx context.Context, sessionID, messageID string, o
 		}
 		base := s.baseContext()
 		synthCtx, cancel := context.WithCancel(base)
-		stream = &speechStream{changed: make(chan struct{}), cancel: cancel}
+		stream = &speechStream{changed: make(chan struct{}), cancel: cancel, readers: 1}
 		s.speech.streams[messageID] = stream
 		go s.synthesize(synthCtx, stream, sessionID, messageID)
 	}
-	stream.mu.Lock()
-	stream.readers++
-	if stream.idle != nil {
-		stream.idle.Stop()
-		stream.idle = nil
-	}
-	stream.mu.Unlock()
 	reader := &SpeechReader{stream: stream, skip: offset}
 	reader.closer = func() {
 		stream.mu.Lock()
