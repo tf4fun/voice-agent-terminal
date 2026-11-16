@@ -170,7 +170,7 @@ function groupName(timestamp) {
 
 const ERRORS = {
   busy: "会话正忙：设备可能正在录音，或上一条消息仍在处理。",
-  stale_revision: "草稿刚刚被更新（可能来自设备），请确认后再发送。",
+  stale_revision: "内容刚刚更新，请重新载入后再试。",
   conflict: "会话当前状态不允许此操作，请稍后再试。",
   not_found: "会话不存在或已被删除。",
   limit_exceeded: "内容超过服务端上限（64 KiB）。",
@@ -599,7 +599,7 @@ async function mapLimit(items, limit, task) {
 function makeMessage(meta) {
   return {
     id: meta.id, state: meta.state, error: meta.error || "", created: meta.created_at,
-    input: "", reply: "", replyBytes: 0, loading: false, pendingDeltas: [], node: null, frame: 0,
+    input: "", reply: "", replyBytes: 0, revision: 0, loading: false, pendingDeltas: [], node: null, frame: 0,
   };
 }
 
@@ -607,11 +607,15 @@ async function fetchContent(message) {
   const base = `/sessions/${state.currentId}/messages/${message.id}/content?part=`;
   const [input, reply] = await Promise.all([request(base + "input", { raw: true }), request(base + "reply", { raw: true })]);
   message.input = input.data;
-  setReply(message, reply.data, reply.headers.get("X-Message-State") || message.state);
+  setReply(message, reply);
 }
 
-function setReply(message, text, stateName) {
+// The revision records which stored snapshot the shown reply came from.
+function setReply(message, reply) {
+  const text = reply.data;
   message.reply = text;
+  message.revision = Number(reply.headers.get("X-Revision")) || 0;
+  const stateName = reply.headers.get("X-Message-State") || message.state;
   message.replyBytes = byteLength(text);
   if (stateName) message.state = stateName;
   const deltas = message.pendingDeltas;
@@ -691,13 +695,14 @@ async function reconcileOnce() {
         scrollToBottom(true); // Instant, so later deltas still see the view at the bottom.
         continue;
       }
-      if (message.state !== meta.state || ACTIVE.has(meta.state)) {
+      // The revision also catches a reply whose final fetch failed, and a
+      // retry from another client that ended in the same state.
+      if (message.revision !== meta.revision || message.state !== meta.state || ACTIVE.has(meta.state)) {
         message.state = meta.state;
         message.error = meta.error || "";
         await reloadReply(message);
       }
     }
-    loadDraft().catch(report);
   } catch (error) {
     report(error);
   }
@@ -711,7 +716,7 @@ async function reloadReply(message) {
   try {
     const reply = await request(`/sessions/${id}/messages/${message.id}/content?part=reply`, { raw: true });
     if (id !== state.currentId) return;
-    setReply(message, reply.data, reply.headers.get("X-Message-State") || message.state);
+    setReply(message, reply);
   } catch (error) {
     report(error);
   } finally {
@@ -915,7 +920,11 @@ async function send() {
     pending = state.pending = { session: state.currentId || uuid(), message: uuid(), text, fresh };
   }
   const id = pending.session;
+  const draftKey = fresh ? "" : id;
   state.sending = true;
+  // The text leaves the composer now; whatever is typed while it is sent is
+  // a new draft, which the response never touches.
+  ui.input.value = "";
   composerChanged();
   try {
     const payload = { method: "POST", json: { id: pending.message, text, new_session: fresh } };
@@ -928,12 +937,8 @@ async function send() {
     }
     state.pending = null;
     if (fresh) {
-      state.localDrafts.delete("");
       if (meta.session && !state.sessions.some(s => s.id === id)) state.sessions.unshift(meta.session);
-      if (state.currentId === null) {
-        ui.input.value = "";
-        await openSession(id, { force: true });
-      }
+      if (state.currentId === null) await openSession(id, { force: true });
       refreshSessionsSoon();
       return;
     }
@@ -944,16 +949,24 @@ async function send() {
       message.input = text;
       state.messages.push(message);
     }
-    state.localDrafts.delete(id);
-    ui.input.value = "";
     renderThread();
     scrollToBottom(true);
     refreshSessionsSoon();
   } catch (error) {
+    restoreDraft(draftKey, text); // Sending again reuses the same IDs.
     report(error);
   } finally {
     state.sending = false;
     composerChanged();
+  }
+}
+
+// Puts unsent text back where it was composed, unless a new draft is there.
+function restoreDraft(key, text) {
+  if ((state.currentId || "") === key) {
+    if (!ui.input.value) ui.input.value = text;
+  } else if (!state.localDrafts.has(key)) {
+    state.localDrafts.set(key, text);
   }
 }
 

@@ -11,6 +11,7 @@ static_checks() {
         go test -race -count=1 ./...
     )
     "$repo_root/tools/smoke-server.sh"
+    node "$repo_root/tools/test-web.mjs"
 }
 
 firmware_checks() (

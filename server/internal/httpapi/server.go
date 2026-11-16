@@ -44,9 +44,6 @@ func New(service *gateway.Service) http.Handler {
 		})
 	}
 	handle("GET /api/v1/health", s.health)
-	handle("GET /api/v1/ping", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, 200, map[string]any{"ok": true, "protocol": 1})
-	})
 	handle("GET /api/v1/server", s.capabilities)
 	handle("GET /api/v1/events", s.events)
 	handle("GET /api/v1/sessions", s.sessions)
@@ -55,7 +52,6 @@ func New(service *gateway.Service) http.Handler {
 	handle("DELETE /api/v1/sessions/{session}", s.deleteSession)
 	handle("POST /api/v1/sessions/{session}/messages", s.send)
 	handle("GET /api/v1/sessions/{session}/messages", s.messages)
-	handle("GET /api/v1/sessions/{session}/conversation", s.conversation)
 	handle("GET /api/v1/sessions/{session}/turn", s.turn)
 	handle("GET /api/v1/sessions/{session}/messages/{message}/content", s.messageContent)
 	handle("GET /api/v1/sessions/{session}/messages/{message}", s.message)
@@ -102,8 +98,6 @@ func storeError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		writeError(w, 404, "not_found")
-	case errors.Is(err, store.ErrStale):
-		writeError(w, 409, "stale_revision")
 	case errors.Is(err, store.ErrBusy):
 		writeError(w, 409, "busy")
 	case errors.Is(err, store.ErrConflict):
@@ -174,7 +168,7 @@ func (s *Server) capabilities(w http.ResponseWriter, r *http.Request) {
 		"chat": s.service.Hermes.Enabled(), "transcription": s.service.ASR.Enabled(), "asr_provider": s.service.Config.ASRProvider,
 		"audio_format": "pcm_s16le", "sample_rates": []int{16000, 24000},
 		"bounded_paging": true, "text_before": true, "text_tail": true,
-		"conversation_windows": true, "whole_messages": true, "reply_sse": true,
+		"whole_messages": true, "reply_sse": true,
 		"max_input_bytes": model.MaxInputBytes, "max_transcript_bytes": model.MaxTranscriptBytes,
 		"max_text_window_bytes": model.WindowBytes, "max_event_bytes": 1024,
 		"max_audio_ms": s.service.Config.CaptureTimeout.Milliseconds(), "device_logs": true,
@@ -503,29 +497,6 @@ func (s *Server) messages(w http.ResponseWriter, r *http.Request) {
 		items = items[:limit]
 	}
 	writeJSON(w, 200, map[string]any{"items": items, "limit": limit, "offset": offset, "has_more": hasMore})
-}
-
-func (s *Server) conversation(w http.ResponseWriter, r *http.Request) {
-	mode, cursor := "tail", ""
-	for _, key := range []string{"before", "after", "from"} {
-		if value := r.URL.Query().Get(key); value != "" {
-			if mode != "tail" || len(value) > 79 {
-				writeError(w, 400, "invalid_cursor")
-				return
-			}
-			mode, cursor = key, value
-		}
-	}
-	if r.URL.Query().Has("layout") {
-		writeError(w, 400, "invalid_layout")
-		return
-	}
-	page, err := s.service.Store.Conversation(r.Context(), r.PathValue("session"), mode, cursor)
-	if err != nil {
-		storeError(w, err)
-		return
-	}
-	writeJSON(w, 200, page)
 }
 
 func (s *Server) message(w http.ResponseWriter, r *http.Request) {

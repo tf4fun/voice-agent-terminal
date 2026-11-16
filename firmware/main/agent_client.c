@@ -26,7 +26,7 @@
 
 typedef enum {
     CMD_REFRESH, CMD_OPEN, CMD_CLOSE, CMD_RECORD, CMD_SEND,
-    CMD_REVIEW, CMD_RETRY, CMD_PROVISION, CMD_PAUSE,
+    CMD_RETRY, CMD_PROVISION, CMD_PAUSE,
 } command_kind_t;
 
 typedef struct {
@@ -639,7 +639,13 @@ static bool poll_latest(agent_view_t *view)
     agent_turn_t latest;
     const int status = request(HTTP_METHOD_GET, path, NULL, s_sync_body, sizeof(s_sync_body));
     if (status != 200 || !agent_parse_turn(s_sync_body, &latest)) return false;
-    if (!latest.present || strcmp(latest.message.id, view->turn_anchor) == 0) return true;
+    if (!latest.present) return true;
+    if (strcmp(latest.message.id, view->turn_anchor) == 0) {
+        // Another client may have retried this message under the same ID.
+        const bool changed = latest.message.revision != view->message.revision ||
+            strcmp(latest.message.state, view->message.state) != 0;
+        return changed ? poll_turn(view) : true;
+    }
     lock();
     const bool selected = still_selected(view) && s_view.chat_request == view->chat_request &&
         s_view.capture == AGENT_IDLE && s_view.text_kind != AGENT_TEXT_DRAFT &&
@@ -1006,15 +1012,6 @@ static void execute(const command_t *command)
         s_resync = true;
         return;
     }
-    if (command->kind == CMD_REVIEW) {
-        lock();
-        if (command->selection == s_view.selection && s_draft != NULL && s_view.capture == AGENT_IDLE) {
-            show_draft_or_exchange();
-            changed();
-        }
-        unlock();
-        return;
-    }
     char session[37], path[160];
     lock();
     agent_copy_text(session, sizeof(session), s_view.session_id);
@@ -1216,7 +1213,6 @@ static esp_err_t queue(command_t *command)
     command->selection = s_view.selection;
     const bool queued = xQueueSend(s_commands, command, 0) == pdTRUE;
     if (queued) {
-        if (command->kind == CMD_REVIEW) s_view.text_request++;
         s_view.busy = true;
         if (command->kind == CMD_OPEN) {
             s_view.session_switching = true;
@@ -1395,12 +1391,6 @@ esp_err_t agent_client_show_latest(void)
     unlock();
     xTaskNotifyGive(s_sync_task);
     return ESP_OK;
-}
-
-esp_err_t agent_client_review_draft(void)
-{
-    command_t command = {.kind = CMD_REVIEW};
-    return queue(&command);
 }
 
 esp_err_t agent_client_retry(const char *id, uint32_t selection)

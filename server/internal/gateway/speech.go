@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -39,7 +40,12 @@ const (
 	speechHeadBytes = 240   // Reply start carried by the sentence frame (device limit 256).
 )
 
-var ErrSpeechUnavailable = errors.New("speech_unavailable")
+var (
+	ErrSpeechUnavailable = errors.New("speech_unavailable")
+	// ErrSpeechRestarted refuses a resume into a stream that would have to be
+	// synthesized again: new audio need not match the bytes already played.
+	ErrSpeechRestarted = errors.New("speech_restarted")
+)
 
 // speechStream is the synthesized speech of one reply. Frames are appended by
 // one synthesis goroutine and read by any number of listeners, each from the
@@ -168,21 +174,30 @@ type speechStreams struct {
 	streams map[string]*speechStream
 }
 
-// OpenSpeech starts or joins the synthesis of a reply.
+// speechKey names the speech of one attempt at a reply; a retry under the
+// same message ID writes a new reply and so gets a new stream.
+func speechKey(messageID string, attempts int) string {
+	return messageID + "/" + strconv.Itoa(attempts)
+}
+
+// OpenSpeech starts or joins the synthesis of a reply. A resume (offset > 0)
+// only joins the cached stream it started on.
 func (s *Service) OpenSpeech(ctx context.Context, sessionID, messageID string, offset int) (*SpeechReader, error) {
 	if s.TTS == nil || !s.TTS.Enabled() {
 		return nil, ErrSpeechUnavailable
 	}
-	if _, err := s.Store.Message(ctx, sessionID, messageID); err != nil {
+	message, err := s.Store.Message(ctx, sessionID, messageID)
+	if err != nil {
 		return nil, err
 	}
+	key := speechKey(messageID, message.Attempts)
 	s.speech.mu.Lock()
 	defer s.speech.mu.Unlock()
 	if s.speech.streams == nil {
 		s.speech.streams = make(map[string]*speechStream)
 	}
 	s.pruneSpeechLocked()
-	stream := s.speech.streams[messageID]
+	stream := s.speech.streams[key]
 	if stream != nil {
 		// A stream stopped for lack of listeners, or by a failure, is redone.
 		// The check and the join share one lock, so the idle timer cannot
@@ -195,18 +210,21 @@ func (s *Service) OpenSpeech(ctx context.Context, sessionID, messageID string, o
 		}
 		stream.mu.Unlock()
 		if retry {
-			delete(s.speech.streams, messageID)
+			delete(s.speech.streams, key)
 			stream = nil
 		}
 	}
 	if stream == nil {
+		if offset > 0 {
+			return nil, ErrSpeechRestarted
+		}
 		if len(s.speech.streams) >= speechMaxStreams {
 			return nil, store.ErrBusy
 		}
 		base := s.baseContext()
 		synthCtx, cancel := context.WithCancel(base)
 		stream = &speechStream{changed: make(chan struct{}), cancel: cancel, readers: 1}
-		s.speech.streams[messageID] = stream
+		s.speech.streams[key] = stream
 		go s.synthesize(synthCtx, stream, sessionID, messageID)
 	}
 	reader := &SpeechReader{stream: stream, skip: offset}

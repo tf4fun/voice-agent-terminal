@@ -108,11 +108,11 @@ func TestDeviceRecordingThenSendSnapshot(t *testing.T) {
 	}
 }
 
-func TestDeviceConversationEndpointPairsQuestionAndReply(t *testing.T) {
+func TestDeviceTurnPairsQuestionAndReply(t *testing.T) {
 	e := setup(t)
 	session, message := model.NewID(), model.NewID()
 	base := "/api/v1/sessions/" + session
-	e.request(t, "GET", base+"/conversation", nil, 404) // No session before its first message.
+	e.request(t, "GET", base+"/turn", nil, 404) // No session before its first message.
 	e.request(t, "POST", base+"/messages", map[string]any{"id": message, "text": "我的提问", "new_session": true}, 202)
 	deadline := time.Now().Add(3 * time.Second)
 	for {
@@ -126,17 +126,17 @@ func TestDeviceConversationEndpointPairsQuestionAndReply(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	var page struct {
-		Items []struct{ Text, Part, MessageID string } `json:"items"`
-		Start string                                   `json:"start"`
+	var turn struct {
+		Message model.Message `json:"message"`
 	}
-	if err := json.Unmarshal(e.request(t, "GET", base+"/conversation", nil, 200), &page); err != nil {
+	if err := json.Unmarshal(e.request(t, "GET", base+"/turn", nil, 200), &turn); err != nil {
 		t.Fatal(err)
 	}
-	if len(page.Items) != 2 || page.Items[0].Part != "input" || page.Items[0].Text != "我的提问" || page.Items[1].Part != "reply" || page.Items[1].Text == "" {
-		t.Fatalf("roles: %+v", page)
+	if turn.Message.ID != message || turn.Message.InputBytes != len("我的提问") || turn.Message.ReplyBytes == 0 {
+		t.Fatalf("turn: %+v", turn)
 	}
-	e.request(t, "GET", base+"/conversation?from="+page.Start, nil, 200)
-	e.request(t, "GET", base+"/conversation?from="+page.Start+"&before="+page.Start, nil, 400)
-	e.request(t, "GET", base+"/conversation?from=bad", nil, 409)
+	if input := string(e.request(t, "GET", base+"/messages/"+message+"/content?part=input", nil, 200)); input != "我的提问" {
+		t.Fatalf("input %q", input)
+	}
+	e.request(t, "GET", base+"/conversation", nil, 404) // Retired.
 }

@@ -12,7 +12,20 @@ import (
 
 const messageColumns = "id,session_id,model,upstream_scope,system_prompt,attempts,input,reply,state,finish_reason,error,revision,created_at,updated_at"
 
+// metaColumns reads a message without its input and reply, which stay inside
+// SQLite; only their UTF-8 sizes are read. Pair it with scanMeta.
+const metaColumns = `id,session_id,model,upstream_scope,system_prompt,attempts,state,finish_reason,error,revision,created_at,updated_at,
+	length(CAST(input AS BLOB)),length(CAST(reply AS BLOB))`
+
 type scanner interface{ Scan(...any) error }
+
+func scanMeta(row scanner) (model.Message, error) {
+	var message model.Message
+	err := row.Scan(&message.ID, &message.SessionID, &message.Model, &message.UpstreamScope, &message.SystemPrompt, &message.Attempts,
+		&message.State, &message.FinishReason, &message.Error, &message.Revision, &message.CreatedAt, &message.UpdatedAt,
+		&message.InputBytes, &message.ReplyBytes)
+	return message, missing(err)
+}
 
 func scanMessage(row scanner) (model.Message, error) {
 	var message model.Message
@@ -157,18 +170,15 @@ func (s *Store) Retry(ctx context.Context, sessionID, id, scope string) error {
 }
 
 func (s *Store) Messages(ctx context.Context, sessionID string, limit, offset int) ([]model.Message, error) {
-	// Metadata queries leave large inputs and replies inside SQLite.
-	rows, err := s.db.QueryContext(ctx, `SELECT id,session_id,model,upstream_scope,system_prompt,attempts,'','',state,finish_reason,error,revision,created_at,updated_at,
-		length(CAST(input AS BLOB)),length(CAST(reply AS BLOB)) FROM messages WHERE session_id=? ORDER BY rowid DESC LIMIT ? OFFSET ?`, sessionID, limit, offset)
+	rows, err := s.db.QueryContext(ctx, "SELECT "+metaColumns+" FROM messages WHERE session_id=? ORDER BY rowid DESC LIMIT ? OFFSET ?", sessionID, limit, offset)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	items := make([]model.Message, 0, limit)
 	for rows.Next() {
-		var item model.Message
-		if err := rows.Scan(&item.ID, &item.SessionID, &item.Model, &item.UpstreamScope, &item.SystemPrompt, &item.Attempts, &item.Input, &item.Reply, &item.State,
-			&item.FinishReason, &item.Error, &item.Revision, &item.CreatedAt, &item.UpdatedAt, &item.InputBytes, &item.ReplyBytes); err != nil {
+		item, err := scanMeta(rows)
+		if err != nil {
 			return nil, err
 		}
 		items = append(items, item)
