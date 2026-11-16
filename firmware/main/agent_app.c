@@ -1389,11 +1389,8 @@ static void power_tick(int64_t now)
     agent_speech_copy(&speech);
     const bool active = s_view.capture != AGENT_IDLE || (s_view.busy && !s_sleep_requested) || s_edit.active || s_page == AGENT_PAGE_PROVISION ||
         agent_message_active(s_view.message.state) || speech.active || bsp_button_read_mv() < BSP_BTN_MV_RELEASED_MIN;
-    // An unsent voice draft lives only in RAM: the screen may go dark, but deep
-    // sleep, which loses RAM, waits until it is sent or cleared.
-    const bool keep_ram = (s_view.busy && !s_sleep_requested) || s_view.draft_chars > 0;
     const memo_power_action_t action = s_manual_sleep ? MEMO_POWER_SLEEP : memo_power_poll(&s_power, now / 1000, settings->screen_timeout_s,
-                                                      settings->sleep_min, active, keep_ram);
+                                                      settings->sleep_min, active, s_view.busy && !s_sleep_requested);
     const int brightness = action == MEMO_POWER_ON ? (s_edit.active ? s_edit.value.brightness : settings->brightness) : 0;
     if (brightness != s_backlight) { bsp_display_backlight(brightness); s_backlight = brightness; }
     if (action == MEMO_POWER_SLEEP && !s_sleep_requested) s_sleep_requested = agent_client_pause() == ESP_OK;

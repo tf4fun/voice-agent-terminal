@@ -12,8 +12,8 @@ the composing client (device RAM, bounded to 140 characters with a visible
 count; web page memory). A send carries the complete text, and a new session is
 created and titled by its first send, so no empty sessions arise and neither the
 gateway nor Hermes needs to reclaim any. Drafts no longer synchronize between
-the device and the web page. An unsent device draft blocks deep sleep but not
-screen-off; a reboot loses it. Gateway SQLite moved to schema v4 without
+the device and the web page. An unsent device draft does not delay sleep; deep
+sleep or a reboot loses it. Gateway SQLite moved to schema v4 without
 migration. Server tests, firmware host tests and the UI preview cover it; device
 acceptance of this build is NOT RUN.
 

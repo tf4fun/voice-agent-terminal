@@ -108,8 +108,7 @@ its draft serial, so a newer recording or a clear cancels a send still queued.
 Long OK re-records: a successful transcript replaces the draft, while
 cancellation, no speech (`没有听清`), a transcript over 140 characters or a
 failed upload keeps the earlier text. Leaving the session discards the draft.
-An unsent draft keeps the device out of deep sleep while still letting the
-screen go dark; a reboot loses it. Each cached input or reply is bounded to
+An unsent draft does not delay sleep; deep sleep or a reboot loses it. Each cached input or reply is bounded to
 16 KiB. Longer content keeps a UTF-8 prefix, leaves the rest unread on the server,
 and ends with a notice that only the beginning is shown. Sessions and settings share a
 registered top-level page cycle. Long Up advances and wraps that cycle. Additional

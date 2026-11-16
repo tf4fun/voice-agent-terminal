@@ -83,8 +83,8 @@ shown with its count. A successful re-recording replaces its earlier text, and
 long Down clears it. Transcription is a side channel: the gateway returns the
 text and stores nothing. Sending carries the complete text as an immutable
 message snapshot; a new session is created and titled by its first send, so
-abandoned recordings leave no empty sessions. An unsent draft keeps the device
-out of deep sleep (the screen may still go dark); a reboot loses it. The user's
+abandoned recordings leave no empty sessions. An unsent draft does not delay
+sleep; deep sleep or a reboot loses it. The user's
 send action triggers Hermes.
 
 ## Architecture

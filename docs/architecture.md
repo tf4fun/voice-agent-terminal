@@ -65,8 +65,7 @@ typing: transcription is a side channel that returns text and persists nothing.
 - The device keeps one pending message in RAM, bounded to 140 characters and
   shown with its character count. A successful re-recording replaces it, a
   failed one keeps it, long Down clears it and leaving the session discards it.
-  While it exists the screen may go dark but the device does not enter deep
-  sleep; a reboot loses it.
+  It does not delay sleep; deep sleep or a reboot loses it.
 - The web page keeps unsent composer text per session in page memory.
 - Sending carries the complete text with a client message ID. A new chat has a
   client-generated session ID only, and its first send creates the session in
