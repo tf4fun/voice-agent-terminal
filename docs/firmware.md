@@ -124,8 +124,9 @@ bounded single-line layouts. Active pages own their widgets and animations.
 Switching pages deletes the inactive page after loading a fixed transition screen.
 
 The gateway's index supplies the session list. Initial names are `新会话`.
-After the first successful recording, the client uses the opening transcript as
-the title and asks Go to update Hermes. Internal IDs remain in protocol fields.
+After the first successful send, the client uses the opening of the sent input as
+the title and asks Go to update Hermes. Recordings that are replaced or cleared
+before sending do not name the session. Internal IDs remain in protocol fields.
 The user authorized deletion of the two existing prototype sessions on
 2026-11-14. Both local deletion and Hermes synchronization completed. Their
 old title suffix handling and the v1 database migration were removed.

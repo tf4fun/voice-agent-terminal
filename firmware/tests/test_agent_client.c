@@ -59,6 +59,9 @@ static bool server_committed, cancel_accepted, audio_eof;
 static unsigned chunks_read, cancel_attempts, commit_requests, commit_applies, abort_requests;
 static enum capture_case capture_case;
 static char server_draft;
+static bool naming_mode; // Send, read the sent input, then PATCH the session title.
+static unsigned naming_reads, naming_patches;
+static char naming_title[128];
 static void try_cancel(void)
 {
     cancel_attempts++;
@@ -184,7 +187,7 @@ int esp_http_client_write(esp_http_client_handle_t client,const char *data,int s
     }
     if(capture_mode && strstr(client->url,"/audio?")) {
         if(size==5 && memcmp(data,"0\r\n\r\n",5)==0)audio_eof=true;
-    } else if(capture_mode) {
+    } else if(capture_mode || naming_mode) {
         assert(client->written+(size_t)size<sizeof(client->request_body));
         memcpy(client->request_body+client->written,data,(size_t)size);
         client->written+=(size_t)size;
@@ -202,6 +205,24 @@ int64_t esp_http_client_fetch_headers(esp_http_client_handle_t client)
         return (int64_t)client->length;
     }
     client->status=response_status;
+    if(naming_mode) {
+        client->status=200;
+        if(client->method==HTTP_METHOD_POST && strstr(client->url,"/messages")) {
+            client->status=202;
+            strcpy(client->response,"{\"id\":\"00000000-0000-4000-8000-000000000002\",\"state\":\"queued\",\"revision\":1,\"input_bytes\":18,\"reply_bytes\":0}");
+        } else if(strstr(client->url,"/messages/00000000-0000-4000-8000-000000000002/text?part=input&limit=48")) {
+            naming_reads++;
+            strcpy(client->response,"{\"text\":\"打开客厅的灯\",\"offset\":0,\"end\":18,\"total\":18,\"revision\":1}");
+        } else if(client->method==HTTP_METHOD_PATCH && strstr(client->url,session_id)) {
+            naming_patches++;
+            snprintf(naming_title,sizeof(naming_title),"%s",client->request_body);
+            strcpy(client->response,"{}");
+        } else {
+            CHECK(false);strcpy(client->response,"{}");
+        }
+        client->length=strlen(client->response);
+        return (int64_t)client->length;
+    }
     if(capture_mode) {
         client->status=200;
         if(strstr(client->url,"/audio?")) {
@@ -292,7 +313,7 @@ static void setup(void)
     s_view.selection=1;s_view.connected=true;s_view.text_kind=AGENT_TEXT_DRAFT;
     s_view.text_request=1;s_view.chat_request=1;
     s_view.draft_revision=s_view.text.revision=8;
-    queue_fixture.count=0;response_hook=NULL;capture_mode=false;
+    queue_fixture.count=0;response_hook=NULL;capture_mode=false;naming_mode=false;
     injected_response=NULL;response_status=200;declared_extra=0;stream_timeout_ms=0;
     whole_input="user question";whole_reply="assistant answer";whole_draft="reviewed draft";
     s_resync=false;
@@ -422,6 +443,25 @@ static void test_clear_draft_uses_shown_revision(void)
     CHECK(s_view.draft_revision==10&&s_resync);
     s_view.draft_clear=false;
     CHECK(agent_client_clear_draft()==ESP_ERR_INVALID_STATE);
+}
+
+// A new session is titled from its first sent message, not from a recording
+// that may still be replaced or cleared before sending.
+static void test_first_send_names_session(void)
+{
+    setup();naming_mode=true;naming_reads=naming_patches=0;
+    s_view.segment_count=s_view.segment_total=1;s_view.text.total=18;
+    strcpy(s_view.title,"新会话");
+    CHECK(agent_client_send(8,s_view.selection)==ESP_OK);dispatch();
+    CHECK(naming_reads==1&&naming_patches==1);
+    CHECK(strcmp(naming_title,"{\"title\":\"打开客厅的灯\"}")==0);
+    CHECK(strcmp(s_view.title,"打开客厅的灯")==0);
+
+    setup();naming_mode=true;naming_reads=naming_patches=0;
+    s_view.segment_count=s_view.segment_total=1;s_view.text.total=18;
+    strcpy(s_view.title,"已有标题");
+    CHECK(agent_client_send(8,s_view.selection)==ESP_OK);dispatch();
+    CHECK(naming_reads==0&&naming_patches==0&&strcmp(s_view.title,"已有标题")==0);
 }
 
 static void test_empty_draft_returns_to_whole_turn(void)
@@ -614,6 +654,7 @@ int main(void)
     test_raw_content_integrity();
     test_empty_draft_returns_to_whole_turn();
     test_clear_draft_uses_shown_revision();
+    test_first_send_names_session();
     test_active_reply_is_fetched_once_complete();
     test_retry_accepts_server_message();
     for(enum capture_case item=CAPTURE_NORMAL;item<=CAPTURE_SHORT;item++)test_capture(item);

@@ -923,10 +923,12 @@ static bool resolve_recording(const char *session, const char *segment, bool *co
     return saved || cancelled || status == 404;
 }
 
-static void name_session(const char *session, const char *segment)
+// Titles a new session from the opening of its first sent message, so a
+// recording that was replaced or cleared before sending never names it.
+static void name_session(const char *session, const char *message)
 {
     char path[160], title[96];
-    snprintf(path, sizeof(path), "/sessions/%s/segments/%s/text?limit=48", session, segment);
+    snprintf(path, sizeof(path), "/sessions/%s/messages/%s/text?part=input&limit=48", session, message);
     agent_text_t text;
     if (request(HTTP_METHOD_GET, path, NULL, s_operation_body, sizeof(s_operation_body)) != 200 ||
         !agent_parse_text(s_operation_body, &text) || text.text[0] == '\0') return;
@@ -1036,7 +1038,6 @@ static void record(const command_t *command)
     }
     if (saved) {
         audio_kept = true;
-        if (create || strcmp(command->title, "新会话") == 0) name_session(session, segment);
         notice("");
     } else if (!s_audio_started) {
         revision = draft_revision(session);
@@ -1236,9 +1237,11 @@ static void execute(const command_t *command)
             s_view.segment_offset = 0;
             s_view.segment_requested = 0;
             s_view.segment_count = s_view.segment_total = 0;
+            const bool untitled = strcmp(s_view.session_id, session) == 0 && strcmp(s_view.title, "新会话") == 0;
             changed();
             unlock();
             notice("");
+            if (untitled) name_session(session, message.id);
         } else notice(http_notice(status));
     } else if (command->kind == CMD_RETRY) {
         snprintf(path, sizeof(path), "/sessions/%s/messages/%s/retry", session, command->id);
@@ -1459,7 +1462,6 @@ esp_err_t agent_client_record(bool new_session)
     if (s_view.busy || s_view.capture != AGENT_IDLE || !s_view.connected || s_view.paused ||
         (!new_session && s_view.session_id[0] == '\0')) { unlock(); return ESP_ERR_INVALID_STATE; }
     agent_copy_text(c.id, sizeof(c.id), s_view.session_id);
-    agent_copy_text(c.title, sizeof(c.title), s_view.title);
     s_view.capture = AGENT_PREPARING;
     s_cancelled = false;
     s_view.text_request++;
