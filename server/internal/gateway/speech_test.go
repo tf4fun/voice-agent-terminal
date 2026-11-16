@@ -79,7 +79,7 @@ func TestAbandonedSpeechIsRedoneForANewListener(t *testing.T) {
 		t.Fatal(err)
 	}
 	id := model.NewID()
-	if _, _, err := service.Store.Send(ctx, session.ID, id, "hermes-agent", service.Hermes.Scope(), "读一下", false); err != nil {
+	if _, _, err := service.Store.Send(ctx, session.ID, id, "hermes-agent", service.Hermes.Scope(), "", "读一下", false); err != nil {
 		t.Fatal(err)
 	}
 	// The idle timer has stopped synthesis but the stream has not ended yet:

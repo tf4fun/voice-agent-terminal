@@ -10,13 +10,13 @@ import (
 	"github.com/tf4fun/voice-agent-terminal/server/internal/model"
 )
 
-const messageColumns = "id,session_id,model,upstream_scope,attempts,input,reply,state,finish_reason,error,revision,created_at,updated_at"
+const messageColumns = "id,session_id,model,upstream_scope,system_prompt,attempts,input,reply,state,finish_reason,error,revision,created_at,updated_at"
 
 type scanner interface{ Scan(...any) error }
 
 func scanMessage(row scanner) (model.Message, error) {
 	var message model.Message
-	err := row.Scan(&message.ID, &message.SessionID, &message.Model, &message.UpstreamScope, &message.Attempts, &message.Input, &message.Reply,
+	err := row.Scan(&message.ID, &message.SessionID, &message.Model, &message.UpstreamScope, &message.SystemPrompt, &message.Attempts, &message.Input, &message.Reply,
 		&message.State, &message.FinishReason, &message.Error, &message.Revision, &message.CreatedAt, &message.UpdatedAt)
 	message.InputBytes, message.ReplyBytes = len(message.Input), len(message.Reply)
 	return message, missing(err)
@@ -29,8 +29,9 @@ func (s *Store) Message(ctx context.Context, sessionID, id string) (model.Messag
 // Send stores one complete user input as a queued message. With create, an
 // unknown session is created in the same transaction and titled after the
 // input, so a session never exists without its first message. A repeated
-// message ID with the same session and input returns the stored message.
-func (s *Store) Send(ctx context.Context, sessionID, id, modelName, scope, input string, create bool) (model.Message, bool, error) {
+// message ID with the same session and input returns the stored message. The
+// system prompt is stored with the input, so a retry repeats the same request.
+func (s *Store) Send(ctx context.Context, sessionID, id, modelName, scope, prompt, input string, create bool) (model.Message, bool, error) {
 	created := false
 	err := s.transaction(ctx, func(tx *sql.Tx) error {
 		existing, err := scanMessage(tx.QueryRowContext(ctx, "SELECT "+messageColumns+" FROM messages WHERE id=?", id))
@@ -74,7 +75,8 @@ func (s *Store) Send(ctx context.Context, sessionID, id, modelName, scope, input
 		if active > 0 {
 			return ErrBusy
 		}
-		if _, err := tx.ExecContext(ctx, "INSERT INTO messages(id,session_id,model,upstream_scope,input,state,created_at,updated_at) VALUES(?,?,?,?,?,'queued',?,?)", id, sessionID, modelName, scope, input, now, now); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO messages(id,session_id,model,upstream_scope,system_prompt,input,state,created_at,updated_at)
+			VALUES(?,?,?,?,?,?,'queued',?,?)`, id, sessionID, modelName, scope, prompt, input, now, now); err != nil {
 			return err
 		}
 		_, err = tx.ExecContext(ctx, "UPDATE sessions SET updated_at=? WHERE id=?", now, sessionID)
@@ -156,7 +158,7 @@ func (s *Store) Retry(ctx context.Context, sessionID, id, scope string) error {
 
 func (s *Store) Messages(ctx context.Context, sessionID string, limit, offset int) ([]model.Message, error) {
 	// Metadata queries leave large inputs and replies inside SQLite.
-	rows, err := s.db.QueryContext(ctx, `SELECT id,session_id,model,upstream_scope,attempts,'','',state,finish_reason,error,revision,created_at,updated_at,
+	rows, err := s.db.QueryContext(ctx, `SELECT id,session_id,model,upstream_scope,system_prompt,attempts,'','',state,finish_reason,error,revision,created_at,updated_at,
 		length(CAST(input AS BLOB)),length(CAST(reply AS BLOB)) FROM messages WHERE session_id=? ORDER BY rowid DESC LIMIT ? OFFSET ?`, sessionID, limit, offset)
 	if err != nil {
 		return nil, err
@@ -165,7 +167,7 @@ func (s *Store) Messages(ctx context.Context, sessionID string, limit, offset in
 	items := make([]model.Message, 0, limit)
 	for rows.Next() {
 		var item model.Message
-		if err := rows.Scan(&item.ID, &item.SessionID, &item.Model, &item.UpstreamScope, &item.Attempts, &item.Input, &item.Reply, &item.State,
+		if err := rows.Scan(&item.ID, &item.SessionID, &item.Model, &item.UpstreamScope, &item.SystemPrompt, &item.Attempts, &item.Input, &item.Reply, &item.State,
 			&item.FinishReason, &item.Error, &item.Revision, &item.CreatedAt, &item.UpdatedAt, &item.InputBytes, &item.ReplyBytes); err != nil {
 			return nil, err
 		}

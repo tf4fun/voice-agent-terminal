@@ -22,7 +22,7 @@ Existing process variables take precedence.
 | `HERMES_BASE_URL` | Hermes API root, default `http://127.0.0.1:8642`; a profile prefix can be included |
 | `HERMES_API_KEY` | Hermes API server credential |
 | `HERMES_MODEL` | Request model/route alias, default `hermes-agent` |
-| `HERMES_SYSTEM_PROMPT` | System message that leads every chat request; Hermes layers it on its own prompt. The default asks for replies within 300 characters unless a long one is requested |
+| `HERMES_SYSTEM_PROMPT` | System message that leads every chat request; Hermes layers it on its own prompt. Each message stores the prompt it was sent with, so a change applies to new messages and a retry repeats the original. The default asks for replies within 300 characters unless a long one is requested |
 | `VOICE_ASR_PROVIDER` | `openai` by default; `fake` for offline transcription tests |
 | `OPENAI_API_KEY` | OpenAI credential, held by Go |
 | `OPENAI_TRANSCRIBE_MODEL` | Default `gpt-live-transcribe` |
@@ -113,7 +113,10 @@ The index covers sessions created through Go.
 `GET /api/v1/sessions` lists the local session index. `GET` and `PATCH` on
 `/api/v1/sessions/{id}` read metadata and update the Hermes and local title.
 `DELETE` marks a session as deleting, coordinates upstream deletion and retains
-a retired local ID. Active or unconfirmed messages return a busy response.
+a retired local ID. Active or unconfirmed messages return a busy response,
+except in a session still `creating`: its queued first message has never been
+sent, so the session can always be deleted and the message goes with it. A
+create that succeeds afterwards is deleted upstream as well.
 An upstream session's API source is verified before deletion.
 
 ## Transcription
@@ -163,14 +166,15 @@ Closing the connection cancels the transcription. Audio bytes are transient.
 `GET /api/v1/transcriptions/{id}/text` reads the live text of a running
 transcription through the bounded UTF-8 window API (`offset`, `limit`,
 `before=<byte boundary>` or `tail=1`; the revision counts updates). The text is
-kept in memory while the upload runs and for one minute after it ends; an
-unknown or released ID returns 404, including before the upload has started.
+kept in memory while the upload runs and for one minute after it ends, at most
+16 transcriptions at once (the oldest finished one gives way); an unknown or
+released ID returns 404, including before the upload has started.
 
 `/api/v1/server` reports `protocol: 2` with `bounded_paging`, `text_before`,
 `text_tail`, `conversation_windows`, `whole_messages`, `reply_sse`,
 `max_input_bytes`, `max_transcript_bytes`, `device_logs` and `speech`; the
-device requires protocol 2. SQLite schema v4 holds sessions, messages and
-device reports only. An earlier database is refused at startup rather than
+device requires protocol 2. SQLite schema v5 holds sessions, messages (with
+the system prompt each was sent with) and device reports only. An earlier database is refused at startup rather than
 migrated: remove `gateway.db` to start empty.
 
 ## Complete messages
@@ -228,8 +232,8 @@ safely; the same ID with other text returns 409. A session with an active or
 unconfirmed message returns busy.
 
 Workers send one new user message to Hermes Chat Completions with its session ID
-and a stable idempotency key. The stored model, input and upstream identity hash
-remain associated with the message. Concurrent sends within one session are
+and a stable idempotency key. The stored model, system prompt, input and upstream
+identity hash remain associated with the message, so a retry sends the same request. Concurrent sends within one session are
 serialized by the store's active-message constraint.
 
 `GET /api/v1/sessions/{id}/messages` lists message metadata.

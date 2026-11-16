@@ -15,7 +15,7 @@ import (
 )
 
 func TestChatContinuationMediaFilteringAndFinish(t *testing.T) {
-	message := model.Message{ID: model.NewID(), SessionID: model.NewID(), Model: "hermes-agent", Input: "整理想法"}
+	message := model.Message{ID: model.NewID(), SessionID: model.NewID(), Model: "hermes-agent", SystemPrompt: "简短回答", Input: "整理想法"}
 	var keys []string
 	var mu sync.Mutex
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -46,7 +46,7 @@ func TestChatContinuationMediaFilteringAndFinish(t *testing.T) {
 		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
 	}))
 	defer upstream.Close()
-	client := Client{BaseURL: upstream.URL, APIKey: "test-secret", SystemPrompt: "简短回答"}
+	client := Client{BaseURL: upstream.URL, APIKey: "test-secret"}
 	for iteration := 0; iteration < 2; iteration++ {
 		var reply strings.Builder
 		finish, err := client.Chat(context.Background(), message, func(update Update) error { reply.WriteString(update.Text); return nil })

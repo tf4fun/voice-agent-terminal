@@ -20,9 +20,7 @@ import (
 type Client struct {
 	BaseURL string
 	APIKey  string
-	// SystemPrompt leads every chat request; Hermes layers it on its own prompt.
-	SystemPrompt string
-	HTTP         *http.Client
+	HTTP    *http.Client
 }
 
 type Update struct {
@@ -172,9 +170,10 @@ func (c *Client) ownedSession(parent context.Context, id string) (int, error) {
 var errDone = errors.New("completion_done")
 
 func (c *Client) Chat(ctx context.Context, message model.Message, emit func(Update) error) (string, error) {
+	// The stored prompt leads the request; Hermes layers it on its own prompt.
 	messages := []map[string]string{{"role": "user", "content": message.Input}}
-	if c.SystemPrompt != "" {
-		messages = append([]map[string]string{{"role": "system", "content": c.SystemPrompt}}, messages...)
+	if message.SystemPrompt != "" {
+		messages = append([]map[string]string{{"role": "system", "content": message.SystemPrompt}}, messages...)
 	}
 	request, err := c.request(ctx, "POST", "/v1/chat/completions", map[string]any{
 		"model": message.Model, "stream": message.Attempts == 0, "messages": messages,

@@ -456,7 +456,8 @@ func (s *Server) send(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sessionID := r.PathValue("session")
-	message, created, err := s.service.Store.Send(r.Context(), sessionID, body.ID, s.service.Config.HermesModel, s.service.Hermes.Scope(), body.Text, body.NewSession)
+	message, created, err := s.service.Store.Send(r.Context(), sessionID, body.ID, s.service.Config.HermesModel, s.service.Hermes.Scope(),
+		s.service.Config.HermesPrompt, body.Text, body.NewSession)
 	if err != nil {
 		storeError(w, err)
 		return

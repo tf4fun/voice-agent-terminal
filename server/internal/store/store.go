@@ -18,7 +18,7 @@ import (
 //go:embed schema.sql
 var schema string
 
-const schemaVersion = 4
+const schemaVersion = 5
 
 var (
 	ErrNotFound = errors.New("not_found")
@@ -72,7 +72,8 @@ func (s *Store) initialize() error {
 			return err
 		})
 	default:
-		// Schema 4 dropped gateway drafts; earlier databases are not migrated.
+		// Schema 5 stores each message's system prompt; earlier databases are
+		// not migrated.
 		return fmt.Errorf("unsupported database schema %d, expected %d: remove gateway.db to start empty", version, schemaVersion)
 	}
 }
@@ -170,19 +171,27 @@ func (s *Store) PendingSessions(ctx context.Context) ([]model.Session, error) {
 	return items, rows.Err()
 }
 
+// BeginDelete marks a session for deletion once no message is in flight. A
+// session still being created can always be deleted: Claim waits for ready, so
+// its queued first message has never reached Hermes and is removed with it.
 func (s *Store) BeginDelete(ctx context.Context, id string) error {
 	return s.transaction(ctx, func(tx *sql.Tx) error {
-		if _, err := readSession(ctx, tx, id); err != nil {
+		session, err := readSession(ctx, tx, id)
+		if err != nil {
 			return err
 		}
+		states := "'queued','sending','waiting','receiving','attention','unconfirmed'"
+		if session.State == "creating" {
+			states = "'sending','waiting','receiving','attention','unconfirmed'"
+		}
 		var active int
-		if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM messages WHERE session_id=? AND state IN ('queued','sending','waiting','receiving','attention','unconfirmed')", id).Scan(&active); err != nil {
+		if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM messages WHERE session_id=? AND state IN ("+states+")", id).Scan(&active); err != nil {
 			return err
 		}
 		if active > 0 {
 			return ErrBusy
 		}
-		_, err := tx.ExecContext(ctx, "UPDATE sessions SET state='deleting',error='',updated_at=? WHERE id=?", time.Now().UnixMilli(), id)
+		_, err = tx.ExecContext(ctx, "UPDATE sessions SET state='deleting',error='',updated_at=? WHERE id=?", time.Now().UnixMilli(), id)
 		return err
 	})
 }

@@ -14,7 +14,7 @@ func failedMessageFixture(t *testing.T) (*Store, string, string) {
 	ctx := context.Background()
 	st, session := fixture(t)
 	id := model.NewID()
-	if _, _, err := st.Send(ctx, session, id, "model", "scope", "reviewed input", false); err != nil {
+	if _, _, err := st.Send(ctx, session, id, "model", "scope", "", "reviewed input", false); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.SetMessageState(ctx, id, "failed", "error", "upstream_failure"); err != nil {
@@ -105,5 +105,41 @@ func TestConcurrentRetryAndDeleteHaveOneWinner(t *testing.T) {
 		} else {
 			t.Fatal("neither operation won", retried, deleted)
 		}
+	}
+}
+
+// A session Hermes never created can be deleted with its unsent first message,
+// and a late create success cannot revive it.
+func TestCreatingSessionDeletesWithItsQueuedMessage(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	session, id := model.NewID(), model.NewID()
+	if _, _, err := st.Send(ctx, session, id, "m", "scope", "", "首条", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Retry(ctx, session, id, "scope"); !errors.Is(err, ErrBusy) {
+		t.Fatalf("retry while creating=%v", err)
+	}
+	if err := st.BeginDelete(ctx, session); err != nil {
+		t.Fatalf("delete while creating=%v", err)
+	}
+	if err := st.SetSessionReady(ctx, session); err != nil {
+		t.Fatal(err)
+	}
+	if current, err := st.Session(ctx, session); err != nil || current.State != "deleting" {
+		t.Fatalf("late create: %+v %v", current, err)
+	}
+	if _, err := st.Claim(ctx); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("claimed a deleting session's message: %v", err)
+	}
+	if err := st.FinishDelete(ctx, session); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Message(ctx, session, id); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("message after delete: %v", err)
 	}
 }

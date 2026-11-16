@@ -43,18 +43,20 @@ func setup(t *testing.T) *environment {
 			var body struct {
 				Stream   bool `json:"stream"`
 				Messages []struct {
+					Role    string `json:"role"`
 					Content string `json:"content"`
 				} `json:"messages"`
 			}
 			_ = json.NewDecoder(r.Body).Decode(&body)
-			if len(body.Messages) != 1 {
+			// The configured default system prompt leads the stored user input.
+			if len(body.Messages) != 2 || body.Messages[0].Role != "system" || body.Messages[0].Content != config.DefaultSystemPrompt {
 				t.Error("invalid prompt")
 				w.WriteHeader(400)
 				return
 			}
 			// Tests read at most a few; extra chats must not block the fake.
 			select {
-			case env.input <- body.Messages[0].Content:
+			case env.input <- body.Messages[1].Content:
 			default:
 			}
 			select {

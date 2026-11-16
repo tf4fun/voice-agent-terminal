@@ -155,6 +155,7 @@ long one is requested, so the bounds below are a backstop:
 | Device voice draft | 140 characters | The recording is refused and the earlier draft kept |
 | Message input (any client) | 64 KiB | `413 input_too_large` |
 | One transcript | 16 KiB | `413` |
+| Transcripts held by the gateway | 16, one minute after each ends | The oldest finished one is dropped |
 | Stored reply | 2 MiB | The message ends `incomplete`; the web page shows what was kept |
 | Spoken text | 8000 bytes (about 2600 Chinese characters) | Not read aloud |
 | Spoken audio | 16 MiB (about 8.7 min), 10 min per reply | Synthesis stops |

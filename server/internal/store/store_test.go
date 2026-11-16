@@ -35,10 +35,10 @@ func TestFirstSendCreatesTitledSessionWithItsMessage(t *testing.T) {
 	}
 	defer st.Close()
 	session, id := model.NewID(), model.NewID()
-	if _, _, err := st.Send(ctx, session, id, "m", "scope", "你好", false); !errors.Is(err, ErrNotFound) {
+	if _, _, err := st.Send(ctx, session, id, "m", "scope", "", "你好", false); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("send to an unknown session without create=%v", err)
 	}
-	message, created, err := st.Send(ctx, session, id, "m", "scope", "\n  推荐一部好电影，理由在三十个字以内。\n第二行", true)
+	message, created, err := st.Send(ctx, session, id, "m", "scope", "", "\n  推荐一部好电影，理由在三十个字以内。\n第二行", true)
 	if err != nil || !created || message.State != "queued" {
 		t.Fatal(message, created, err)
 	}
@@ -63,19 +63,19 @@ func TestSendIsIdempotentByMessageID(t *testing.T) {
 	ctx := context.Background()
 	st, session := fixture(t)
 	id := model.NewID()
-	first, created, err := st.Send(ctx, session, id, "m", "scope", "同一条", true)
+	first, created, err := st.Send(ctx, session, id, "m", "scope", "", "同一条", true)
 	if err != nil || created {
 		t.Fatal(first, created, err)
 	}
-	again, created, err := st.Send(ctx, session, id, "m", "scope", "同一条", true)
+	again, created, err := st.Send(ctx, session, id, "m", "scope", "", "同一条", true)
 	if err != nil || created || again.ID != first.ID || again.Revision != first.Revision {
 		t.Fatalf("lost-response retry: %+v %v %v", again, created, err)
 	}
-	if _, _, err := st.Send(ctx, session, id, "m", "scope", "改过的文字", false); !errors.Is(err, ErrConflict) {
+	if _, _, err := st.Send(ctx, session, id, "m", "scope", "", "改过的文字", false); !errors.Is(err, ErrConflict) {
 		t.Fatalf("reused ID with other input=%v", err)
 	}
 	other := model.NewID()
-	if _, _, err := st.Send(ctx, other, id, "m", "scope", "同一条", true); !errors.Is(err, ErrConflict) {
+	if _, _, err := st.Send(ctx, other, id, "m", "scope", "", "同一条", true); !errors.Is(err, ErrConflict) {
 		t.Fatalf("reused ID in another session=%v", err)
 	}
 	if _, err := st.Session(ctx, other); !errors.Is(err, ErrNotFound) {
@@ -86,23 +86,23 @@ func TestSendIsIdempotentByMessageID(t *testing.T) {
 func TestSendRejectsEmptyOversizedBusyAndDeleted(t *testing.T) {
 	ctx := context.Background()
 	st, session := fixture(t)
-	if _, _, err := st.Send(ctx, session, model.NewID(), "m", "scope", "", false); !errors.Is(err, ErrConflict) {
+	if _, _, err := st.Send(ctx, session, model.NewID(), "m", "scope", "", "", false); !errors.Is(err, ErrConflict) {
 		t.Fatalf("empty input=%v", err)
 	}
-	if _, _, err := st.Send(ctx, session, model.NewID(), "m", "scope", string(make([]byte, model.MaxInputBytes+1)), false); !errors.Is(err, ErrLimit) {
+	if _, _, err := st.Send(ctx, session, model.NewID(), "m", "scope", "", string(make([]byte, model.MaxInputBytes+1)), false); !errors.Is(err, ErrLimit) {
 		t.Fatalf("oversized input=%v", err)
 	}
-	if _, _, err := st.Send(ctx, session, model.NewID(), "m", "scope", "第一条", false); err != nil {
+	if _, _, err := st.Send(ctx, session, model.NewID(), "m", "scope", "", "第一条", false); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := st.Send(ctx, session, model.NewID(), "m", "scope", "第二条", false); !errors.Is(err, ErrBusy) {
+	if _, _, err := st.Send(ctx, session, model.NewID(), "m", "scope", "", "第二条", false); !errors.Is(err, ErrBusy) {
 		t.Fatalf("second active message=%v", err)
 	}
 	empty, other := fixture(t)
 	if err := empty.BeginDelete(ctx, other); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := empty.Send(ctx, other, model.NewID(), "m", "scope", "迟到", true); !errors.Is(err, ErrNotFound) {
+	if _, _, err := empty.Send(ctx, other, model.NewID(), "m", "scope", "", "迟到", true); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("send to a deleting session=%v", err)
 	}
 }
@@ -121,7 +121,7 @@ func TestConcurrentSendAdmitsOneMessage(t *testing.T) {
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
-			if _, made, err := st.Send(ctx, session, model.NewID(), "hermes-agent", "scope", "共同输入", true); err == nil {
+			if _, made, err := st.Send(ctx, session, model.NewID(), "hermes-agent", "scope", "", "共同输入", true); err == nil {
 				accepted.Add(1)
 				if made {
 					created.Add(1)
@@ -143,7 +143,7 @@ func TestRestartKeepsInputAndRequiresSameMessageRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	session := model.NewID()
-	message, _, err := st.Send(ctx, session, model.NewID(), "hermes-agent", "scope", "保留文字", true)
+	message, _, err := st.Send(ctx, session, model.NewID(), "hermes-agent", "scope", "", "保留文字", true)
 	if err != nil {
 		t.Fatal(err)
 	}

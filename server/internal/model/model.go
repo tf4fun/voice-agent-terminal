@@ -31,17 +31,19 @@ type Message struct {
 	SessionID     string `json:"session_id"`
 	Model         string `json:"-"`
 	UpstreamScope string `json:"-"`
-	Attempts      int    `json:"attempts"`
-	Input         string `json:"-"`
-	Reply         string `json:"-"`
-	State         string `json:"state"`
-	FinishReason  string `json:"finish_reason,omitempty"`
-	Error         string `json:"error,omitempty"`
-	Revision      int64  `json:"revision"`
-	CreatedAt     int64  `json:"created_at"`
-	UpdatedAt     int64  `json:"updated_at"`
-	InputBytes    int    `json:"input_bytes"`
-	ReplyBytes    int    `json:"reply_bytes"`
+	// SystemPrompt is the system message sent with this input; retries reuse it.
+	SystemPrompt string `json:"-"`
+	Attempts     int    `json:"attempts"`
+	Input        string `json:"-"`
+	Reply        string `json:"-"`
+	State        string `json:"state"`
+	FinishReason string `json:"finish_reason,omitempty"`
+	Error        string `json:"error,omitempty"`
+	Revision     int64  `json:"revision"`
+	CreatedAt    int64  `json:"created_at"`
+	UpdatedAt    int64  `json:"updated_at"`
+	InputBytes   int    `json:"input_bytes"`
+	ReplyBytes   int    `json:"reply_bytes"`
 }
 
 type Window struct {

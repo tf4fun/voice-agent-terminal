@@ -19,6 +19,12 @@ import (
 // poll still finds it.
 var transcriptKeep = time.Minute
 
+// transcriptsKept bounds the transcriptions held at once. Each text is at most
+// model.MaxTranscriptBytes, so this also bounds their bytes. Running uploads
+// are fewer than this (captureSlots), so a full table evicts its oldest
+// finished entry.
+const transcriptsKept = 16
+
 // ErrNoSpeech reports a recording whose final transcript is empty.
 var ErrNoSpeech = errors.New("no_speech")
 
@@ -27,6 +33,8 @@ type transcription struct {
 	text     string
 	revision int64
 	cancel   context.CancelFunc
+	finished time.Time   // Zero while the upload runs; guarded by Service.mu.
+	expiry   *time.Timer // Guarded by Service.mu.
 }
 
 func (t *transcription) stop() { t.cancel() }
@@ -48,15 +56,24 @@ func (s *Service) Transcribe(parent context.Context, id string, input io.ReadClo
 		s.mu.Unlock()
 		return "", store.ErrConflict
 	}
+	if len(s.transcripts) >= transcriptsKept && !s.evictTranscript() {
+		s.mu.Unlock()
+		return "", store.ErrBusy
+	}
 	s.transcripts[id] = entry
 	s.mu.Unlock()
-	defer time.AfterFunc(transcriptKeep, func() {
+	defer func() {
 		s.mu.Lock()
-		if s.transcripts[id] == entry {
-			delete(s.transcripts, id)
-		}
-		s.mu.Unlock()
-	})
+		defer s.mu.Unlock()
+		entry.finished = time.Now()
+		entry.expiry = time.AfterFunc(transcriptKeep, func() {
+			s.mu.Lock()
+			if s.transcripts[id] == entry {
+				delete(s.transcripts, id)
+			}
+			s.mu.Unlock()
+		})
+	}()
 	stopClose := context.AfterFunc(ctx, func() { input.Close() })
 	defer stopClose()
 	final, finalized := "", false
@@ -96,6 +113,22 @@ func (s *Service) Transcribe(parent context.Context, id string, input io.ReadClo
 		return "", ErrNoSpeech
 	}
 	return final, nil
+}
+
+// evictTranscript drops the oldest finished transcription; s.mu is held.
+func (s *Service) evictTranscript() bool {
+	oldest := ""
+	for id, entry := range s.transcripts {
+		if !entry.finished.IsZero() && (oldest == "" || entry.finished.Before(s.transcripts[oldest].finished)) {
+			oldest = id
+		}
+	}
+	if oldest == "" {
+		return false
+	}
+	s.transcripts[oldest].expiry.Stop()
+	delete(s.transcripts, oldest)
+	return true
 }
 
 // TranscriptText is the live or final text of a recent transcription.

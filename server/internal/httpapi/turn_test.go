@@ -43,7 +43,7 @@ func wholeMessageEnvironment(t *testing.T) (*environment, string) {
 func addWholeMessage(t *testing.T, e *environment, session, input, reply string) model.Message {
 	t.Helper()
 	ctx := context.Background()
-	message, _, err := e.service.Store.Send(ctx, session, model.NewID(), "test", "scope", input, true)
+	message, _, err := e.service.Store.Send(ctx, session, model.NewID(), "test", "scope", "", input, true)
 	if err != nil {
 		t.Fatal(err)
 	}
