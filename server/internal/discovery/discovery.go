@@ -80,7 +80,8 @@ func makeAnnouncement(name string, ip net.IP) announcement {
 	// distinct for two hosts using the same display name on different addresses.
 	digest := sha256.Sum256([]byte(instance + "\x00" + ip.String()))
 	host := fmt.Sprintf("voiceagent-%x.local.", digest[:6])
-	return announcement{instance, host, []string{"ver=1", "path=/api/v1", "caps=chat,drafts,pcm16", "ip=" + ip.String()}}
+	// ver is the API protocol that /api/v1/server reports.
+	return announcement{instance, host, []string{"ver=2", "path=/api/v1", "caps=chat,pcm16", "ip=" + ip.String()}}
 }
 
 // Advertise publishes a single-label DNS-SD instance and an explicit host/IP on

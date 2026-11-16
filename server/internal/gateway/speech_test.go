@@ -3,6 +3,7 @@ package gateway
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"testing"
@@ -86,13 +87,74 @@ func TestAbandonedSpeechIsRedoneForANewListener(t *testing.T) {
 	// joining it would only hear "cancelled".
 	_, cancel := context.WithCancel(ctx)
 	stale := &speechStream{changed: make(chan struct{}), cancel: cancel, abandoned: true}
-	service.speech.streams = map[string]*speechStream{id: stale}
+	message, err := service.Store.Message(ctx, session.ID, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := speechKey(id, message.Attempts)
+	service.speech.streams = map[string]*speechStream{key: stale}
 	reader, err := service.OpenSpeech(ctx, session.ID, id, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer reader.Close()
-	if reader.stream == stale || service.speech.streams[id] == stale {
+	if reader.stream == stale || service.speech.streams[key] == stale {
 		t.Fatal("new listener joined the abandoned stream")
+	}
+}
+
+// A resume continues only the stream it started on. When that stream is gone
+// (failed, evicted, a restart, or a retry wrote a new reply) new audio need
+// not match the bytes already played, so the resume is refused.
+func TestSpeechResumeNeedsTheStreamItStartedOn(t *testing.T) {
+	ctx := context.Background()
+	service, session := lifecycleFixture(t, lifecycleTransport(func(*http.Request) (*http.Response, error) {
+		return nil, io.ErrUnexpectedEOF
+	}))
+	service.TTS = tts.Fake{}
+	if err := service.Store.SetSessionReady(ctx, session.ID); err != nil {
+		t.Fatal(err)
+	}
+	id := model.NewID()
+	if _, _, err := service.Store.Send(ctx, session.ID, id, "hermes-agent", service.Hermes.Scope(), "", "读一下", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.OpenSpeech(ctx, session.ID, id, 100); !errors.Is(err, ErrSpeechRestarted) {
+		t.Fatalf("resume without a stream: %v", err)
+	}
+	if len(service.speech.streams) != 0 {
+		t.Fatal("a refused resume started synthesis")
+	}
+	message, err := service.Store.Message(ctx, session.ID, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ended := func(status byte) *speechStream {
+		stream := &speechStream{changed: make(chan struct{}), cancel: func() {}}
+		stream.append(frame(FrameAudio, []byte{1, 2, 3, 4}))
+		stream.end(status)
+		return stream
+	}
+	key := speechKey(id, message.Attempts)
+	service.speech.streams = map[string]*speechStream{key: ended(SpeechFailed)}
+	if _, err := service.OpenSpeech(ctx, session.ID, id, 3); !errors.Is(err, ErrSpeechRestarted) {
+		t.Fatalf("resume into a failed stream: %v", err)
+	}
+	done := ended(SpeechDone)
+	service.speech.streams = map[string]*speechStream{key: done}
+	reader, err := service.OpenSpeech(ctx, session.ID, id, 3)
+	if err != nil || reader.stream != done {
+		t.Fatalf("resume into the cached stream: %v", err)
+	}
+	reader.Close()
+	// A retry under the same message ID writes a new reply.
+	if err := service.Store.SetMessageState(ctx, id, "failed", "error", "upstream_failure"); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Store.Retry(ctx, session.ID, id, service.Hermes.Scope()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.OpenSpeech(ctx, session.ID, id, 3); !errors.Is(err, ErrSpeechRestarted) {
+		t.Fatalf("resume across a retry: %v", err)
 	}
 }

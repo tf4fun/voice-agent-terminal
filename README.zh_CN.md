@@ -45,6 +45,7 @@ go vet ./...
 go test -race ./...
 cd ..
 ./tools/smoke-server.sh
+node tools/test-web.mjs
 ./tools/build-server.sh amd64
 ./tools/build-server.sh arm64
 ./tools/test-firmware-host.sh

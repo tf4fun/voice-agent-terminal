@@ -35,7 +35,6 @@ typedef struct {
 bool agent_valid_id(const char *id);
 void agent_copy_text(char *out, size_t capacity, const char *input);
 bool agent_parse_sessions(const char *json, agent_session_t *items, int *count);
-bool agent_parse_messages(const char *json, agent_message_t *items, int *count);
 bool agent_parse_message(const char *json, agent_message_t *item);
 bool agent_parse_text(const char *json, agent_text_t *text);
 bool agent_message_active(const char *state);

@@ -76,10 +76,11 @@ The page lists sessions managed by this gateway.
 
 ## Discovery and limits
 
-Go publishes `_voiceagent._tcp.local` with `ver=1`, `path=/api/v1`, capabilities
-and an IPv4 fallback. Loopback listeners skip mDNS. An advertisement failure is
-logged while HTTP remains available. The device validates `/api/v1/ping` and
-reads `/api/v1/server` after discovery.
+Go publishes `_voiceagent._tcp.local` with `ver=2` (the protocol `/api/v1/server`
+reports), `path=/api/v1`, `caps=chat,pcm16` and an IPv4 fallback. Loopback
+listeners skip mDNS. An advertisement failure is logged while HTTP remains
+available. After discovery the device reads `/api/v1/server` and requires
+protocol 2.
 
 - Session, transcription and message IDs use lowercase UUID syntax.
 - Metadata pages default to 4 entries and accept `limit=1..20` and an offset.
@@ -171,7 +172,7 @@ kept in memory while the upload runs and for one minute after it ends, at most
 released ID returns 404, including before the upload has started.
 
 `/api/v1/server` reports `protocol: 2` with `bounded_paging`, `text_before`,
-`text_tail`, `conversation_windows`, `whole_messages`, `reply_sse`,
+`text_tail`, `whole_messages`, `reply_sse`,
 `max_input_bytes`, `max_transcript_bytes`, `device_logs` and `speech`; the
 device requires protocol 2. SQLite schema v5 holds sessions, messages (with
 the system prompt each was sent with) and device reports only. An earlier database is refused at startup rather than
@@ -186,7 +187,9 @@ The device and management page select one complete user/assistant exchange with
 the exchange's position among the session's exchanges. Select one historical exchange with
 exactly one `message=<uuid>`, `before=<uuid>` or `after=<uuid>` query. Neighbor
 selection is scoped to the current session and returns 404 at either boundary.
-Malformed or repeated selectors return 400.
+Malformed or repeated selectors return 400. The turn query reads only metadata
+(sizes, state and revision), never the text, since the device polls it every
+second while a reply is written.
 
 Read complete UTF-8 bodies from
 `GET /api/v1/sessions/{id}/messages/{message}/content?part=input|reply`.
@@ -202,19 +205,6 @@ The header revision and state describe that same stored snapshot. The device
 keeps the selected input and reply in RAM and loads a different exchange when
 history navigation requests it. Capabilities advertise `whole_messages` and
 `reply_sse`.
-
-## Conversation windows
-
-`GET /api/v1/sessions/{id}/conversation` returns up to four chronological blocks,
-ending at the newest reply by default. Each block identifies the message,
-`part` (`input` or `reply`), state, revision, UTF-8 byte offsets and at most
-256 bytes of text. An empty in-progress reply retains its assistant block.
-The response includes `before`, `after` and `start` cursors. Pass exactly one
-as `before=<cursor>`, `after=<cursor>` or `from=<cursor>` to move or refresh.
-Adjoining pages share one block so the device can retain its visible anchor.
-Cursor reads are scoped to the selected session. A stale text boundary returns
-409 and the client reloads a fresh window while keeping its existing view.
-The capability flag is `conversation_windows`.
 
 ## Explicit send and replies
 
@@ -297,7 +287,11 @@ first request for a reply and is shared, later listeners replay from the
 beginning, and `?offset=<bytes>` resumes a dropped connection at any byte of the
 cached stream, even mid-frame (keepalives are not part of the cache and are not
 counted; none is sent until a resumed connection has reached its offset, since
-the device may be inside a frame). Ten seconds after the last listener leaves an unfinished stream,
+the device may be inside a frame). A resume continues only the cached stream it
+started on: when that stream is gone (it failed, was dropped, the gateway
+restarted, or a retry under the same message ID wrote a new reply) a request with
+an offset returns 409 `speech_restarted` and starts nothing, since new audio need
+not match the bytes already played. Ten seconds after the last listener leaves an unfinished stream,
 synthesis stops; a later request redoes it. Finished streams stay replayable
 for ten minutes, up to eight streams, and one reply is bounded to 16 MiB of
 audio and 8000 bytes of text. `/api/v1/server` reports `speech`.
@@ -339,6 +333,9 @@ concurrency, side-channel transcription, restart recovery, UTF-8 windows, stream
 simulated OpenAI WebSocket events, Hermes HTTP/SSE and media filtering.
 `tools/smoke-server.sh` starts the real binary with local fake upstreams,
 exercises transcription and a first send, and verifies persistence after a restart.
+`node tools/test-web.mjs` runs the management page's `app.js` in Node with a
+stub DOM and scripted gateway responses, covering drafts typed during a send and
+reply recovery after a reconnect.
 
 `tools/build-server.sh amd64` and `arm64` produce CGO-free Linux binaries under
 `build/server/linux-<arch>/`, with SHA256SUMS. GitHub Actions runs the checks

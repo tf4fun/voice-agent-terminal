@@ -39,6 +39,9 @@ jobs:
       - name: Run binary smoke test
         working-directory: .
         run: ./tools/smoke-server.sh
+      - name: Test the web client
+        working-directory: .
+        run: node tools/test-web.mjs
   build:
     needs: test
     runs-on: ubuntu-latest

@@ -31,6 +31,10 @@ func (s *Server) speech(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 503, "speech_unavailable")
 		return
 	}
+	if errors.Is(err, gateway.ErrSpeechRestarted) {
+		writeError(w, 409, "speech_restarted")
+		return
+	}
 	if err != nil {
 		storeError(w, err)
 		return

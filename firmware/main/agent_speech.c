@@ -159,8 +159,10 @@ static void writer_task(void *arg)
     }
 }
 
-static esp_http_client_handle_t open_stream(const char *session, const char *message, size_t offset)
+// *status is the HTTP status, or 0 when no response arrived.
+static esp_http_client_handle_t open_stream(const char *session, const char *message, size_t offset, int *status)
 {
+    *status = 0;
     memo_endpoint_t endpoint;
     if (!memo_net_has_ip() || !memo_discovery_endpoint(&endpoint)) return NULL;
     char url[280];
@@ -179,9 +181,10 @@ static esp_http_client_handle_t open_stream(const char *session, const char *mes
         snprintf(authorization, sizeof(authorization), "Bearer %s", CONFIG_AGENT_API_KEY);
         esp_http_client_set_header(client, "Authorization", authorization);
     }
-    if (esp_http_client_open(client, 0) != ESP_OK || esp_http_client_fetch_headers(client) < 0 ||
-        esp_http_client_get_status_code(client) != 200) {
-        ESP_LOGW(TAG, "speech stream unavailable status=%d", esp_http_client_get_status_code(client));
+    if (esp_http_client_open(client, 0) == ESP_OK && esp_http_client_fetch_headers(client) >= 0)
+        *status = esp_http_client_get_status_code(client);
+    if (*status != 200) {
+        ESP_LOGW(TAG, "speech stream unavailable status=%d", *status);
         esp_http_client_close(client);
         esp_http_client_cleanup(client);
         return NULL;
@@ -273,7 +276,11 @@ static void play(unsigned request, const char *session, const char *message)
         xTaskNotifyGive(s_writer);
         for (;;) {
             agent_speech_resume(&s_parser, &offset);
-            esp_http_client_handle_t client = open_stream(session, message, offset);
+            int http_status;
+            esp_http_client_handle_t client = open_stream(session, message, offset, &http_status);
+            // 409: the stream this playback started on is gone; new audio
+            // would not continue it, so playback ends here.
+            if (http_status == 409) break;
             if (client != NULL) {
                 outcome = read_stream(client, request, &offset, &status);
                 esp_http_client_close(client);

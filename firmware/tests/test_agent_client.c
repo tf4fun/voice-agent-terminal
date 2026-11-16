@@ -162,13 +162,14 @@ esp_http_client_handle_t esp_http_client_init(const esp_http_client_config_t *co
     requests++;
     return client;
 }
+static char *content_revision, *content_state; // Headers of every content response (string literals).
 static void emit_content_headers(esp_http_client_handle_t client)
 {
     if(client->event_handler==NULL)return;
     esp_http_client_event_t event={.event_id=HTTP_EVENT_ON_HEADER,.user_data=client->user_data,
-        .header_key="X-Revision",.header_value="8"};
+        .header_key="X-Revision",.header_value=content_revision};
     client->event_handler(&event);
-    event.header_key="X-Message-State";event.header_value="completed";
+    event.header_key="X-Message-State";event.header_value=content_state;
     client->event_handler(&event);
 }
 
@@ -295,6 +296,7 @@ static void setup(void)
     queue_fixture.count=0;response_hook=NULL;capture_mode=false;capture_case=CAPTURE_NORMAL;
     injected_response=NULL;response_status=200;declared_extra=0;stream_timeout_ms=0;dropped_sends=0;
     whole_input="user question";whole_reply="assistant answer";whole_other="other content";
+    content_revision="8";content_state="completed";
     request_log[0]=0;requests=0;last_body[0]=0;
     s_pending_message[0]=0;
     s_resync=false;
@@ -641,6 +643,29 @@ static void test_follows_newer_turn_from_other_client(void)
     CHECK(strcmp(s_view.turn_anchor,"00000000-0000-4000-8000-000000000002")==0);
 }
 
+// Another client retries the newest message under its own ID; the device
+// picks up the new state and reply instead of keeping the failed one.
+static void test_follows_retry_of_same_message(void)
+{
+    char response[256];
+    setup();
+    snprintf(response,sizeof(response),"{\"message\":{\"id\":\"%s\",\"state\":\"failed\",\"revision\":7,"
+        "\"input_bytes\":2,\"reply_bytes\":4},\"before\":\"\",\"after\":\"\"}",message_id);
+    whole_input="hi";whole_reply="part";injected_response=response;
+    content_revision="7";content_state="failed";
+    s_view.text_kind=AGENT_TEXT_REPLY;s_view.chat_loading=true;
+    agent_view_t view=s_view;
+    CHECK(poll_turn(&view));
+    CHECK(strcmp(s_view.message.state,"failed")==0&&strcmp(s_reply_text,"part")==0);
+    snprintf(response,sizeof(response),"{\"message\":{\"id\":\"%s\",\"state\":\"completed\",\"revision\":8,"
+        "\"input_bytes\":2,\"reply_bytes\":5},\"before\":\"\",\"after\":\"\"}",message_id);
+    whole_reply="whole";content_revision="8";content_state="completed";
+    view=s_view;
+    CHECK(poll_latest(&view));
+    CHECK(strcmp(s_view.message.state,"completed")==0&&s_view.message.revision==8);
+    CHECK(s_reply_text!=NULL&&strcmp(s_reply_text,"whole")==0);
+}
+
 static void test_failure_report_upload(void)
 {
     setup();
@@ -695,6 +720,7 @@ int main(void)
     test_live_transcript_polls_side_channel();
     test_failure_report_upload();
     test_follows_newer_turn_from_other_client();
+    test_follows_retry_of_same_message();
     clear_message_cache();
     discard_draft();
     printf("client regression assertions failed=%u\n",failed);

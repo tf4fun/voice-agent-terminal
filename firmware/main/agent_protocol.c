@@ -95,16 +95,6 @@ static bool message_fields(const cJSON *root, agent_message_t *item)
     return valid;
 }
 
-bool agent_parse_messages(const char *json, agent_message_t *items, int *count)
-{
-    cJSON *root = cJSON_Parse(json);
-    const cJSON *array;
-    bool valid = array_count(root, &array, count);
-    for (int i = 0; valid && i < *count; i++) valid = message_fields(cJSON_GetArrayItem(array, i), &items[i]);
-    cJSON_Delete(root);
-    return valid;
-}
-
 bool agent_parse_message(const char *json, agent_message_t *item)
 {
     cJSON *root = cJSON_Parse(json);

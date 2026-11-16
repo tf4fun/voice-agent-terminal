@@ -23,7 +23,6 @@ const schemaVersion = 5
 var (
 	ErrNotFound = errors.New("not_found")
 	ErrConflict = errors.New("conflict")
-	ErrStale    = errors.New("stale_revision")
 	ErrBusy     = errors.New("busy")
 	ErrLimit    = errors.New("limit_exceeded")
 )

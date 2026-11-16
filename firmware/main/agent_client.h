@@ -60,7 +60,6 @@ void agent_client_release_record(void);
 bool agent_client_cancel_record(void);
 // Sends the draft shown with this serial; a new chat's session is created by it.
 esp_err_t agent_client_send(uint32_t draft_serial, uint32_t reviewed_selection);
-esp_err_t agent_client_review_draft(void);
 esp_err_t agent_client_retry(const char *id, uint32_t reviewed_selection);
 // The loaded input or reply of the shown exchange regardless of which one the
 // text card displays (voice page). Caller owns the copy; NULL when not loaded.

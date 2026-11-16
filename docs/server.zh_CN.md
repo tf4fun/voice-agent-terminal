@@ -61,9 +61,9 @@ HTML、CSS、JavaScript 与图标页面壳不含会话数据或凭据；接口�
 
 ## 发现与限制
 
-Go 广播 `_voiceagent._tcp.local`，携带 `ver=1`、`path=/api/v1`、能力和
-IPv4 备用地址。仅监听回环地址时跳过 mDNS。广播失败会记录日志，HTTP 服务
-继续可用。设备发现后验证 `/api/v1/ping` 并读取 `/api/v1/server`。
+Go 广播 `_voiceagent._tcp.local`，携带 `ver=2`（即 `/api/v1/server` 报告的协议版本）、
+`path=/api/v1`、`caps=chat,pcm16` 和 IPv4 备用地址。仅监听回环地址时跳过 mDNS。
+广播失败会记录日志，HTTP 服务继续可用。设备发现后读取 `/api/v1/server`，要求协议 2。
 
 - 会话、转写和消息标识采用小写 UUID 格式。
 - 元数据每页默认 4 条，支持 `limit=1..20` 和偏移。`has_more` 表示是否还有下一页。
@@ -130,7 +130,7 @@ OpenAI。成功时返回 `200`，整个 `text/plain; charset=utf-8` 响应体就
 未知或已释放的 ID 返回 404，上传开始前同样返回 404。
 
 `/api/v1/server` 报告 `protocol: 2`，以及 `bounded_paging`、`text_before`、
-`text_tail`、`conversation_windows`、`whole_messages`、`reply_sse`、
+`text_tail`、`whole_messages`、`reply_sse`、
 `max_input_bytes`、`max_transcript_bytes`、`device_logs` 和 `speech`；设备要求
 协议 2。SQLite 结构 v5 只保存会话、消息（含各自发送时的 system 提示）和设备诊断报告。启动时拒绝更早的数据库
 而不做迁移：删除 `gateway.db` 后从空库开始。
@@ -141,7 +141,8 @@ OpenAI。成功时返回 `200`，整个 `text/plain; charset=utf-8` 响应体就
 响应包含 `message` 元数据以及 `before`／`after` 消息 ID。尚未发送消息的会话返回
 `{"message":null,"before":"","after":""}`。`index`（从 1 开始）和 `total` 给出该轮在会话中的位置与总轮数。历史读取通过 `message=<uuid>`、
 `before=<uuid>` 或 `after=<uuid>` 选择其中一个参数。相邻消息查询限定在当前会话内，
-到达历史边界时返回 404。无效或重复的选择参数返回 400。
+到达历史边界时返回 404。无效或重复的选择参数返回 400。回复生成期间设备每秒轮询
+本轮，因此该查询只读元数据（大小、状态和修订号），不读取正文。
 
 通过 `GET /api/v1/sessions/{id}/messages/{message}/content?part=input|reply`
 读取完整 UTF-8 正文。纯文本响应包含精确的字节长度 `Content-Length`、`X-Revision`、
@@ -152,16 +153,6 @@ OpenAI。成功时返回 `200`，整个 `text/plain; charset=utf-8` 响应体就
 当前完整回复，以返回正文的字节长度建立增量基线。响应头中的版本及状态对应同一次
 持久化快照。设备在 RAM 中保留当前输入和回复，访问历史时加载另一轮完整消息。
 能力响应声明 `whole_messages` 与 `reply_sse`。
-
-## 对话窗口
-
-`GET /api/v1/sessions/{id}/conversation` 最多返回四块按时间排列的文字，默认位于
-最新回复末尾。每块包含消息标识、`part`（`input` 或 `reply`）、状态、版本、
-UTF-8 字节边界及最多 256 字节文字。正在生成且暂为空的回复保留助手卡片。
-响应提供 `before`、`after` 与 `start` 游标，选择一个分别通过 `before=<游标>`、
-`after=<游标>` 或 `from=<游标>` 翻页或刷新。相邻页共享一块以保持可见滚动位置。
-游标仅在选中的会话中读取。文字边界过期时返回 409，客户端保留当前内容并读取
-新窗口。对应能力标识为 `conversation_windows`。
 
 ## 明确发送与回复
 
@@ -225,7 +216,10 @@ SSE 投递本身是临时的。审批以待处理状态呈现，详细审批控�
 音频攒够 1 秒后才开始发出，之后合成快于播放，始终保持领先。整条流缓存在中转服务中：
 合成在某条回复第一次被请求时开始并由所有听众共享，后来者从头重放；`?offset=<字节数>`
 可在缓存流的任意字节处续接断开的连接，帧中间也可以（保活帧不进缓存，也不计入偏移；
-续接的连接到达其偏移之前不发保活帧，因为设备可能正处在某帧中间）。
+续接的连接到达其偏移之前不发保活帧，因为设备可能正处在某帧中间）。续接只能接上它开始时
+那条缓存流：这条流已经不在时（合成失败、被淘汰、网关重启，或同一消息 ID 的重试写出了
+新回复），带偏移的请求返回 409 `speech_restarted`，也不会开始合成，因为重新合成的音频
+不一定与已播放的字节一致。
 未完成的流在最后一个听众离开 10 秒后停止合成，之后再请求会重新合成。完成的流保留
 10 分钟、最多 8 路，单条回复的音频上限 16 MiB、文字上限 8000 字节。`/api/v1/server`
 通过 `speech` 报告是否可用。
@@ -256,6 +250,8 @@ ID 与摘要的警告日志。`GET /api/v1/device/logs` 列出报告元数据，
 `go test -race ./...` 覆盖第一次发送创建会话、发送幂等与并发、旁路转写、重启恢复、
 UTF-8 窗口、流式 PCM、模拟 OpenAI WebSocket、Hermes HTTP/SSE 和媒体过滤。
 `tools/smoke-server.sh` 用真实二进制与本地模拟上游，验证转写、第一次发送和重启持久化。
+`node tools/test-web.mjs` 在 Node 中用简化 DOM 和预设的网关响应运行管理页 `app.js`，
+覆盖发送期间输入的草稿和重连后的回复恢复。
 
 `tools/build-server.sh amd64` 与 `arm64` 在 `build/server/linux-<arch>/`
 生成 CGO-free Linux 二进制及 SHA256SUMS。GitHub Actions 执行检查并上传

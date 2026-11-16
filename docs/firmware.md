@@ -52,7 +52,9 @@ playback), and a writer task at the capture task's priority feeds the codec
 after 400 ms of prebuffer, refilling 200 ms after running dry, with short fades
 around each dry spell so it does not click. A dropped connection resumes at the
 exact stream byte it stopped at (`?offset=`, up to three times, keepalives not
-counted), with the frame parser carried over. The speech trace event records
+counted), with the frame parser carried over. If the gateway would have to
+synthesize the stream again (it answers 409 `speech_restarted`), playback ends
+there instead of continuing from new audio. The speech trace event records
 underruns, the longest network gap and resumes; Wi-Fi modem sleep is held off
 while speech plays, and disconnect reasons are traced. The buffer and the
 writer are reserved once at boot: allocating them per reply fragmented the heap
@@ -87,8 +89,10 @@ request. Reports never contain audio, transcripts or credentials.
 While a conversation shows its newest exchange and that reply has settled, the
 sync task reads the session's newest turn metadata every 3 s. When the web page
 (or another client) has sent a newer message, the device switches to it, waits
-for its reply as described above and reads it aloud. Reading an older exchange is
-not interrupted.
+for its reply as described above and reads it aloud. When the newest message is
+the one shown but its state or revision has changed (another client retried it
+under the same ID), the device reloads that exchange; a retry is not read aloud
+again. Reading an older exchange is not interrupted.
 
 ## Screens and controls
 
@@ -617,8 +621,8 @@ replaced and freed under the LVGL lock; the old snapshot is freed before the nex
 is copied, so a reply is never held twice beside the cache. The voice page strips
 its ticker text in place from one copy and trims it to the 256 lines the ticker
 can reach (about 7.5 KiB), and the question strip keeps only
-the input's first 255 bytes in a static buffer. Allocation failure preserves the displayed
-snapshot and reports memory pressure. Cache buffers are released before BLE startup.
+the input's first 255 bytes in a static buffer. If the new snapshot cannot be
+allocated, the label stays empty and the notice reports memory pressure. Cache buffers are released before BLE startup.
 
 The device does not use SSE. While a reply is being written, the sync task reads
 only the turn metadata once a second; once the state settles it fetches the

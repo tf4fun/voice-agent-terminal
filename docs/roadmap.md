@@ -31,6 +31,18 @@ be deleted with its unsent first message; and the gateway holds at most 16
 transcriptions. Server tests and firmware host tests cover each; device
 acceptance of the firmware change is NOT RUN.
 
+Review issue #4 fixes: the web page clears the composer when a send starts and
+never touches it on the response, so text typed meanwhile stays (a failed send
+puts its text back); reconnecting refetches a reply whose revision changed even
+in the same state; the device reloads the newest message when another client
+retried it under the same ID; and a speech resume whose stream would have to be
+synthesized again is refused with 409, ending playback. Conversation windows,
+`/api/v1/ping` and unused firmware commands were removed, discovery now
+advertises protocol 2, and turn polling reads metadata only. `tools/test-web.mjs`
+runs the web page's regressions in Node. Concurrent transcription preparation
+is left unbounded on purpose: one device prepares at a time. Device acceptance
+of the firmware changes is NOT RUN.
+
 Sessions open on a voice-first view (orb, status line, one-line strip and key
 hints) with the text card as a second view; the firmware guide describes it.
 The gateway synthesizes each completed reply in one OpenAI Realtime request and

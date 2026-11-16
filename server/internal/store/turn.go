@@ -24,7 +24,7 @@ func (s *Store) Turn(ctx context.Context, session, mode, anchor string) (Turn, e
 		if _, err := readSession(ctx, tx, session); err != nil {
 			return err
 		}
-		query := "SELECT " + messageColumns + " FROM messages WHERE session_id=? ORDER BY rowid DESC LIMIT 1"
+		query := "SELECT " + metaColumns + " FROM messages WHERE session_id=? ORDER BY rowid DESC LIMIT 1"
 		args := []any{session}
 		if mode != "latest" {
 			if !model.ValidID(anchor) {
@@ -36,19 +36,19 @@ func (s *Store) Turn(ctx context.Context, session, mode, anchor string) (Turn, e
 			}
 			switch mode {
 			case "message":
-				query = "SELECT " + messageColumns + " FROM messages WHERE session_id=? AND rowid=?"
+				query = "SELECT " + metaColumns + " FROM messages WHERE session_id=? AND rowid=?"
 				args = append(args, row)
 			case "before":
-				query = "SELECT " + messageColumns + " FROM messages WHERE session_id=? AND rowid<? ORDER BY rowid DESC LIMIT 1"
+				query = "SELECT " + metaColumns + " FROM messages WHERE session_id=? AND rowid<? ORDER BY rowid DESC LIMIT 1"
 				args = append(args, row)
 			case "after":
-				query = "SELECT " + messageColumns + " FROM messages WHERE session_id=? AND rowid>? ORDER BY rowid ASC LIMIT 1"
+				query = "SELECT " + metaColumns + " FROM messages WHERE session_id=? AND rowid>? ORDER BY rowid ASC LIMIT 1"
 				args = append(args, row)
 			default:
 				return ErrConflict
 			}
 		}
-		message, err := scanMessage(tx.QueryRowContext(ctx, query, args...))
+		message, err := scanMeta(tx.QueryRowContext(ctx, query, args...)) // Polled every second: no text.
 		if errors.Is(err, ErrNotFound) && mode == "latest" {
 			return nil
 		}
