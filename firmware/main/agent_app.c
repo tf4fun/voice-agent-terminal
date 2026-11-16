@@ -100,10 +100,6 @@ static int64_t s_voice_review_at; // Last review key; review ends after 15 s wit
 // At rest the strip shows the last reply one line at a time, advancing on its
 // own (a vertical ticker); the first key press holds the line in view.
 static const char *s_ticker_source;
-// The sentence being spoken, shown one line at a time at about the speech rate.
-enum { SPEAK_RUNE_US = 260000 }; // ~3.8 characters per second, measured on the reader voice.
-static uint32_t s_speak_serial; // Speech stream the spoken line belongs to.
-static int s_speak_line;
 static int s_ticker_line = -1;
 static int64_t s_ticker_next;
 static char s_think_id[37];
@@ -166,7 +162,6 @@ static void delete_screen(void)
     s_voice_panel = s_voice_panel_count = s_voice_panel_scroll = s_voice_panel_body = s_voice_hints = NULL;
     s_ticker_source = NULL;
     s_ticker_line = -1;
-    s_speak_line = -1;
     s_voice_review = -1; // Line offsets belong to the reply being left.
     s_voice_mode = s_voice_hint_set = -1;
     s_voice_small = s_voice_arc_spinning = s_voice_spin_spinning = false;
@@ -748,27 +743,6 @@ static uint32_t utf8_codepoint(const char *text, size_t at, size_t *size)
     return ((uint32_t)(c[0] & 0x07) << 18) | ((uint32_t)(c[1] & 0x3F) << 12) | ((uint32_t)(c[2] & 0x3F) << 6) | (c[3] & 0x3F);
 }
 
-// End of the line starting at `start`: as much as fits the strip, keeping
-// closing punctuation off the start of the next line.
-static size_t wrap_end(const char *text, size_t start)
-{
-    static const char closers[] = "，。！？；：、）」』”’》】,.!?;:)\"'";
-    const int32_t width = VOICE_STRIP_W - 28;
-    int32_t line = 0;
-    size_t at = start;
-    while (text[at] && text[at] != '\n') {
-        size_t size;
-        const uint32_t letter = utf8_codepoint(text, at, &size);
-        const int32_t glyph = lv_font_get_glyph_width(memo_font_label(), letter, 0);
-        char piece[5] = {0};
-        memcpy(piece, text + at, size);
-        if (line > 0 && line + glyph > width && strstr(closers, piece) == NULL) break;
-        line += glyph;
-        at += size;
-    }
-    return at;
-}
-
 // Builds the review units: Markdown emphasis, code ticks and line leaders are
 // dropped and blank lines collapse. Every sentence starts a unit, and a
 // sentence wider than the strip continues in further units, so each up/down
@@ -929,6 +903,8 @@ static void render_voice(void)
     if ((int)mode != s_voice_mode) {
         agent_trace(TRACE_VOICE, (uint16_t)mode, 0, NULL);
         if (mode != AGENT_VOICE_IDLE && mode != AGENT_VOICE_FAILED) s_voice_review = -1;
+        // The reply shows only once speech ends, from its first line.
+        if (mode == AGENT_VOICE_SPEAKING) s_ticker_line = -1;
     }
     s_voice_mode = (int)mode;
     const int64_t now = esp_timer_get_time();
@@ -1044,37 +1020,6 @@ static void render_voice(void)
         strip = s_voice_question != NULL && s_voice_question[0] != '\0';
         if (strip) agent_copy_text(line, sizeof(line), s_voice_question);
         strip_tone = UI_DIM;
-    } else if (mode == AGENT_VOICE_SPEAKING) {
-        // The reply's lines advance with the audio played so far, at the
-        // measured speech rate; before the text is loaded, its start shows.
-        if (s_speech.serial != s_speak_serial) { s_speak_serial = s_speech.serial; s_speak_line = -1; }
-        if (s_voice_display != NULL && s_voice_line_count > 0) {
-            const int64_t played = (int64_t)s_speech.played_ms * 1000;
-            int64_t spoken = 0;
-            int index = 0;
-            for (; index < s_voice_line_count - 1; index++) {
-                int64_t runes = 0;
-                for (size_t at = s_voice_lines[index]; at < s_voice_lines[index + 1]; at++)
-                    if (((unsigned char)s_voice_display[at] & 0xC0) != 0x80 && s_voice_display[at] != '\n') runes++;
-                if ((spoken + runes) * SPEAK_RUNE_US > played) break;
-                spoken += runes;
-            }
-            if (index != s_speak_line) {
-                if (s_speak_line >= 0) line_slide(1); // The next line rises in.
-                s_speak_line = index;
-            }
-            size_t start = s_voice_lines[index], end = s_voice_lines[index + 1];
-            while (end > start && (s_voice_display[end - 1] == '\n' || s_voice_display[end - 1] == ' ')) end--;
-            const size_t size = end - start < sizeof(line) - 1 ? end - start : sizeof(line) - 1;
-            memcpy(line, s_voice_display + start, size);
-            line[size] = '\0';
-        } else {
-            agent_copy_text(line, sizeof(line), s_speech.sentence);
-            memo_font_filter_text(line, false);
-            line[wrap_end(line, 0)] = '\0';
-        }
-        strip = line[0] != '\0';
-        border = UI_ACCENT;
     } else if ((mode == AGENT_VOICE_IDLE || mode == AGENT_VOICE_FAILED) && s_view.turn.present &&
                s_voice_display != NULL && s_voice_line_count > 0) {
         // At rest a ticker steps through the reply line by line; while the

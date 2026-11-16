@@ -18,10 +18,9 @@ acts in that moment), then expands into the draft panel. Sending collapses it
 to one line with the question while Hermes thinks: a comet arc orbits the orb,
 the bars rise in turn and the status counts the seconds waited; this lasts
 until Hermes has finished, since the device fetches the reply whole. While a
-reply is spoken the strip shows its lines one at a time, advancing with the
-audio played at about 3.8 characters per second, the measured rate of the
-reader voice; when
-it ends the strip becomes a vertical ticker over the reply: Markdown marks are
+reply is spoken the strip stays hidden, leaving the "正在朗读" status and the
+bars that follow the audio level; when speech ends or is stopped the strip
+becomes a vertical ticker over the reply, from its first line: Markdown marks are
 dropped, every sentence starts a line, a sentence wider than the strip
 continues on further lines, and closing punctuation never starts one. Each
 line stays 220 ms per character (1.8–5 s) and the next slides up in 0.25 s;
