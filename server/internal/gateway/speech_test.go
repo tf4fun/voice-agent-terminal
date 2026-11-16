@@ -272,3 +272,63 @@ func TestSpeechResumeRejectsEvictionAndGatewayRestart(t *testing.T) {
 		t.Fatalf("resume across gateway restart: %v", err)
 	}
 }
+
+func TestSpokenAudioIsShapedForTheSpeaker(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	sid, mid := model.NewID(), model.NewID()
+	if _, _, err := st.Send(ctx, sid, mid, "m", "scope", "", "读一下", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetSessionReady(ctx, sid); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Claim(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AppendReply(ctx, mid, "回复内容"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetMessageState(ctx, mid, "completed", "stop", ""); err != nil {
+		t.Fatal(err)
+	}
+	speak := func(cfg config.Config) (samples int, peak int) {
+		service := New(st, cfg, &hermes.Client{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		service.TTS = tts.Fake{}
+		reader, err := service.OpenSpeech(ctx, sid, mid, "", 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer reader.Close()
+		stream := readAll(t, reader)
+		for at := 0; at+3 <= len(stream); {
+			kind, size := stream[at], int(stream[at+1])|int(stream[at+2])<<8
+			if kind == FrameAudio {
+				for i := at + 3; i+1 < at+3+size; i += 2 {
+					v := int(int16(uint16(stream[i]) | uint16(stream[i+1])<<8))
+					peak = max(peak, v, -v)
+					samples++
+				}
+			}
+			at += 3 + size
+		}
+		return samples, peak
+	}
+	// The fake reader's tones peak at 3000 (-20.8 dBFS).
+	plain, plainPeak := speak(config.Config{})
+	shaped, shapedPeak := speak(config.Config{SpeechHighPassHz: 200, SpeechCeilingDB: -30})
+	if plainPeak < 2990 || plain == 0 {
+		t.Fatalf("unshaped audio: %d samples, peak %d", plain, plainPeak)
+	}
+	// The limiter's look-ahead tail is released: no audio is lost.
+	if shaped != plain {
+		t.Fatalf("shaped %d samples, plain %d", shaped, plain)
+	}
+	if ceiling := 1036; shapedPeak > ceiling+1 { // 32767 at -30 dB
+		t.Fatalf("shaped peak %d above the -30 dBFS ceiling %d", shapedPeak, ceiling)
+	}
+}

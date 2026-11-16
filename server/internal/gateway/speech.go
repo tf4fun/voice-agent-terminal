@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/tf4fun/voice-agent-terminal/server/internal/audio"
 	"github.com/tf4fun/voice-agent-terminal/server/internal/events"
 	"github.com/tf4fun/voice-agent-terminal/server/internal/model"
 	"github.com/tf4fun/voice-agent-terminal/server/internal/speech"
@@ -359,7 +360,11 @@ func (s *Service) synthesize(ctx context.Context, stream *speechStream, sessionI
 		return stream.append(f)
 	}
 	limited := false
-	err := s.TTS.Speak(ctx, text, func(pcm []byte) error {
+	// Shaped for the device speaker (see config); the limiter's look-ahead
+	// holds back 5 ms, released when synthesis ends.
+	highPass := audio.NewHighPass(s.Config.SpeechHighPassHz, tts.SampleRate)
+	limiter := audio.NewLimiter(s.Config.SpeechGainDB, s.Config.SpeechCeilingDB)
+	add := func(pcm []byte) error {
 		for len(pcm) > 0 {
 			take := min(len(pcm), speechFrameAudio-len(pending))
 			pending = append(pending, pcm[:take]...)
@@ -375,7 +380,11 @@ func (s *Service) synthesize(ctx context.Context, stream *speechStream, sessionI
 			return errSpeechLimit
 		}
 		return nil
-	})
+	}
+	err := s.TTS.Speak(ctx, text, func(pcm []byte) error { return add(limiter.Process(highPass.Process(pcm))) })
+	if err == nil {
+		err = add(limiter.Flush())
+	}
 	if (err == nil && !flush()) || !release(stream, &held, &holding) {
 		return
 	}

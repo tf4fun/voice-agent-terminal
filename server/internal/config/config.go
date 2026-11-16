@@ -3,6 +3,7 @@ package config
 import (
 	"bufio"
 	"fmt"
+	"math"
 	"net"
 	"net/url"
 	"os"
@@ -12,28 +13,33 @@ import (
 )
 
 type Config struct {
-	Addr           string
-	DataDir        string
-	APIKey         string
-	MDNS           bool
-	MDNSName       string
-	MDNSInterface  string
-	HermesURL      string
-	HermesKey      string
-	HermesModel    string
-	HermesPrompt   string
-	ASRProvider    string
-	OpenAIKey      string
-	OpenAIURL      string
-	OpenAIModel    string
-	TTSProvider    string // openai, fake or off.
-	TTSURL         string
-	TTSModel       string
-	TTSVoice       string
-	Workers        int
-	ChatTimeout    time.Duration
-	CaptureTimeout time.Duration
-	MaxAudioBytes  int64
+	Addr          string
+	DataDir       string
+	APIKey        string
+	MDNS          bool
+	MDNSName      string
+	MDNSInterface string
+	HermesURL     string
+	HermesKey     string
+	HermesModel   string
+	HermesPrompt  string
+	ASRProvider   string
+	OpenAIKey     string
+	OpenAIURL     string
+	OpenAIModel   string
+	TTSProvider   string // openai, fake or off.
+	TTSURL        string
+	TTSModel      string
+	TTSVoice      string
+	// Reply speech shaping, tunable with a restart: a high-pass for the small
+	// speaker, a gain, then a look-ahead limiter holding peaks at the ceiling.
+	SpeechHighPassHz float64
+	SpeechGainDB     float64
+	SpeechCeilingDB  float64
+	Workers          int
+	ChatTimeout      time.Duration
+	CaptureTimeout   time.Duration
+	MaxAudioBytes    int64
 }
 
 // CaptureTimeout bounds audio duration. Setup, upload drain and final recognition
@@ -94,6 +100,21 @@ func Load(getenv func(string) string) (Config, error) {
 		if !valid {
 			return Config{}, fmt.Errorf("invalid %s scheme", target.name)
 		}
+	}
+	for _, setting := range []struct {
+		name, fallback string
+		low, high      float64
+		target         *float64
+	}{
+		{"VOICE_SPEECH_HIGHPASS_HZ", "200", 0, 1000, &cfg.SpeechHighPassHz},
+		{"VOICE_SPEECH_GAIN_DB", "0", -20, 20, &cfg.SpeechGainDB},
+		{"VOICE_SPEECH_CEILING_DB", "-13.5", -40, 0, &cfg.SpeechCeilingDB},
+	} {
+		parsed, err := strconv.ParseFloat(value(setting.name, setting.fallback), 64)
+		if err != nil || math.IsNaN(parsed) || parsed < setting.low || parsed > setting.high {
+			return Config{}, fmt.Errorf("%s must be between %g and %g", setting.name, setting.low, setting.high)
+		}
+		*setting.target = parsed
 	}
 	if cfg.ASRProvider != "openai" && cfg.ASRProvider != "fake" {
 		return Config{}, fmt.Errorf("VOICE_ASR_PROVIDER must be openai or fake")
