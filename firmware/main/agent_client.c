@@ -59,7 +59,6 @@ static agent_view_t s_read_view;
 #endif
 #define AGENT_TRUNCATED_NOTICE "\n\n……（内容过长，设备仅显示开头部分）"
 static char *s_input_text, *s_reply_text;
-static size_t s_reply_capacity;
 // Server byte counts; they exceed the cached prefix length when truncated.
 static size_t s_input_total, s_reply_total;
 static bool s_input_truncated, s_reply_truncated;
@@ -77,7 +76,7 @@ static void reset_reply_cache(void)
 {
     free(s_reply_text);
     s_reply_text = NULL;
-    s_reply_capacity = s_reply_total = 0;
+    s_reply_total = 0;
     s_reply_truncated = false;
 }
 
@@ -641,7 +640,6 @@ static bool poll_turn(agent_view_t *view)
         if (reply != NULL) {
             reset_reply_cache();
             s_reply_text = reply;
-            s_reply_capacity = strlen(reply) + 1;
             s_reply_total = reply_headers.total;
             s_reply_truncated = reply_headers.truncated;
             reply = NULL;

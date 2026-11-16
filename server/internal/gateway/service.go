@@ -69,7 +69,7 @@ func (s *Service) Start(parent context.Context) {
 	s.mu.Lock()
 	s.ctx = ctx
 	s.mu.Unlock()
-	// Keep a configured speech session warm for the first sentence of a reply.
+	// Keep a configured speech session warm for the next spoken reply.
 	if warm, ok := s.TTS.(interface{ Run(context.Context) }); ok && s.TTS.Enabled() {
 		s.workers.Add(1)
 		go func() { defer s.workers.Done(); warm.Run(ctx) }()

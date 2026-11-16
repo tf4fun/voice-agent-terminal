@@ -1,4 +1,4 @@
-// Package speech turns a streaming assistant reply into sentences to speak.
+// Package speech turns a complete assistant reply into sentences to speak.
 // Replies arrive as Markdown; the spoken form drops markup, code blocks and
 // link targets, and long runs without punctuation are split at a soft break.
 package speech
@@ -10,51 +10,31 @@ import (
 	"unicode/utf8"
 )
 
-// MaxSentenceRunes bounds one spoken unit so speech starts quickly and the
-// device's one-line strip can scroll it.
+// MaxSentenceRunes bounds one spoken unit; a longer run without sentence
+// punctuation is split at its last soft break (a comma or colon).
 const MaxSentenceRunes = 80
 
 const fence = "```"
 
-// Next returns the next speakable sentence in text at or after byte offset,
-// and the offset after it. With final false, a sentence is returned only once
-// it is complete; trailing text may still grow. Units that clean up to
-// nothing (pure markup) are skipped. ok is false when nothing is ready yet.
-func Next(text string, offset int, final bool) (sentence string, next int, ok bool) {
-	for offset < len(text) {
-		raw, end, ready := nextRaw(text, offset, final)
-		if !ready {
-			return "", offset, false
-		}
-		offset = end
-		if spoken := Clean(raw); spoken != "" {
-			return spoken, offset, true
-		}
-	}
-	return "", offset, false
-}
-
-func nextRaw(text string, offset int, final bool) (string, int, bool) {
+// nextRaw returns the raw unit starting at or after byte offset and the offset
+// after it; a code block is returned as an empty unit. ok is false only when
+// nothing follows.
+func nextRaw(text string, offset int) (string, int, bool) {
 	rest := text[offset:]
 	trimmed := strings.TrimLeft(rest, " \t\r\n")
 	start := offset + len(rest) - len(trimmed)
 	if start >= len(text) {
-		return "", len(text), final
+		return "", len(text), true
 	}
-	// A code block is skipped whole; wait until it is closed.
+	// A code block is skipped whole; an unclosed one runs to the end.
 	if strings.HasPrefix(trimmed, fence) {
 		closing := strings.Index(trimmed[len(fence):], fence)
 		if closing < 0 {
-			if final {
-				return "", len(text), true
-			}
-			return "", offset, false
+			return "", len(text), true
 		}
 		end := start + len(fence) + closing + len(fence)
 		if newline := strings.IndexByte(text[end:], '\n'); newline >= 0 {
 			end += newline + 1
-		} else if !final {
-			return "", offset, false
 		} else {
 			end = len(text)
 		}
@@ -88,10 +68,8 @@ func nextRaw(text string, offset int, final bool) (string, int, bool) {
 			return text[start:i], i, true
 		}
 	}
-	if limit < len(text) || final {
-		if limit > start {
-			return text[start:limit], limit, true
-		}
+	if limit > start {
+		return text[start:limit], limit, true
 	}
 	return "", offset, false
 }
@@ -179,15 +157,19 @@ func isEmoji(r rune) bool {
 	return (r >= 0x1F000 && r <= 0x1FAFF) || (r >= 0x2600 && r <= 0x27BF) || (r >= 0xFE00 && r <= 0xFE0F) || r == 0x200D
 }
 
-// Sentences splits a complete reply, for tests and callers that hold it whole.
+// Sentences splits a complete reply into speakable units. Units that clean up
+// to nothing (pure markup) are skipped.
 func Sentences(text string) []string {
 	var out []string
-	for offset := 0; ; {
-		sentence, next, ok := Next(text, offset, true)
-		if !ok {
-			return out
+	for offset := 0; offset < len(text); {
+		raw, next, ok := nextRaw(text, offset)
+		if !ok || next <= offset {
+			break
 		}
-		out = append(out, sentence)
 		offset = next
+		if spoken := Clean(raw); spoken != "" {
+			out = append(out, spoken)
+		}
 	}
+	return out
 }

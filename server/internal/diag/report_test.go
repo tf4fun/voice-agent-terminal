@@ -64,6 +64,13 @@ func TestVoiceAndSpeechEventsRender(t *testing.T) {
 	if got := describe(Event{Type: typeSpeech, A: 2, B: 3}); got != "朗读结束：被停止（到第 4 句）" {
 		t.Fatal(got)
 	}
+	// Whole-reply speech records no sentence index.
+	if got := describe(Event{Type: typeSpeech, A: 0, Tag: "d0 g3 r0"}); got != "朗读结束：读完，断流 0 次" {
+		t.Fatal(got)
+	}
+	if got := describe(Event{Type: typeVoice, A: 7}); got != "语音页 → 朗读中" {
+		t.Fatal(got)
+	}
 	if got := describe(Event{Type: typePage, A: 6}); got != "页面 → 语音" {
 		t.Fatal(got)
 	}

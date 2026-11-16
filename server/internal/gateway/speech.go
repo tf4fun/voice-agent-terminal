@@ -18,7 +18,7 @@ import (
 // Speech stream framing, shared with the device: one byte kind, a
 // little-endian uint16 payload length, then the payload.
 const (
-	FrameSentence  = 1 // uint16 sentence index, then the UTF-8 sentence text.
+	FrameSentence  = 1 // Speech starts: uint16 index 0, then the start of the spoken text.
 	FrameAudio     = 2 // 16 kHz PCM16LE mono.
 	FrameEnd       = 3 // One status byte.
 	FrameKeepalive = 4 // Empty; sent while the reply is still being thought about.
@@ -279,8 +279,8 @@ func (s *Service) synthesize(ctx context.Context, stream *speechStream, sessionI
 	if len(text) > tts.MaxText {
 		text = strings.ToValidUTF8(text[:tts.MaxText], "")
 	}
-	// The sentence frame tells the device that speech starts; it shows the
-	// reply text it fetched itself, so only the start is sent.
+	// The sentence frame tells the device that speech starts; the device
+	// shows the reply text it fetched itself, so only the start is sent.
 	head := text
 	if len(head) > speechHeadBytes {
 		head = strings.ToValidUTF8(head[:speechHeadBytes], "")

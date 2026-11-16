@@ -44,7 +44,7 @@ func (s *Server) speech(w http.ResponseWriter, r *http.Request) {
 	_ = controller.Flush()
 	keepalive := []byte{gateway.FrameKeepalive, 0, 0}
 	for {
-		// Hermes may think for a long time before the first sentence; an empty
+		// Hermes may think for a long time before speech starts; an empty
 		// frame every 5 s keeps the device's read timeout from firing.
 		wait, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 		frame, ok, err := reader.Next(wait)

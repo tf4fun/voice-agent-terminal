@@ -7,34 +7,23 @@
 
 static void test_modes(void)
 {
-    assert(agent_voice_mode(2, true, true, "completed", true, true) == AGENT_VOICE_RECORDING);
-    assert(agent_voice_mode(3, false, true, "completed", false, true) == AGENT_VOICE_TRANSCRIBING);
-    assert(agent_voice_mode(4, false, true, "completed", false, true) == AGENT_VOICE_TRANSCRIBING);
-    assert(agent_voice_mode(0, true, true, "completed", true, true) == AGENT_VOICE_DRAFT);
-    assert(agent_voice_mode(0, false, true, "receiving", true, true) == AGENT_VOICE_SPEAKING);
-    assert(agent_voice_mode(0, false, true, "waiting", false, false) == AGENT_VOICE_THINKING);
-    assert(agent_voice_mode(0, false, true, "receiving", false, false) == AGENT_VOICE_THINKING);
-    assert(agent_voice_mode(0, false, true, "receiving", false, true) == AGENT_VOICE_REPLYING);
-    assert(agent_voice_mode(0, false, true, "failed", false, true) == AGENT_VOICE_FAILED);
-    assert(agent_voice_mode(0, false, true, "completed", false, true) == AGENT_VOICE_IDLE);
-    assert(agent_voice_mode(0, false, false, "", false, false) == AGENT_VOICE_IDLE);
+    assert(agent_voice_mode(2, true, true, "completed", true) == AGENT_VOICE_RECORDING);
+    assert(agent_voice_mode(3, false, true, "completed", false) == AGENT_VOICE_TRANSCRIBING);
+    assert(agent_voice_mode(4, false, true, "completed", false) == AGENT_VOICE_TRANSCRIBING);
+    assert(agent_voice_mode(0, true, true, "completed", true) == AGENT_VOICE_DRAFT);
+    assert(agent_voice_mode(0, false, true, "completed", true) == AGENT_VOICE_SPEAKING);
+    assert(agent_voice_mode(0, false, true, "waiting", false) == AGENT_VOICE_THINKING);
+    assert(agent_voice_mode(0, false, true, "receiving", false) == AGENT_VOICE_THINKING);
+    assert(agent_voice_mode(0, false, true, "failed", false) == AGENT_VOICE_FAILED);
+    assert(agent_voice_mode(0, false, true, "completed", false) == AGENT_VOICE_IDLE);
+    assert(agent_voice_mode(0, false, false, "", false) == AGENT_VOICE_IDLE);
+    // Trace codes stay stable for stored diagnostic reports.
+    assert(AGENT_VOICE_THINKING == 5 && AGENT_VOICE_SPEAKING == 7 && AGENT_VOICE_FAILED == 8);
 }
 
-static void test_sentences(void)
+static void test_text(void)
 {
-    const char *reply = "## 天气\n周六多云，22 到 28 度。适合登山！\n- **南门**上山。\n\n| --- |\nOK, 3.5 km. Bye";
-    uint16_t starts[8], ends[8];
-    const int count = agent_sentence_split(reply, starts, ends, 8);
-    const char *want[] = {"天气", "周六多云，22 到 28 度。", "适合登山！", "**南门**上山。", "OK, 3.5 km.", "Bye"};
-    assert(count == 6);
-    for (int i = 0; i < count; i++) {
-        char got[64];
-        memcpy(got, reply + starts[i], ends[i] - starts[i]);
-        got[ends[i] - starts[i]] = '\0';
-        if (strcmp(got, want[i]) != 0) { fprintf(stderr, "sentence %d: %s\n", i, got); assert(0); }
-    }
-    assert(agent_sentence_split("", starts, ends, 8) == 0);
-    assert(agent_sentence_split("一。二。三。四。", starts, ends, 2) == 2);
+    assert(agent_sentence_end("好。", 3, 3) && !agent_sentence_end("3.5", 1, 1) && agent_sentence_end("end.", 3, 1));
     assert(strcmp(agent_utf8_tail("帮我查一下天气", 3), "下天气") == 0);
     assert(strcmp(agent_utf8_tail("ab", 5), "ab") == 0);
 }
@@ -121,7 +110,7 @@ static void test_resume(void)
 int main(void)
 {
     test_modes();
-    test_sentences();
+    test_text();
     test_frames();
     test_resume();
     puts("voice page logic and speech frames: PASS");

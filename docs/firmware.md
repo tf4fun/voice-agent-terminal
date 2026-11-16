@@ -38,9 +38,10 @@ turn's state once a second (no SSE) and then downloads the complete reply. Two m
 When the gateway reports `speech`, the device reads aloud each new newest
 exchange of the open session, whether it was sent from the device or from the
 web page; opening a session does not replay its last reply. `agent_speech.c`
-streams `/messages/{id}/speech` (framed sentence starts, 16 kHz PCM and
-keepalives every 5 s while Hermes thinks), writes audio to the ES8311 at the
-capture format and publishes the current sentence and loudness for the orb.
+streams `/messages/{id}/speech` (a frame marking the start of speech, 16 kHz
+PCM and keepalives every 5 s while Hermes thinks), writes audio to the ES8311 at
+the capture format and publishes whether speech is audible, its loudness for the
+orb and the audio played so far.
 Recording stops speech before the microphone starts; long Down stops it in
 either view; leaving the session stops it. The I2S DMA ring holds only 90 ms,
 so playback is split: the stream reader passes audio straight from the HTTP
@@ -84,8 +85,9 @@ request. Reports never contain audio, transcripts or credentials.
 
 While a conversation shows its newest exchange and that reply has settled, the
 sync task reads the session's newest turn metadata every 3 s. When the web page
-(or another client) has sent a newer message, the device switches to it and
-streams its reply. Reading an older exchange is not interrupted.
+(or another client) has sent a newer message, the device switches to it, waits
+for its reply as described above and reads it aloud. Reading an older exchange is
+not interrupted.
 
 ## Screens and controls
 
@@ -596,8 +598,8 @@ and accepted the revised chat spacing on `04c3dd73`.
 
 Recording streams mono PCM16 at 16 kHz over chunked HTTP to Go, which owns
 OpenAI transcription, provider credentials and upstream TLS/WebSocket connections.
-The device keeps an 8 KiB PCM queue, four session/segment metadata records and a
-512-byte live transcription preview. A completed draft is loaded in full for review.
+The device keeps a 16 KiB PCM buffer shared with spoken-reply playback, four
+session/segment metadata records and a 512-byte live transcription preview. A completed draft is loaded in full for review.
 
 The selected exchange owns one complete user input and one complete Hermes reply
 in RAM, allocated according to their actual byte lengths. History selection loads
@@ -606,27 +608,23 @@ server storage. The visible LVGL label owns a separate filtered display snapshot
 replaced and freed under the LVGL lock. Allocation failure preserves the displayed
 snapshot and reports memory pressure. Cache buffers are released before BLE startup.
 
-Device reply updates use SSE. The reader subscribes before fetching a complete
-snapshot, applies deltas by byte offset, ignores exact replayed prefixes and reloads
-the snapshot on gaps/reset. Session changes, recording and provisioning interrupt
-the stream through bounded read timeouts. The SSE inactivity timeout is 40 ms
-to reduce small-event batching in ESP-IDF's fill-oriented read. This is a
-per-read inactivity timeout, not an end-to-end delivery guarantee. Unchanged
-card background colors are not reapplied, avoiding continuous invalidation
-of a static message. Repeated transport failure invalidates
-the discovered endpoint so the gateway can be found again.
+The device does not use SSE. While a reply is being written, the sync task reads
+only the turn metadata once a second; once the state settles it fetches the
+complete reply in one read. Unchanged card background colors are not reapplied,
+avoiding continuous invalidation of a static message. Repeated transport failure
+invalidates the discovered endpoint so the gateway can be found again.
 
 Whole messages scroll locally. A left back chevron and centered, truncated title
 share the compact header with time and battery. The assistant waiting state draws
-a lightweight animated ring with three dots throughout generation. Completion
+a lightweight spinning arc throughout generation. Completion
 reveals the entire reply at its beginning, with up/down input controlling reading.
 While waiting, Up can select the user input. Failed or interrupted replies reveal
 retained text and their outcome status. Draft send and reply wait have explicit
 state labels.
 
-The device requires `whole_messages`, `reply_sse`, `draft_text`, `replace_recording`,
+The device requires `whole_messages`, `draft_text`, `replace_recording`,
 `staged_recording` and `replacement_reservation` capabilities plus bounded live-transcription and session-list
-metadata. Discovery remains `_voiceagent._tcp.local`; BLUFI advertises as
+metadata, and uses `speech` and `draft_clear` when the gateway reports them. Discovery remains `_voiceagent._tcp.local`; BLUFI advertises as
 `BLUFI_AGENT`. `CONFIG_AGENT_API_KEY` configures the optional gateway credential.
 
 ## Build and validation

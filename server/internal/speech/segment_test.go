@@ -21,34 +21,11 @@ func TestSentencesFromMarkdownReply(t *testing.T) {
 	}
 }
 
-func TestStreamingWaitsForCompleteSentences(t *testing.T) {
-	text := "周六多云，22 到"
-	if _, _, ok := Next(text, 0, false); ok {
-		t.Fatal("incomplete sentence spoken")
-	}
-	text += " 28 度。适合"
-	s, next, ok := Next(text, 0, false)
-	if !ok || s != "周六多云，22 到 28 度。" {
-		t.Fatalf("%q %v", s, ok)
-	}
-	if _, _, ok := Next(text, next, false); ok {
-		t.Fatal("tail spoken before it is complete")
-	}
-	if s, _, ok := Next(text, next, true); !ok || s != "适合" {
-		t.Fatalf("final tail %q %v", s, ok)
-	}
-	// An open code block holds back everything after it.
-	code := "先看代码：\n```go\nfmt.Println(1)"
-	s, next, _ = Next(code, 0, false)
-	if s != "先看代码：" {
-		t.Fatalf("%q", s)
-	}
-	if _, _, ok := Next(code, next, false); ok {
-		t.Fatal("spoke inside an open code block")
-	}
-	code += "\n```\n结束了。"
-	if s, _, ok := Next(code, next, false); !ok || s != "结束了。" {
-		t.Fatalf("after closed block %q %v", s, ok)
+func TestCodeBlocksAreSkipped(t *testing.T) {
+	// An unclosed block at the end is dropped too.
+	got := Sentences("先看代码：\n```go\nfmt.Println(1)\n```\n结束了。\n```sh\nls")
+	if want := []string{"先看代码：", "结束了。"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %q", got)
 	}
 }
 

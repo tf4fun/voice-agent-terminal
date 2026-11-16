@@ -1,7 +1,8 @@
 #pragma once
 
 // Voice page logic shared by the device UI and host tests: which state the
-// page shows, sentence splitting for review, and the layout grid.
+// page shows, UTF-8 and sentence-end helpers for the line ticker, and the
+// layout grid.
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -14,15 +15,15 @@ typedef enum {
     AGENT_VOICE_RECORDING,
     AGENT_VOICE_TRANSCRIBING,  // Released; waiting for the final transcript. No key acts here.
     AGENT_VOICE_DRAFT,         // The strip expands into the draft panel.
-    AGENT_VOICE_THINKING,      // Sent; waiting for the first words.
-    AGENT_VOICE_REPLYING,      // Words arrive but are not being spoken.
-    AGENT_VOICE_SPEAKING,
+    AGENT_VOICE_THINKING,      // Sent; waiting until Hermes has written the whole reply.
+    // Values are trace codes (TRACE_VOICE); 6 was a streamed-reply mode.
+    AGENT_VOICE_SPEAKING = 7,
     AGENT_VOICE_FAILED,        // The newest reply failed or is unconfirmed: OK retries.
 } agent_voice_mode_t;
 
 // capture: 0 idle, 1 preparing, 2 recording, 3 finalizing, 4 committing (agent_capture_state_t).
 static inline agent_voice_mode_t agent_voice_mode(int capture, bool has_draft, bool has_turn,
-                                                  const char *state, bool speaking, bool has_reply_text)
+                                                  const char *state, bool speaking)
 {
     if (capture == 1) return AGENT_VOICE_PREPARING;
     if (capture == 2) return AGENT_VOICE_RECORDING;
@@ -30,15 +31,13 @@ static inline agent_voice_mode_t agent_voice_mode(int capture, bool has_draft, b
     if (has_draft) return AGENT_VOICE_DRAFT;
     if (speaking) return AGENT_VOICE_SPEAKING;
     if (!has_turn) return AGENT_VOICE_IDLE;
+    // The reply is fetched whole once complete, so receiving still reads as thinking.
     if (strcmp(state, "queued") == 0 || strcmp(state, "sending") == 0 || strcmp(state, "waiting") == 0 ||
-        (strcmp(state, "receiving") == 0 && !has_reply_text))
+        strcmp(state, "receiving") == 0)
         return AGENT_VOICE_THINKING;
-    if (strcmp(state, "receiving") == 0) return AGENT_VOICE_REPLYING;
     if (strcmp(state, "failed") == 0 || strcmp(state, "unconfirmed") == 0) return AGENT_VOICE_FAILED;
     return AGENT_VOICE_IDLE;
 }
-
-#define AGENT_VOICE_MAX_SENTENCES 64
 
 static inline size_t agent_utf8_step(const char *text, size_t at)
 {
@@ -59,40 +58,6 @@ static inline bool agent_sentence_end(const char *text, size_t at, size_t size)
     if (*c == '!' || *c == '?' || *c == ';' || *c == '.')
         return c[1] == '\0' || c[1] == ' ' || c[1] == '\n';
     return false;
-}
-
-// Splits a reply into display sentences as [start, end) byte ranges, skipping
-// blank and markup-only lines. Returns the number found (at most max).
-static inline int agent_sentence_split(const char *text, uint16_t *starts, uint16_t *ends, int max)
-{
-    int count = 0;
-    size_t at = 0, start = 0;
-    const size_t length = strlen(text);
-    while (at <= length && count < max) {
-        const size_t size = at < length ? agent_utf8_step(text, at) : 0;
-        const bool stop = at == length || agent_sentence_end(text, at, size);
-        if (stop) {
-            size_t end = at < length && text[at] != '\n' ? at + size : at;
-            size_t s = start;
-            // Trim spaces and Markdown leaders: "## ", "- ", "* ", "> ".
-            for (;;) {
-                while (s < end && (text[s] == ' ' || text[s] == '\t' || text[s] == '\r' || text[s] == '#')) s++;
-                if (s + 1 < end && (text[s] == '-' || text[s] == '*' || text[s] == '>') && text[s + 1] == ' ') { s += 2; continue; }
-                break;
-            }
-            while (end > s && (text[end - 1] == ' ' || text[end - 1] == '\r')) end--;
-            bool visible = false;
-            for (size_t i = s; i < end; i++)
-                if (!strchr("*`|-: \t", text[i])) { visible = true; break; }
-            if (visible && end <= UINT16_MAX) { starts[count] = (uint16_t)s; ends[count] = (uint16_t)end; count++; }
-            if (at == length) break;
-            at += size;
-            start = at;
-            continue;
-        }
-        at += size;
-    }
-    return count;
 }
 
 // Start of the last max_runes characters of text.

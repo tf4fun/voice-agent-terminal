@@ -83,14 +83,13 @@ static bool s_chat_wait_animating, s_chat_open_bottom;
 
 // Voice page (see agent_voice.h for the layout grid).
 static lv_obj_t *s_voice_orb, *s_voice_arc, *s_voice_status, *s_voice_timer, *s_voice_side, *s_voice_side_sub;
-static lv_obj_t *s_voice_strip, *s_voice_strip_text, *s_voice_strip_spin, *s_voice_strip_tag;
+static lv_obj_t *s_voice_strip, *s_voice_strip_text, *s_voice_strip_spin;
 static lv_obj_t *s_voice_panel, *s_voice_panel_count, *s_voice_panel_scroll, *s_voice_panel_body, *s_voice_hints;
-static int s_voice_mode = -1, s_voice_hint_set = -1, s_voice_review = -1, s_voice_sentences;
+static int s_voice_mode = -1, s_voice_hint_set = -1, s_voice_review = -1;
 static bool s_voice_small, s_voice_arc_spinning, s_voice_spin_spinning;
 static char *s_voice_reply, *s_voice_draft, *s_voice_question;
 static char s_voice_reply_key[96], s_voice_question_id[37];
 static uint32_t s_voice_draft_generation = UINT32_MAX, s_voice_draft_selection;
-static uint16_t s_voice_starts[AGENT_VOICE_MAX_SENTENCES], s_voice_ends[AGENT_VOICE_MAX_SENTENCES];
 // Line review: the reply without Markdown marks, wrapped to the strip's width.
 #define VOICE_MAX_LINES 256
 static char *s_voice_display;
@@ -158,7 +157,7 @@ static void delete_screen(void)
     s_chat_kind = AGENT_TEXT_REPLY;
     s_chat_wait_animating = s_chat_open_bottom = false;
     s_voice_orb = s_voice_arc = s_voice_status = s_voice_timer = s_voice_side = s_voice_side_sub = NULL;
-    s_voice_strip = s_voice_strip_text = s_voice_strip_spin = s_voice_strip_tag = NULL;
+    s_voice_strip = s_voice_strip_text = s_voice_strip_spin = NULL;
     s_voice_panel = s_voice_panel_count = s_voice_panel_scroll = s_voice_panel_body = s_voice_hints = NULL;
     s_ticker_source = NULL;
     s_ticker_line = -1;
@@ -173,7 +172,6 @@ static void delete_screen(void)
     s_voice_line_count = 0;
     s_voice_reply_key[0] = s_voice_question_id[0] = '\0';
     s_voice_draft_generation = UINT32_MAX;
-    s_voice_sentences = 0;
 }
 
 static void build_rows(void)
@@ -289,11 +287,6 @@ static void build_voice(void)
     s_voice_strip_text = label(s_voice_strip, 14, (VOICE_STRIP_H - memo_font_label()->line_height) / 2 - 1, VOICE_STRIP_W - 28, false, UI_FG);
     lv_obj_set_height(s_voice_strip_text, memo_font_label()->line_height);
     lv_label_set_long_mode(s_voice_strip_text, LV_LABEL_LONG_DOT);
-    s_voice_strip_tag = memo_ui_label(s_voice_strip, memo_font_meta(), UI_DIM);
-    lv_obj_set_pos(s_voice_strip_tag, VOICE_STRIP_W - 48, (VOICE_STRIP_H - memo_font_meta()->line_height) / 2 - 1);
-    lv_obj_set_width(s_voice_strip_tag, 36);
-    lv_obj_set_style_text_align(s_voice_strip_tag, LV_TEXT_ALIGN_RIGHT, 0);
-    lv_obj_set_hidden(s_voice_strip_tag, true);
     lv_obj_set_hidden(s_voice_strip, true);
 
     s_voice_panel = memo_ui_card(s_screen, VOICE_STRIP_X, VOICE_PANEL_Y, VOICE_STRIP_W, VOICE_PANEL_H, NULL);
@@ -553,8 +546,9 @@ static void render_chat(void)
 
     agent_speech_copy(&s_speech);
     const bool speaking = s_speech.active && s_speech.audible;
-    // Before the first words arrive the card waits; after that it follows the SSE text.
-    if (generating && s_view.message.reply_bytes == 0) {
+    // The reply is fetched whole once Hermes has finished, so the card waits
+    // throughout generation.
+    if (generating) {
         chat_wait(true);
         chat_status(s_view.notice[0] ? s_view.notice : message_status(s_view.message.state));
         return;
@@ -584,7 +578,6 @@ static void render_chat(void)
             if (first != text) memmove(text, first, strlen(first) + 1);
             memo_font_filter_text(text, false);
             const int32_t position = lv_obj_get_scroll_y(s_scroll);
-            const bool following = lv_obj_get_scroll_bottom(s_scroll) <= 8;
             if (s_chat_text == NULL || strcmp(s_chat_text, text) != 0) {
                 lv_label_set_text_static(s_chat_body, text);
                 free(s_chat_text);
@@ -597,8 +590,6 @@ static void render_chat(void)
                 s_chat_open_bottom = false;
             }
             if (!input && s_chat_wait_animating) target = 0;
-            // New words are followed only while the reader is already at the end.
-            if (generating && following && !different) target = position + lv_obj_get_scroll_bottom(s_scroll);
             if (target < 0) target = 0;
             lv_obj_scroll_to_y(s_scroll, target, LV_ANIM_OFF);
             s_chat_selection = s_view.selection;
@@ -668,11 +659,6 @@ static void set_text_color(lv_obj_t *object, uint32_t color)
         lv_obj_set_style_text_color(object, lv_color_hex(color), 0);
 }
 
-static void set_long_mode(lv_obj_t *object, lv_label_long_mode_t mode)
-{
-    if (lv_label_get_long_mode(object) != mode) lv_label_set_long_mode(object, mode);
-}
-
 static void reveal(lv_obj_t *object, bool visible)
 {
     if (lv_obj_is_hidden(object) == visible) lv_obj_set_hidden(object, !visible);
@@ -709,22 +695,6 @@ static void voice_orb(bool small, uint32_t fill, lv_opa_t fill_opa, uint32_t rin
     if (lv_obj_get_style_outline_width(s_voice_orb, 0) != outline) lv_obj_set_style_outline_width(s_voice_orb, outline, 0);
     if ((lv_color_to_u32(lv_obj_get_style_outline_color(s_voice_orb, 0)) & 0xFFFFFF) != ring)
         lv_obj_set_style_outline_color(s_voice_orb, lv_color_hex(ring), 0);
-}
-
-// One display sentence without Markdown emphasis, bounded for one label.
-static void sentence_text(const char *text, uint16_t start, uint16_t end, char *out, size_t capacity)
-{
-    size_t used = 0;
-    for (size_t i = start; i < end && used + 1 < capacity;) {
-        if ((text[i] == '*' && text[i + 1] == '*') || (text[i] == '_' && text[i + 1] == '_')) { i += 2; continue; }
-        if (text[i] == '`') { i++; continue; }
-        const size_t step = agent_utf8_step(text, i);
-        if (used + step >= capacity) break;
-        memcpy(out + used, text + i, step);
-        used += step;
-        i += step;
-    }
-    out[used] = '\0';
 }
 
 static bool voice_has_draft(void)
@@ -869,7 +839,7 @@ static int ticker_line(int64_t now)
     return s_ticker_line;
 }
 
-// Keeps a copy of the newest reply and its sentence ranges for the strip.
+// Keeps a copy of the newest reply and its ticker lines for the strip.
 static void voice_reply_cache(void)
 {
     char key[sizeof(s_voice_reply_key)];
@@ -882,7 +852,6 @@ static void voice_reply_cache(void)
     free(s_voice_reply);
     s_voice_reply = reply;
     agent_copy_text(s_voice_reply_key, sizeof(s_voice_reply_key), key);
-    s_voice_sentences = agent_sentence_split(s_voice_reply, s_voice_starts, s_voice_ends, AGENT_VOICE_MAX_SENTENCES);
     voice_wrap_lines();
     if (s_voice_review >= s_voice_line_count) s_voice_review = -1;
 }
@@ -895,9 +864,10 @@ static void render_voice(void)
     agent_speech_copy(&s_speech);
     const bool speaking = s_speech.active && s_speech.audible && strcmp(s_speech.message_id, s_view.message.id) == 0;
     const agent_voice_mode_t mode = agent_voice_mode((int)s_view.capture, voice_has_draft(), s_view.turn.present,
-                                                     s_view.message.state, speaking, false);
+                                                     s_view.message.state, speaking);
     // The reply text arrives whole once Hermes has finished (thinking until
-    // then); the resting and spoken strips both read it.
+    // then). It is cached while speaking too, so the resting ticker is ready
+    // the moment speech ends.
     if (s_view.turn.present && (mode == AGENT_VOICE_IDLE || mode == AGENT_VOICE_FAILED || mode == AGENT_VOICE_SPEAKING))
         voice_reply_cache();
     if ((int)mode != s_voice_mode) {
@@ -976,7 +946,6 @@ static void render_voice(void)
         status = line;
         break;
     }
-    case AGENT_VOICE_REPLYING: status = "正在回复"; break;
     case AGENT_VOICE_FAILED: status = message_status(s_view.message.state); tone = UI_RECORDING; break;
     case AGENT_VOICE_IDLE:
         if (s_voice_review >= 0) {
@@ -996,7 +965,7 @@ static void render_voice(void)
     set_text_color(s_voice_status, tone);
 
     // The strip: one line of words, or the expanded draft panel.
-    bool strip = false, tag = false, circular = false;
+    bool strip = false;
     uint32_t strip_tone = UI_FG, border = UI_BORDER, fill = UI_SURFACE;
     line[0] = '\0';
     if (mode == AGENT_VOICE_RECORDING || mode == AGENT_VOICE_TRANSCRIBING) {
@@ -1042,12 +1011,10 @@ static void render_voice(void)
     }
     reveal(s_voice_strip, strip);
     if (strip) {
-        reveal(s_voice_strip_tag, tag);
         const int text_x = mode == AGENT_VOICE_TRANSCRIBING ? 38 : 14;
-        const int text_w = VOICE_STRIP_W - text_x - (tag ? 56 : 14);
+        const int text_w = VOICE_STRIP_W - text_x - 14;
         if (lv_obj_get_x(s_voice_strip_text) != text_x) lv_obj_set_x(s_voice_strip_text, text_x);
         if (lv_obj_get_width(s_voice_strip_text) != text_w) lv_obj_set_width(s_voice_strip_text, text_w);
-        set_long_mode(s_voice_strip_text, circular ? LV_LABEL_LONG_SCROLL_CIRCULAR : LV_LABEL_LONG_DOT);
         if (strcmp(lv_label_get_text(s_voice_strip_text), line) != 0) set_text(s_voice_strip_text, line, false);
         set_text_color(s_voice_strip_text, strip_tone);
         if ((lv_color_to_u32(lv_obj_get_style_border_color(s_voice_strip, 0)) & 0xFFFFFF) != border)

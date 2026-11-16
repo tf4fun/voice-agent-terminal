@@ -89,7 +89,7 @@ reads `/api/v1/server` after discovery.
   A pending replacement has a separate 64 KiB text budget.
 - Live-transcription and optional window reads use UTF-8 byte offsets and windows
   up to 2048 bytes. Complete-message content responses carry the full stored body.
-- Each device SSE frame is at most 1024 bytes. Delta text uses at most 64 bytes.
+- Each SSE frame is at most 1024 bytes. Delta text uses at most 64 bytes.
 - Each filtered reply holds up to 2 MiB. Sanitized upstream SSE events have a
   256 KiB bound. Oversized ordinary events produce an explicit unconfirmed outcome.
 - Up to four audio uploads and 64 SSE subscribers run concurrently. Audio
@@ -300,10 +300,11 @@ This recovery targets Hermes' canonical durable-admission mode; verify the
 deployed mode's idempotency behavior before live use. Legacy streaming retries
 have different guarantees.
 
-## Device event stream
+## Event stream
 
 `GET /api/v1/events?session_id=<uuid>` subscribes to one session; omitting the
-filter subscribes globally. A connection starts with `resync`. Read current
+filter subscribes globally. The web page uses it; the device polls turn
+metadata instead. A connection starts with `resync`. Read current
 turn metadata and complete message content to establish a baseline. Events include
 `session.updated`, `draft.updated`, `chat.delta`, `chat.reset`, and
 `message.updated`. Chat deltas carry a UTF-8 byte offset. A zero offset may be omitted by JSON

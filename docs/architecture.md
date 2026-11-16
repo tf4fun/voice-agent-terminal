@@ -98,7 +98,8 @@ commit. Confirm account access, accepted formats and latency using real audio.
 Match upstream events by item identity and segment generation.
 
 The device streams mono PCM16 at 16 kHz over chunked HTTP and requires a
-connected gateway. An 8 KiB audio buffer bounds capture buffering. Bounded live
+connected gateway. A 16 KiB PCM buffer, shared with spoken-reply playback,
+bounds capture buffering. Bounded live
 transcription previews serve recording, and committed input is read as complete
 text for review. Hardware acceptance of the new complete-message revision
 remains NOT RUN.
@@ -149,10 +150,11 @@ gateway's capability response describes available chat, draft and transcription
 features. The implemented service type, routes, payload bounds and recovery
 semantics are recorded in the [server contract](server.md).
 
-The server accepts HTTP PCM16 audio uploads and sends bounded SSE events. Audio
-upload and reply delivery have independent flow control. The device reads whole
-message snapshots and appends reply events into its selected RAM cache. Metadata
-polling supports discovery and recording state. Device memory and latency for
+The server accepts HTTP PCM16 audio uploads and sends bounded SSE events to the
+web page. Audio upload and reply delivery have independent flow control. The
+device polls turn metadata while a reply is written and then reads the whole
+message snapshot into its selected RAM cache. Metadata polling also supports
+discovery and recording state. Device memory and latency for
 this revision need hardware measurements. OpenAI's realtime transport runs in Go.
 
 ## References

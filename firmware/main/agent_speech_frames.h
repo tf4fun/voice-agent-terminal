@@ -12,14 +12,14 @@
 #include <string.h>
 
 enum {
-    AGENT_SPEECH_SENTENCE = 1,  // uint16 index, then UTF-8 text.
+    AGENT_SPEECH_SENTENCE = 1,  // Speech starts: uint16 index 0, then the start of the text (not shown).
     AGENT_SPEECH_AUDIO = 2,     // 16 kHz PCM16LE mono.
     AGENT_SPEECH_END = 3,       // One status byte.
     AGENT_SPEECH_KEEPALIVE = 4, // Empty.
 };
 
 #define AGENT_SPEECH_FRAME_MAX 4096
-#define AGENT_SPEECH_TEXT_MAX 258 // Sentence index plus the start of its text.
+#define AGENT_SPEECH_TEXT_MAX 258 // Non-audio payload kept: the start frame's index and 256 text bytes.
 
 typedef struct {
     uint8_t header[3];

@@ -56,15 +56,12 @@ static agent_speech_parser_t s_parser;
 static void lock(void) { xSemaphoreTake(s_lock, portMAX_DELAY); }
 static void unlock(void) { xSemaphoreGive(s_lock); }
 
-static void publish(bool active, bool audible, uint16_t index, const char *sentence, const char *message)
+static void publish(bool active, bool audible, const char *message)
 {
     lock();
-    if (s_view.active != active) s_view.serial++;
     s_view.active = active;
     s_view.audible = audible;
-    s_view.index = index;
     if (!active) s_view.level = 0;
-    if (sentence != NULL) snprintf(s_view.sentence, sizeof(s_view.sentence), "%s", sentence);
     if (message != NULL) snprintf(s_view.message_id, sizeof(s_view.message_id), "%s", message);
     unlock();
 }
@@ -149,7 +146,10 @@ static void writer_task(void *arg)
                 fade_in = true;
             }
             publish_level(loudness(s_chunk, even));
-            if (even > 0 && bsp_audio_write(s_chunk, even) != ESP_OK) break;
+            if (even > 0 && bsp_audio_write(s_chunk, even) != ESP_OK) {
+                atomic_store(&s_stop, true); // The reader stops filling a buffer nobody drains.
+                break;
+            }
             atomic_fetch_add(&s_played, (unsigned)even);
             carry = total - even;
             if (carry) s_chunk[0] = s_chunk[even];
@@ -204,8 +204,7 @@ enum { STREAM_DONE, STREAM_STOPPED, STREAM_BROKEN };
 // Reads one connection into the playback buffer and reports how it ended.
 // *stream_offset counts the stream bytes taken in, keepalives excluded, so a dropped
 // connection resumes exactly there; the parser carries over between them.
-static int read_stream(esp_http_client_handle_t client, unsigned request, size_t *stream_offset, uint16_t *index,
-                       uint8_t *status)
+static int read_stream(esp_http_client_handle_t client, unsigned request, size_t *stream_offset, uint8_t *status)
 {
     uint8_t buffer[512];
     // IDF reads try to fill the buffer; a short timeout keeps stop requests
@@ -234,19 +233,14 @@ static int read_stream(esp_http_client_handle_t client, unsigned request, size_t
             if (event.kind == AGENT_SPEECH_AUDIO) {
                 // Queue for the writer; wait in short slices so a stop stays prompt.
                 size_t sent = 0;
-                while (sent < event.size && atomic_load(&s_request) == request)
+                while (sent < event.size && atomic_load(&s_request) == request) {
+                    if (atomic_load(&s_stop)) return STREAM_BROKEN; // The speaker failed.
                     sent += xStreamBufferSend(s_pcm, event.data + sent, event.size - sent, pdMS_TO_TICKS(50));
-
-            } else if (event.kind == AGENT_SPEECH_SENTENCE && event.size >= 2) {
-                *index = (uint16_t)(event.data[0] | (event.data[1] << 8));
-                char sentence[AGENT_SPEECH_SENTENCE_BYTES];
-                size_t text = event.size - 2;
-                if (text >= sizeof(sentence)) text = sizeof(sentence) - 1;
-                // Cut before a UTF-8 continuation byte so the text stays valid.
-                while (text > 0 && text < event.size - 2 && (event.data[2 + text] & 0xC0) == 0x80) text--;
-                memcpy(sentence, event.data + 2, text);
-                sentence[text] = '\0';
-                publish(true, true, *index, sentence, NULL);
+                }
+            } else if (event.kind == AGENT_SPEECH_SENTENCE) {
+                // Marks the start of speech; the text it carries is not shown
+                // (the strip reads the reply the device fetched itself).
+                publish(true, true, NULL);
             } else if (event.kind == AGENT_SPEECH_END) {
                 *status = event.size ? event.data[0] : 1;
                 return STREAM_DONE;
@@ -260,10 +254,9 @@ static int read_stream(esp_http_client_handle_t client, unsigned request, size_t
 // dropped connection resumes at the exact byte it stopped at (up to 3 times).
 static void play(unsigned request, const char *session, const char *message)
 {
-    publish(true, false, 0, "", message);
+    publish(true, false, message);
     memo_net_hold_awake(true); // Modem sleep missed beacons while streaming.
     uint8_t status = 1;
-    uint16_t index = 0;
     int outcome = STREAM_BROKEN, resumes = 0;
     size_t offset = 0;
     agent_speech_parser_reset(&s_parser);
@@ -282,12 +275,12 @@ static void play(unsigned request, const char *session, const char *message)
             agent_speech_resume(&s_parser, &offset);
             esp_http_client_handle_t client = open_stream(session, message, offset);
             if (client != NULL) {
-                outcome = read_stream(client, request, &offset, &index, &status);
+                outcome = read_stream(client, request, &offset, &status);
                 esp_http_client_close(client);
                 esp_http_client_cleanup(client);
             }
             if (atomic_load(&s_request) != request) { outcome = STREAM_STOPPED; break; }
-            if (outcome == STREAM_DONE || resumes >= 3 || !network_back(request)) break;
+            if (outcome == STREAM_DONE || atomic_load(&s_stop) || resumes >= 3 || !network_back(request)) break;
             resumes++;
             ESP_LOGW(TAG, "speech stream dropped; resuming at byte %u", (unsigned)offset);
         }
@@ -305,10 +298,10 @@ static void play(unsigned request, const char *session, const char *message)
     char tag[AGENT_TRACE_TAG_BYTES];
     const unsigned gap = atomic_load(&s_longest_gap_ms) / 100;
     snprintf(tag, sizeof(tag), "d%u g%u r%d", atomic_load(&s_underruns), gap > 999 ? 999 : gap, resumes);
-    agent_trace(TRACE_SPEECH, status, index, tag);
-    ESP_LOGI(TAG, "speech end status=%u sentences=%u underruns=%u longest_gap_ms=%u resumes=%d", status,
-             index + 1, atomic_load(&s_underruns), atomic_load(&s_longest_gap_ms), resumes);
-    publish(false, false, index, NULL, NULL);
+    agent_trace(TRACE_SPEECH, status, 0, tag);
+    ESP_LOGI(TAG, "speech end status=%u underruns=%u longest_gap_ms=%u resumes=%d", status,
+             atomic_load(&s_underruns), atomic_load(&s_longest_gap_ms), resumes);
+    publish(false, false, NULL);
 }
 
 static void speech_task(void *arg)

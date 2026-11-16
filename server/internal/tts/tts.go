@@ -1,5 +1,5 @@
 // Package tts synthesizes speech for assistant replies. The OpenAI provider
-// uses the Realtime API as a reader: each sentence is an out-of-band response
+// uses the Realtime API as a reader: each reply is one out-of-band response
 // that says the given text verbatim, streamed back as PCM.
 package tts
 
@@ -29,7 +29,7 @@ var ErrUpstream = errors.New("speech_upstream_error")
 
 type Synthesizer interface {
 	Enabled() bool
-	// Speak synthesizes one sentence and emits 16 kHz PCM16LE mono as it arrives.
+	// Speak synthesizes text (a whole reply) and emits 16 kHz PCM16LE mono as it arrives.
 	Speak(ctx context.Context, text string, emit func([]byte) error) error
 }
 
@@ -305,7 +305,7 @@ func (o *OpenAI) speak(ctx context.Context, s *session, text string, emit func([
 	}
 }
 
-// Run keeps one configured session warm so the first sentence skips the
+// Run keeps one configured session warm so a reply's speech skips the
 // handshake (about 3.7 s through the proxy).
 func (o *OpenAI) Run(ctx context.Context) {
 	o.mu.Lock()

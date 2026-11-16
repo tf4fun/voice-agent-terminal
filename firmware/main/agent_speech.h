@@ -5,19 +5,14 @@
 
 #include "esp_err.h"
 
-// Plays a reply's spoken voice from the gateway while it is generated. One
+// Plays a reply's spoken voice from the gateway once the reply is complete. One
 // stream at a time; recording, leaving the session or a long Down stops it.
 
-#define AGENT_SPEECH_SENTENCE_BYTES 192
-
 typedef struct {
-    bool active;     // A stream is open or about to open.
-    bool audible;    // Audio has started for the current sentence.
-    uint16_t index;  // Current sentence.
-    char sentence[AGENT_SPEECH_SENTENCE_BYTES];
+    bool active;     // A stream is open or about to open (it waits while Hermes thinks).
+    bool audible;    // The gateway has started speaking the reply.
     char message_id[37];
     uint8_t level;   // 0..100 loudness of the audio being played.
-    uint32_t serial; // Changes whenever a stream starts or stops.
     uint32_t played_ms; // Audio sent to the speaker for the current stream.
 } agent_speech_view_t;
 
