@@ -13,6 +13,9 @@ type Turn struct {
 	Message *model.Message `json:"message"`
 	Before  string         `json:"before"`
 	After   string         `json:"after"`
+	// Position of this exchange in the session, 1-based, and the exchange count.
+	Index int `json:"index"`
+	Total int `json:"total"`
 }
 
 func (s *Store) Turn(ctx context.Context, session, mode, anchor string) (Turn, error) {
@@ -61,6 +64,11 @@ func (s *Store) Turn(ctx context.Context, session, mode, anchor string) (Turn, e
 			if err != nil && !errors.Is(err, sql.ErrNoRows) {
 				return err
 			}
+		}
+		if err := tx.QueryRowContext(ctx, `SELECT
+			(SELECT COUNT(*) FROM messages WHERE session_id=? AND rowid<=(SELECT rowid FROM messages WHERE id=?)),
+			(SELECT COUNT(*) FROM messages WHERE session_id=?)`, session, message.ID, session).Scan(&result.Index, &result.Total); err != nil {
+			return err
 		}
 		return nil
 	})

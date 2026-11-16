@@ -8,6 +8,7 @@
 typedef enum {
     UI_COLOR_BACKGROUND, UI_COLOR_FOREGROUND, UI_COLOR_SECONDARY,
     UI_COLOR_BORDER, UI_COLOR_SURFACE, UI_COLOR_SELECTED, UI_COLOR_RECORDING,
+    UI_COLOR_ACCENT, UI_COLOR_ACCENT_SOFT,
     UI_COLOR_COUNT,
 } memo_ui_color_t;
 
@@ -24,16 +25,18 @@ void memo_ui_clock_update(uint64_t utc_seconds, int offset_minutes);
 #define UI_SURFACE memo_ui_color(UI_COLOR_SURFACE)
 #define UI_SELECTED memo_ui_color(UI_COLOR_SELECTED)
 #define UI_RECORDING memo_ui_color(UI_COLOR_RECORDING)
+#define UI_ACCENT memo_ui_color(UI_COLOR_ACCENT)
+#define UI_ACCENT_SOFT memo_ui_color(UI_COLOR_ACCENT_SOFT)
 
-#define VM_RADIUS_CARD 10
-#define VM_RADIUS_PANEL 10
+#define VM_RADIUS_CARD 16
+#define VM_RADIUS_PANEL 20
 #define VM_STROKE 1
 #define VM_INSET 8
 
 /* 去掉默认样式，只留一个纯色圆角矩形。 */
 void memo_ui_flat_rect(lv_obj_t *obj, uint32_t color, int radius);
 
-/* Rounded surface with a subtle border. shadow_out remains NULL. */
+/* Borderless rounded surface. shadow_out remains NULL. */
 lv_obj_t *memo_ui_card(lv_obj_t *parent, int x, int y, int w, int h, lv_obj_t **shadow_out);
 
 /* 建一个指定字体与颜色的标签。 */
@@ -53,15 +56,24 @@ void memo_ui_screen_delete(lv_obj_t *screen);
 /* Single low-brightness terminal rule, without an emphasized leading segment. */
 void memo_ui_rule(lv_obj_t *screen, int x, int y, int w);
 
-/* 1 px framed track with a centred, 1 px inset fill; hold LVGL lock. */
+/* Rounded pill track with an accent fill; hold LVGL lock. */
 lv_obj_t *memo_ui_meter_create(lv_obj_t *parent, int width, int height, lv_obj_t **fill);
 
 /* Single status row with centered title, local time, battery and optional back icon. */
 lv_obj_t *memo_ui_header(lv_obj_t *screen, const char *title, bool back);
 
-/* A focused row uses a neutral selected surface with normal text colors. */
+/* A focused row uses the accent tint and an accent outline. */
 void memo_ui_set_selected(lv_obj_t *box, bool selected);
 
-/* 4 px 轨道 + 亮绿滑块的位置指示器；创建与更新都需持 LVGL 锁。 */
+/* Root-page indicator below the header: one accent pill among neutral dots. */
+void memo_ui_page_dots(lv_obj_t *screen, int active, int count);
+
+/* Circular accent-tinted badge that hosts a primitive-drawn icon. */
+lv_obj_t *memo_ui_icon_badge(lv_obj_t *parent, int x, int y, int size);
+
+/* Spinner arc with rounded caps in the accent color; hold LVGL lock. */
+lv_obj_t *memo_ui_spinner(lv_obj_t *parent, int size, int width);
+
+/* Slim rounded track with an accent thumb; create and update under the LVGL lock. */
 lv_obj_t *memo_ui_scrollbar_create(lv_obj_t *screen, int x, int y, int h);
 void memo_ui_scrollbar_update(lv_obj_t *track, int track_h, int total, int visible, int top);

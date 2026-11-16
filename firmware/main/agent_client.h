@@ -28,6 +28,7 @@ typedef struct {
     char text_id[37];
     agent_capture_state_t capture;
     bool connected, busy, provisioning, paused, session_switching;
+    bool speech, draft_clear; // Gateway capabilities: spoken replies, one-step draft clearing.
     char notice[64];
     uint32_t generation, selection, capture_serial;
 } agent_view_t;
@@ -50,6 +51,13 @@ bool agent_client_cancel_record(void);
 esp_err_t agent_client_send(uint32_t reviewed_revision, uint32_t reviewed_selection);
 esp_err_t agent_client_review_draft(void);
 esp_err_t agent_client_retry(const char *id, uint32_t reviewed_selection);
+// The loaded input or reply of the shown exchange regardless of which one the
+// text card displays (voice page). Caller owns the copy; NULL when not loaded.
+char *agent_client_part_copy(uint32_t selection, bool input);
+// Discards the whole reviewed draft (long Down on the voice page).
+esp_err_t agent_client_clear_draft(void);
+// Returns from older history to the newest exchange.
+esp_err_t agent_client_show_latest(void);
 esp_err_t agent_client_provision(bool enabled);
 esp_err_t agent_client_pause(void);
 

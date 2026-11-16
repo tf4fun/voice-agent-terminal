@@ -34,7 +34,7 @@ func TestDeleteBeforeRetryCannotQueueOrClaimMessage(t *testing.T) {
 	if err := st.BeginDelete(ctx, session); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.Retry(ctx, session, id); !errors.Is(err, ErrBusy) {
+	if err := st.Retry(ctx, session, id, "scope"); !errors.Is(err, ErrBusy) {
 		t.Fatalf("retry during delete=%v", err)
 	}
 	if _, err := st.Claim(ctx); !errors.Is(err, ErrNotFound) {
@@ -47,7 +47,7 @@ func TestDeleteBeforeRetryCannotQueueOrClaimMessage(t *testing.T) {
 	if err := st.FinishDelete(ctx, session); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.Retry(ctx, session, id); !errors.Is(err, ErrNotFound) {
+	if err := st.Retry(ctx, session, id, "scope"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("retry deleted session=%v", err)
 	}
 }
@@ -55,7 +55,7 @@ func TestDeleteBeforeRetryCannotQueueOrClaimMessage(t *testing.T) {
 func TestRetryBeforeDeleteKeepsSessionReady(t *testing.T) {
 	ctx := context.Background()
 	st, session, id := failedMessageFixture(t)
-	if err := st.Retry(ctx, session, id); err != nil {
+	if err := st.Retry(ctx, session, id, "scope"); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.BeginDelete(ctx, session); !errors.Is(err, ErrBusy) {
@@ -82,7 +82,7 @@ func TestConcurrentRetryAndDeleteHaveOneWinner(t *testing.T) {
 		go func() {
 			defer workers.Done()
 			<-start
-			retried = st.Retry(ctx, session, id)
+			retried = st.Retry(ctx, session, id, "scope")
 		}()
 		go func() {
 			defer workers.Done()

@@ -51,6 +51,10 @@ enum capture_case {
     CAPTURE_LOST_ACK_ONCE, CAPTURE_LOST_ACK_TWICE, CAPTURE_SHORT,
 };
 static bool capture_mode, capture_running, upload_closed, stage_ready, stage_exists;
+static char trace_body[16384];
+static size_t trace_written;
+static unsigned trace_uploads;
+static int trace_status = 201;
 static bool server_committed, cancel_accepted, audio_eof;
 static unsigned chunks_read, cancel_attempts, commit_requests, commit_applies, abort_requests;
 static enum capture_case capture_case;
@@ -130,6 +134,7 @@ void memo_discovery_confirm(const memo_endpoint_t *endpoint) { (void)endpoint; }
 void memo_discovery_invalidate(const memo_endpoint_t *endpoint) { (void)endpoint; }
 esp_err_t agent_capture_begin(void) { capture_running=true;return ESP_OK; }
 void agent_capture_end(void) { capture_running=false; }
+void agent_capture_release(void) {}
 bool agent_capture_running(void) { return capture_running; }
 esp_err_t agent_capture_error(void) { return ESP_OK; }
 size_t agent_capture_read(void *buffer, size_t capacity, uint32_t timeout)
@@ -171,6 +176,12 @@ esp_err_t esp_http_client_open(esp_http_client_handle_t client,int size)
 { (void)client;(void)size;return ESP_OK; }
 int esp_http_client_write(esp_http_client_handle_t client,const char *data,int size)
 {
+    if(strstr(client->url,"/device/logs")) {
+        assert(trace_written+(size_t)size<sizeof(trace_body));
+        memcpy(trace_body+trace_written,data,(size_t)size);
+        trace_written+=(size_t)size;
+        return size;
+    }
     if(capture_mode && strstr(client->url,"/audio?")) {
         if(size==5 && memcmp(data,"0\r\n\r\n",5)==0)audio_eof=true;
     } else if(capture_mode) {
@@ -183,6 +194,13 @@ int esp_http_client_write(esp_http_client_handle_t client,const char *data,int s
 }
 int64_t esp_http_client_fetch_headers(esp_http_client_handle_t client)
 {
+    if(strstr(client->url,"/device/logs")) {
+        trace_uploads++;
+        client->status=trace_status;
+        strcpy(client->response,"{\"id\":\"x\"}");
+        client->length=strlen(client->response);
+        return (int64_t)client->length;
+    }
     client->status=response_status;
     if(capture_mode) {
         client->status=200;
@@ -310,44 +328,44 @@ static void test_whole_pair_and_history(void)
     free(input);free(reply);
 }
 
-static void test_sse_append_and_recovery_offsets(void)
+static bool ends_with_truncated_notice(const char *text)
 {
-    setup();s_view.text_kind=AGENT_TEXT_REPLY;
-    strcpy(s_cached_message,message_id);strcpy(s_view.message.id,message_id);
-    s_view.turn.present=true;
-    CHECK(append_reply(message_id,0,"你好"));
-    CHECK(append_reply(message_id,0,"你好"));
-    CHECK(strcmp(s_reply_text,"你好")==0);
-    CHECK(append_reply(message_id,3,"好，世界"));
-    CHECK(strcmp(s_reply_text,"你好，世界")==0);
-    CHECK(!append_reply(message_id,99,"gap"));
-    CHECK(!append_reply(message_id,0,"different"));
-    CHECK(strcmp(s_reply_text,"你好，世界")==0);
-    CHECK(append_reply(selected_message_id,0,"other message"));
-    watch_context_t context={.selection=s_view.selection,.request=s_view.chat_request};
-    strcpy(context.session,session_id);
-    const char *event="event: chat.delta\ndata: {\"type\":\"chat.delta\",\"message_id\":\"00000000-0000-4000-8000-000000000002\",\"offset\":15,\"text\":\"！\"}\n\n";
-    agent_sse_t stream={0};
-    for(size_t i=0;i<strlen(event);i++)CHECK(agent_sse_feed(&stream,event+i,1,stream_event,&context));
-    CHECK(strcmp(s_reply_text,"你好，世界！")==0);
+    const size_t length=strlen(text),notice_length=strlen(AGENT_TRUNCATED_NOTICE);
+    return length>=notice_length&&strcmp(text+length-notice_length,AGENT_TRUNCATED_NOTICE)==0;
+}
+static void test_oversized_content_is_bounded(void)
+{
+    setup();
+    const size_t limit=AGENT_CONTENT_MAX_BYTES;
+    // The cut lands inside a three-byte character, which must be dropped whole.
+    const size_t reply_total=limit-1+3+100,input_total=limit+4000;
+    char *input=malloc(input_total+1),*reply=malloc(reply_total+1);assert(input&&reply);
+    memset(input,'A',input_total);input[input_total]=0;
+    memset(reply,'B',limit-1);memcpy(reply+limit-1,"你",3);memset(reply+limit+2,'C',100);reply[reply_total]=0;
+    char response[256];
+    snprintf(response,sizeof(response),
+        "{\"message\":{\"id\":\"%s\",\"state\":\"completed\",\"revision\":8,\"input_bytes\":%zu,\"reply_bytes\":%zu},"
+        "\"before\":\"\",\"after\":\"\"}",message_id,input_total,reply_total);
+    whole_input=input;whole_reply=reply;injected_response=response;
+    s_view.text_kind=AGENT_TEXT_REPLY;s_view.chat_loading=true;
+    agent_view_t view=s_view;
+    CHECK(poll_turn(&view));
+    CHECK(strlen(s_reply_text)==limit-1&&s_reply_truncated&&s_reply_total==reply_total);
+    CHECK(strlen(s_input_text)==limit&&s_input_truncated&&s_input_total==input_total);
+    CHECK(s_view.message.reply_bytes==reply_total);
+    char *snapshot=agent_client_text_copy(s_view.selection,s_view.text_generation);
+    CHECK(snapshot&&strncmp(snapshot,reply,limit-1)==0&&ends_with_truncated_notice(snapshot));free(snapshot);
     agent_client_message_select(true);
-    CHECK(watch_current(&context));
-    s_view.chat_request++;
-    CHECK(!watch_current(&context));
-}
+    snapshot=agent_client_text_copy(s_view.selection,s_view.text_generation);
+    CHECK(snapshot&&ends_with_truncated_notice(snapshot));free(snapshot);
+    // An unchanged truncated reply is not downloaded again on the next poll.
+    agent_client_message_select(false);
+    whole_reply="refetched";view=s_view;
+    CHECK(poll_turn(&view));
+    CHECK(strlen(s_reply_text)==limit-1&&s_reply_truncated);
+    free(input);free(reply);
 
-static bool count_event(const char *json,void *context)
-{
-    (void)json;(*(unsigned *)context)++;return true;
-}
-static void test_sse_fragment_bounds(void)
-{
-    agent_sse_t stream={0};unsigned count=0;
-    CHECK(agent_sse_feed(&stream,": heartbeat\r\ndata: {}\r\n\r\n",strlen(": heartbeat\r\ndata: {}\r\n\r\n"),count_event,&count));
-    CHECK(count==1);
-    memset(&stream,0,sizeof(stream));
-    char oversized[AGENT_SSE_LINE_BYTES+1];memset(oversized,'x',sizeof(oversized));
-    CHECK(!agent_sse_feed(&stream,oversized,sizeof(oversized),count_event,&count));
+    CHECK(utf8_complete_prefix("你",1)==0&&utf8_complete_prefix("你",3)==3&&utf8_complete_prefix("a你",2)==1);
 }
 
 static void send_during_draft_response(void)
@@ -392,6 +410,20 @@ static void test_cached_draft_review_and_reopen(void)
     CHECK(strcmp(s_input_text,"reviewed draft")==0);
 }
 
+// Long Down clears only the draft revision on screen, like a send.
+static void test_clear_draft_uses_shown_revision(void)
+{
+    setup();s_view.segment_count=s_view.segment_total=1;s_view.draft_clear=true;
+    s_view.draft_revision=9; // A newer draft was listed but its text is not loaded yet.
+    CHECK(agent_client_clear_draft()==ESP_ERR_INVALID_STATE);
+    s_view.text.revision=9;
+    injected_response="{\"revision\":10}";
+    CHECK(agent_client_clear_draft()==ESP_OK);dispatch();
+    CHECK(s_view.draft_revision==10&&s_resync);
+    s_view.draft_clear=false;
+    CHECK(agent_client_clear_draft()==ESP_ERR_INVALID_STATE);
+}
+
 static void test_empty_draft_returns_to_whole_turn(void)
 {
     setup();s_view.text_loading=true;
@@ -401,17 +433,25 @@ static void test_empty_draft_returns_to_whole_turn(void)
     CHECK(s_view.text_kind==AGENT_TEXT_REPLY&&!s_view.text_loading&&s_view.chat_loading&&s_resync);
 }
 
-static void test_reply_stream_uses_http_reader(void)
+static void test_active_reply_is_fetched_once_complete(void)
 {
-    setup();s_view.text_kind=AGENT_TEXT_REPLY;
-    strcpy(s_cached_message,message_id);strcpy(s_view.message.id,message_id);
-    strcpy(s_view.message.state,"waiting");s_view.turn.present=true;
-    injected_response="event: chat.delta\ndata: {\"type\":\"chat.delta\",\"message_id\":\"00000000-0000-4000-8000-000000000002\",\"text\":\"streamed reply\"}\n\n";
+    setup();s_view.text_kind=AGENT_TEXT_REPLY;s_view.chat_loading=true;
+    char response[256];
+    snprintf(response,sizeof(response),"{\"message\":{\"id\":\"%s\",\"state\":\"receiving\",\"revision\":3,"
+        "\"input_bytes\":2,\"reply_bytes\":5},\"before\":\"\",\"after\":\"\"}",message_id);
+    whole_input="hi";whole_reply="hello";injected_response=response;
     agent_view_t view=s_view;
-    CHECK(!watch_reply(&view));
-    CHECK(stream_timeout_ms>0&&stream_timeout_ms<=40);
-    CHECK(s_reply_text&&strcmp(s_reply_text,"streamed reply")==0);
-    CHECK(strcmp(s_view.message.state,"receiving")==0);
+    // While Hermes writes, only the state is tracked; no partial text is downloaded.
+    CHECK(poll_turn(&view));
+    CHECK(!s_reply_loaded&&strcmp(s_view.message.state,"receiving")==0);
+    view=s_view;
+    CHECK(poll_reply_state(&view));
+    CHECK(!s_reply_loaded);
+    snprintf(response,sizeof(response),"{\"message\":{\"id\":\"%s\",\"state\":\"completed\",\"revision\":4,"
+        "\"input_bytes\":2,\"reply_bytes\":5},\"before\":\"\",\"after\":\"\"}",message_id);
+    view=s_view;
+    CHECK(poll_reply_state(&view));
+    CHECK(s_reply_loaded&&strcmp(s_reply_text,"hello")==0&&strcmp(s_view.message.state,"completed")==0);
 }
 
 static void test_raw_content_integrity(void)
@@ -480,19 +520,105 @@ static void test_capture(enum capture_case test_case)
     capture_mode=false;
 }
 
+// Undo HTTP/1.1 chunked framing written by the trace upload.
+static size_t unchunk(const char *in, size_t length, char *out)
+{
+    size_t used = 0, i = 0;
+    while (i < length) {
+        char *end = NULL;
+        const unsigned long size = strtoul(in + i, &end, 16);
+        i = (size_t)(end - in) + 2;
+        if (size == 0) break;
+        memcpy(out + used, in + i, size);
+        used += size;
+        i += size + 2;
+    }
+    out[used] = 0;
+    return used;
+}
+
+// A message sent from the web page becomes the newest turn; an open, settled
+// newest turn follows it, while reading older history does not jump.
+static void test_follows_newer_turn_from_other_client(void)
+{
+    static const char newer[]=
+        "{\"message\":{\"id\":\"00000000-0000-4000-8000-000000000003\",\"state\":\"waiting\","
+        "\"revision\":1,\"input_bytes\":5,\"reply_bytes\":0},"
+        "\"before\":\"00000000-0000-4000-8000-000000000002\",\"after\":\"\"}";
+    setup();
+    injected_response=turn_response;
+    s_view.text_kind=AGENT_TEXT_REPLY;s_view.chat_loading=true;
+    agent_view_t view=s_view;
+    CHECK(poll_turn(&view));
+    CHECK(strcmp(s_view.turn_anchor,"00000000-0000-4000-8000-000000000002")==0);
+    // Same newest message: nothing changes.
+    view=s_view;
+    const uint32_t generation=s_view.text_generation;
+    CHECK(poll_latest(&view));
+    CHECK(s_view.text_generation==generation);
+    // A newer message appears.
+    whole_input="hello";whole_reply="";injected_response=newer;
+    s_view.text_kind=AGENT_TEXT_INPUT;
+    view=s_view;
+    CHECK(poll_latest(&view));
+    CHECK(strcmp(s_view.turn_anchor,"00000000-0000-4000-8000-000000000003")==0);
+    CHECK(s_view.text_kind==AGENT_TEXT_REPLY && strcmp(s_input_text,"hello")==0);
+    // Reading an older exchange (one with a newer neighbour) stays put.
+    strcpy(s_view.turn.after,"00000000-0000-4000-8000-000000000009");
+    strcpy(s_view.turn_anchor,"00000000-0000-4000-8000-000000000002");
+    view=s_view;
+    CHECK(poll_latest(&view));
+    CHECK(strcmp(s_view.turn_anchor,"00000000-0000-4000-8000-000000000002")==0);
+}
+
+static void test_failure_report_upload(void)
+{
+    setup();
+    s_view.capture = AGENT_IDLE;
+    trace_written = 0; trace_uploads = 0; trace_status = 503;
+    char ok_body[64];
+    request(HTTP_METHOD_POST, "/sessions/00000000-0000-4000-8000-000000000001/messages", "{}", ok_body, sizeof(ok_body));
+    agent_trace_request(TRACE_TRIGGER_RECORD_FAILED);
+    report_trace();
+    CHECK(trace_uploads == 1 && agent_trace_pending() == TRACE_TRIGGER_RECORD_FAILED); // Failed upload stays pending.
+    report_trace();
+    CHECK(trace_uploads == 1); // Rate limited.
+    trace_written = 0; trace_status = 201;
+    CHECK(upload_trace(TRACE_TRIGGER_RECORD_FAILED));
+    agent_trace_reported(TRACE_TRIGGER_RECORD_FAILED, true, true);
+    CHECK(agent_trace_pending() == TRACE_TRIGGER_NONE);
+    static char json[16384];
+    unchunk(trace_body, trace_written, json);
+    cJSON *root = cJSON_Parse(json);
+    CHECK(root != NULL);
+    if (root != NULL) {
+        CHECK(strcmp(cJSON_GetObjectItem(root, "trigger")->valuestring, "record_failed") == 0);
+        bool saw_post = false;
+        const cJSON *event;
+        cJSON_ArrayForEach(event, cJSON_GetObjectItem(root, "events")) {
+            if (cJSON_GetArrayItem(event, 2)->valueint == TRACE_HTTP &&
+                strcmp(cJSON_GetArrayItem(event, 5)->valuestring, "P messages") == 0) saw_post = true;
+        }
+        CHECK(saw_post);
+        cJSON_Delete(root);
+    }
+}
+
 int main(void)
 {
     assert(agent_client_init()==ESP_OK);
     test_whole_pair_and_history();
-    test_sse_append_and_recovery_offsets();
-    test_sse_fragment_bounds();
+    test_oversized_content_is_bounded();
     test_send_rejects_inflight_draft_response();
     test_cached_draft_review_and_reopen();
     test_raw_content_integrity();
     test_empty_draft_returns_to_whole_turn();
-    test_reply_stream_uses_http_reader();
+    test_clear_draft_uses_shown_revision();
+    test_active_reply_is_fetched_once_complete();
     test_retry_accepts_server_message();
     for(enum capture_case item=CAPTURE_NORMAL;item<=CAPTURE_SHORT;item++)test_capture(item);
+    test_failure_report_upload();
+    test_follows_newer_turn_from_other_client();
     clear_message_cache();
     printf("client regression assertions failed=%u\n",failed);
     return failed?1:0;

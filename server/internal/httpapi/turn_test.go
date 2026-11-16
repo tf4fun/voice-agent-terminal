@@ -85,10 +85,10 @@ func TestWholeMessageHistoryAndUncutContent(t *testing.T) {
 	reply := "\n\n" + strings.Repeat("完整回复渥太华 😀 \"escaped\"\\\n", 600)
 	first := addWholeMessage(t, e, session, input, reply)
 	second := addWholeMessage(t, e, session, "second input", "second reply")
-	if err := json.Unmarshal(e.request(t, "GET", base+"/turn", nil, 200), &turn); err != nil || turn.Message.ID != second.ID || turn.Before != first.ID || turn.After != "" {
+	if err := json.Unmarshal(e.request(t, "GET", base+"/turn", nil, 200), &turn); err != nil || turn.Message.ID != second.ID || turn.Before != first.ID || turn.After != "" || turn.Index != 2 || turn.Total != 2 {
 		t.Fatalf("latest: %+v %v", turn, err)
 	}
-	if err := json.Unmarshal(e.request(t, "GET", base+"/turn?before="+second.ID, nil, 200), &turn); err != nil || turn.Message.ID != first.ID || turn.Before != "" || turn.After != second.ID {
+	if err := json.Unmarshal(e.request(t, "GET", base+"/turn?before="+second.ID, nil, 200), &turn); err != nil || turn.Message.ID != first.ID || turn.Before != "" || turn.After != second.ID || turn.Index != 1 || turn.Total != 2 {
 		t.Fatalf("before: %+v %v", turn, err)
 	}
 	e.request(t, "GET", base+"/turn?after="+first.ID, nil, 200)

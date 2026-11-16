@@ -26,23 +26,48 @@ Existing process variables take precedence.
 | `OPENAI_API_KEY` | OpenAI credential, held by Go |
 | `OPENAI_TRANSCRIBE_MODEL` | Default `gpt-live-transcribe` |
 | `OPENAI_REALTIME_URL` | Default `wss://api.openai.com/v1/realtime?intent=transcription` |
+| `VOICE_TTS_PROVIDER` | Spoken replies: `openai` by default (uses `OPENAI_API_KEY`), `fake` or `off` |
+| `OPENAI_TTS_MODEL`, `OPENAI_TTS_VOICE`, `OPENAI_TTS_URL` | Defaults `gpt-realtime-2.1-mini`, `marin` and `wss://api.openai.com/v1/realtime`; see [Spoken replies](#spoken-replies) |
 
 Local data and environment files are ignored by Git. Bind network exposure and
 device credentials to the intended LAN deployment. A configured Hermes API
 server provides the matching `HERMES_API_KEY` value and API-created sessions.
 
-## Session management page
+## Web chat
 
-Open the server root, such as `http://localhost:8080/`, to manage the device
-session index. The embedded page provides 20-entry list pages, chronological
-complete question/reply previews, and deletion with confirmation. Narrow screens switch
-between the list and detail views. The assets are compiled into the Go binary
-using the standard library's `embed` and `net/http` support.
+Open the server root, such as `http://localhost:8080/`, for a chat client that
+shares sessions, drafts and replies with the device. Its layout follows common
+chat web apps: a sidebar of sessions grouped by recent activity with title
+search, rename and delete, and a conversation column with a composer. Colors
+reuse the device's light and dark palette roles; the theme follows the system
+or is chosen in the sidebar. Narrow screens use a slide-in sidebar.
 
-If `VOICE_API_KEY` is configured, enter that gateway key on the page. The public
-HTML/CSS/JavaScript shell serves the interface assets. API requests use bearer
-authentication and same-origin mutation protection. The page keeps
-the entered key in memory for the open page lifetime.
+- Replies stream live through `GET /api/v1/events`, read with `fetch` so the
+  bearer key can be sent. Deltas apply at their UTF-8 byte offsets; a gap or
+  `chat.reset` refetches the complete reply, and a reconnect reconciles the
+  newest page of messages. Replies render a safe Markdown subset (headings,
+  lists, quotes, tables, code blocks with copy, links) built as DOM nodes,
+  never as HTML strings.
+- The composer edits the session's shared draft. A voice draft from the device
+  appears in it, and while the device records, a status line shows the live
+  transcript. Sending makes the draft equal to the composer text (one segment
+  edit, append or deletions at the reviewed revision), then sends that
+  revision; a draft that is still recording returns a busy notice. A new
+  conversation creates its session on the first send and is titled from it.
+- A message sent from the device appears as soon as its first event arrives,
+  and the view follows it to the bottom while its reply streams.
+- Failed or unconfirmed replies offer retry on the latest exchange. Messages and
+  code blocks can be copied, including on plain-HTTP LAN pages.
+- `#/c/<session-id>` links open a session directly. Ctrl/Cmd+K starts a new
+  conversation; Enter sends and Shift+Enter inserts a line break.
+
+If `VOICE_API_KEY` is configured, enter that gateway key on the page. It stays in
+page memory unless "remember in this browser" is checked, which stores it in
+`localStorage` until sign-out. The public HTML/CSS/JavaScript/icon shell
+contains no session data or credentials; API requests use bearer
+authentication and same-origin mutation protection, and the page's content
+security policy allows only same-origin resources. The assets are compiled into
+the Go binary with the standard library's `embed` support.
 
 Deletion uses the existing session API and synchronizes the corresponding
 Hermes session. A pending deletion remains visible until synchronization
@@ -66,7 +91,7 @@ reads `/api/v1/server` after discovery.
   A pending replacement has a separate 64 KiB text budget.
 - Live-transcription and optional window reads use UTF-8 byte offsets and windows
   up to 2048 bytes. Complete-message content responses carry the full stored body.
-- Each device SSE frame is at most 1024 bytes. Delta text uses at most 64 bytes.
+- Each SSE frame is at most 1024 bytes. Delta text uses at most 64 bytes.
 - Each filtered reply holds up to 2 MiB. Sanitized upstream SSE events have a
   256 KiB bound. Oversized ordinary events produce an explicit unconfirmed outcome.
 - Up to four audio uploads and 64 SSE subscribers run concurrently. Audio
@@ -98,6 +123,38 @@ a retired local ID. Active or unconfirmed messages return a busy response.
 An upstream session's API source is verified before deletion.
 
 ## Drafts and audio
+
+The gateway keeps one configured OpenAI realtime transcription session warm.
+OpenAI's realtime transcription guide sends many audio turns over one session:
+commit at the end of each turn and match transcription events by `item_id`,
+because completion order across turns is not guaranteed. Each recording sends
+`input_audio_buffer.clear`, appends its audio, commits once and accepts only the
+first item after its clear. A cleanly finished session returns to the pool; a
+failed or cancelled turn discards its session, because buffered audio or an
+in-flight item may remain. A dedicated reader per connection answers keepalive
+pings sent every 20 s, detects drops at once and triggers a reconnect with
+exponential backoff up to 60 s. Sessions are replaced after 50 minutes, inside
+the documented realtime session limit. A second concurrent recording opens its
+own session.
+
+Creating a recording segment (an empty or replacement segment) reserves the
+warm session, or opens one, before the `201` response, waiting at most 3 s,
+below the device's 4 s request timeout. The device keeps its preparing
+animation until that response, so capture starts against a ready transcriber.
+The reserved session belongs to that segment ID, is handed to exactly one
+upload, and returns to the pool after 30 s unused or when the gateway stops. Logs record the
+preparation time and any transcription failure code without credentials.
+
+Audio uploads are also drained from the first byte, covering a handshake slower
+than 3 s or an upload without a prepared session. A cold handshake through a proxy takes about 2.5 s; before this
+change the gateway did not read the body until `session.updated`, so TCP
+backpressure overflowed the device's 8 KiB PCM queue at 2.8-2.9 s. The prefetch
+holds up to 16 MiB per capture, more than a full 300 s 16 kHz recording, and
+allocates chunks only as audio arrives. The request's byte limit stays in force.
+
+`DELETE /api/v1/sessions/{id}/draft` with `{"revision":<n>}` retires every pending
+segment of the reviewed draft in one revision; a stale revision returns 409 and a
+recording or pending replacement returns busy. `/api/v1/server` reports `draft_clear`.
 
 `GET /api/v1/sessions/{id}/draft` returns one consistent draft revision and a
 metadata page. Each item includes segment identity, state, size and a preview.
@@ -152,7 +209,7 @@ Uncommitted staged text is excluded from the joined draft and discarded after a
 restart or expiry. A separate cleanup worker checks every 10 seconds for staged
 results ready for at least 60 seconds, with up to 64 sessions per pass. Append
 mode preserves its failed partial transcripts for review. Recording modes and
-commit identities are persisted in SQLite schema v2. New stores are created directly at v2. The prototype v1 migration was removed
+commit identities are persisted in SQLite. Schema v3 adds device diagnostic reports; v2 stores migrate in place and new stores are created directly at v3. The prototype v1 migration was removed
 after the user authorized deleting old sessions. Unsupported schema versions
 are rejected explicitly.
 
@@ -171,7 +228,8 @@ required capabilities before connecting.
 The device and management page select one complete user/assistant exchange with
 `GET /api/v1/sessions/{id}/turn`. The response contains `message` metadata and
 `before`/`after` message IDs. A session with no sent messages returns
-`{"message":null,"before":"","after":""}`. Select one historical exchange with
+`{"message":null,"before":"","after":""}`. `index` (1-based) and `total` give
+the exchange's position among the session's exchanges. Select one historical exchange with
 exactly one `message=<uuid>`, `before=<uuid>` or `after=<uuid>` query. Neighbor
 selection is scoped to the current session and returns 404 at either boundary.
 Malformed or repeated selectors return 400.
@@ -237,15 +295,18 @@ reply window, with `part=input` for the submitted snapshot.
 or unconfirmed outcome, provided later messages have not advanced the session.
 Recovery uses the same Chat Completions request identity with `stream: false`
 to obtain a complete reply. It atomically replaces the earlier partial reply.
-A changed endpoint or credential prevents submission under a new identity scope.
+A changed endpoint or credential blocks automatic submission under the new identity
+and marks the message `unconfirmed` with `hermes_identity_changed`. An explicit
+retry confirms resubmission and moves the message to the current identity scope.
 This recovery targets Hermes' canonical durable-admission mode; verify the
 deployed mode's idempotency behavior before live use. Legacy streaming retries
 have different guarantees.
 
-## Device event stream
+## Event stream
 
 `GET /api/v1/events?session_id=<uuid>` subscribes to one session; omitting the
-filter subscribes globally. A connection starts with `resync`. Read current
+filter subscribes globally. The web page uses it; the device polls turn
+metadata instead. A connection starts with `resync`. Read current
 turn metadata and complete message content to establish a baseline. Events include
 `session.updated`, `draft.updated`, `chat.delta`, `chat.reset`, and
 `message.updated`. Chat deltas carry a UTF-8 byte offset. A zero offset may be omitted by JSON
@@ -258,6 +319,61 @@ metadata and complete message snapshots support recovery after an event gap. SSE
 is transient. Approval prompts are surfaced as attention states; detailed
 approval controls remain a subsequent product decision.
 
+## Spoken replies
+
+`GET /api/v1/sessions/{id}/messages/{message}/speech` streams a reply's voice.
+The gateway waits until Hermes has finished the reply, drops Markdown markup,
+code blocks and link targets line by line, and synthesizes the whole reply in
+one request, so speech has no per-sentence start-up gaps. The response is
+framed binary: one kind byte, a little-endian uint16 length, then the payload.
+Kind 1 starts speech (uint16 index 0 and the first 240 bytes of the text; the
+device shows the reply text it fetched itself), kind 2 carries 16 kHz PCM16LE
+mono audio in 128 ms frames, and kind 3 ends the stream with a status byte
+(0 done, 1 failed, 2 cancelled, 3 size limit). Kind 4 is an empty keepalive
+sent every 5 s while no other frame is ready, so a device's read timeout
+survives a long think.
+
+Audio is released once 1 s is ready; synthesis then runs faster than playback
+and stays ahead. The stream is cached in the gateway: synthesis starts on the
+first request for a reply and is shared, later listeners replay from the
+beginning, and `?offset=<bytes>` resumes a dropped connection at any byte of the
+cached stream, even mid-frame (keepalives are not part of the cache and are not
+counted; none is sent until a resumed connection has reached its offset, since
+the device may be inside a frame). Ten seconds after the last listener leaves an unfinished stream,
+synthesis stops; a later request redoes it. Finished streams stay replayable
+for ten minutes, up to eight streams, and one reply is bounded to 16 MiB of
+audio and 8000 bytes of text. `/api/v1/server` reports `speech`.
+
+`VOICE_TTS_PROVIDER` is `openai` (default), `fake` (a soft chime, 100 ms per
+character, for development) or `off`. OpenAI deprecated its Speech API models
+(`gpt-4o-mini-tts`, `tts-1`, `tts-1-hd`; shutdown 2027-01-06), so the gateway
+uses the Realtime API as a reader: `OPENAI_TTS_MODEL` defaults to
+`gpt-realtime-2.1-mini` and `OPENAI_TTS_VOICE` to `marin` at
+`OPENAI_TTS_URL` (`wss://api.openai.com/v1/realtime`). Each reply is one
+out-of-band `response.create` (`conversation: "none"`, empty input) whose
+instructions say the text verbatim; 24 kHz output is downsampled to 16 kHz
+with a windowed-sinc low-pass. A request fails after 20 s without upstream
+events and is bounded to 10 minutes. One configured session is kept warm like the
+transcription session. A live check from the deployment host on 2026-11-15
+read Chinese, English and mixed sentences verbatim with the first audio after
+0.64–0.87 s; opening a session through the proxy took 3.7 s.
+
+## Device diagnostic reports
+
+`POST /api/v1/device/logs` accepts one JSON report of at most 64 KiB from a
+terminal, with the device bearer key. It carries firmware version and build,
+trigger, boot count, reset reason, uptime, heap figures, up to 1024 events
+`[boot, ms, type, a, b, tag]` and up to 16 KiB of warning/error log lines. Malformed
+reports return 400. The raw report is stored in SQLite (the newest 100 are
+kept) and one warning line with the report ID and a summary is logged.
+`GET /api/v1/device/logs` lists report metadata; `GET /api/v1/device/logs/{id}`
+renders a Chinese text timeline, with `format=json` returning the raw upload.
+Events from the reporting boot get wall-clock times derived from the gateway's
+receive time. The web page opens the same list from the sidebar. Reports hold
+event codes and log lines only, never audio, transcripts or credentials.
+`internal/diag/testdata/report.json` is produced by the firmware encoder and
+pins the wire format.
+
 ## Tests and build artifacts
 
 `go test -race ./...` covers SQLite draft/send transitions, concurrency,
@@ -268,8 +384,21 @@ exercises editing and sending, and verifies persistence after a restart.
 
 `tools/build-server.sh amd64` and `arm64` produce CGO-free Linux binaries under
 `build/server/linux-<arch>/`, with SHA256SUMS. GitHub Actions runs the checks
-and uploads both architecture artifacts. Real provider credentials, LAN mDNS,
+and uploads both architecture artifacts. A `v*` tag also publishes them as
+release assets. Real provider credentials, LAN mDNS,
 microphone accuracy/latency and device RAM remain integration acceptance work.
+
+## Web chat validation on 2026-11-15
+
+Go tests passed, including the public asset check for `/ui/icon.svg`. A local
+gateway with fake ASR and a fake streaming Hermes was driven in headless
+Chromium: key rejection and sign-in, first-send session creation and titling,
+streaming with Markdown tables, nested lists and code blocks, a second message,
+a device-appended draft appearing in the composer, a staged device recording
+showing its live transcript and committed text, Ctrl+K, rename, reload with a
+`#/c/` link, remembered key, dark theme, deletion, and a 390-pixel layout
+without horizontal scrolling. The deployed gateway still needs a check against
+the live Hermes.
 
 ## Management validation on 2026-11-13
 

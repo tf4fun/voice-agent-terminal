@@ -30,9 +30,9 @@ static inline agent_status_layout_t agent_status_layout(int width, int height)
 {
     const int panel_width = width - 32;
     return (agent_status_layout_t){
-        .x = 16, .y = 52 + (height - 52 - 24 - 148) / 2,
-        .width = panel_width, .height = 148,
-        .icon_x = (panel_width - 40) / 2, .icon_y = 0, .icon_size = 40,
-        .title_y = 48, .detail_y = 84,
+        .x = 16, .y = 52 + (height - 52 - 24 - 172) / 2,
+        .width = panel_width, .height = 172,
+        .icon_x = (panel_width - 64) / 2, .icon_y = 0, .icon_size = 64,
+        .title_y = 76, .detail_y = 110,
     };
 }

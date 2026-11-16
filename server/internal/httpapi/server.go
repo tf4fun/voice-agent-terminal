@@ -31,6 +31,7 @@ func New(service *gateway.Service) http.Handler {
 	mux.HandleFunc("GET /{$}", managementAsset(managementHTML, "text/html; charset=utf-8"))
 	mux.HandleFunc("GET /ui/app.css", managementAsset(managementCSS, "text/css; charset=utf-8"))
 	mux.HandleFunc("GET /ui/app.js", managementAsset(managementJS, "text/javascript; charset=utf-8"))
+	mux.HandleFunc("GET /ui/icon.svg", managementAsset(managementIcon, "image/svg+xml"))
 	handle := func(pattern string, handler http.HandlerFunc) {
 		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
 			for _, parameter := range []string{"session", "segment", "message"} {
@@ -56,6 +57,7 @@ func New(service *gateway.Service) http.Handler {
 	handle("GET /api/v1/sessions/{session}/draft", s.draft)
 	handle("GET /api/v1/sessions/{session}/draft/text", s.draftText)
 	handle("GET /api/v1/sessions/{session}/draft/content", s.draftContent)
+	handle("DELETE /api/v1/sessions/{session}/draft", s.clearDraft)
 	handle("POST /api/v1/sessions/{session}/segments", s.addSegment)
 	handle("PATCH /api/v1/sessions/{session}/segments/{segment}", s.editSegment)
 	handle("DELETE /api/v1/sessions/{session}/segments/{segment}", s.editSegment)
@@ -71,6 +73,10 @@ func New(service *gateway.Service) http.Handler {
 	handle("GET /api/v1/sessions/{session}/messages/{message}", s.message)
 	handle("GET /api/v1/sessions/{session}/messages/{message}/text", s.messageText)
 	handle("POST /api/v1/sessions/{session}/messages/{message}/retry", s.retry)
+	handle("GET /api/v1/sessions/{session}/messages/{message}/speech", s.speech)
+	handle("POST /api/v1/device/logs", s.addDeviceReport)
+	handle("GET /api/v1/device/logs", s.deviceReports)
+	handle("GET /api/v1/device/logs/{report}", s.deviceReport)
 	protected := http.NewCrossOriginProtection().Handler(mux)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
@@ -180,7 +186,8 @@ func (s *Server) capabilities(w http.ResponseWriter, r *http.Request) {
 		"draft_text": true, "replace_recording": true, "staged_recording": true, "replacement_reservation": true, "conversation_windows": true, "whole_messages": true, "reply_sse": true,
 		"max_draft_bytes": model.MaxDraftBytes, "max_segments": model.MaxSegments,
 		"max_text_window_bytes": model.WindowBytes, "max_event_bytes": 1024,
-		"max_audio_ms": s.service.Config.CaptureTimeout.Milliseconds(),
+		"max_audio_ms": s.service.Config.CaptureTimeout.Milliseconds(), "device_logs": true, "draft_clear": true,
+		"speech": s.service.SpeechEnabled(), "speech_format": "pcm_s16le", "speech_rate": 16000,
 	})
 }
 
@@ -300,6 +307,9 @@ func (s *Server) draft(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"revision": session.Revision, "items": items, "limit": limit, "offset": offset, "has_more": hasMore, "total": total})
 }
 
+// prepareWait bounds the transcriber handshake during segment creation.
+const prepareWait = 3 * time.Second
+
 func (s *Server) addSegment(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		ID       string `json:"id"`
@@ -330,7 +340,30 @@ func (s *Server) addSegment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.service.Events.Publish(events.Event{Type: "draft.updated", SessionID: r.PathValue("session"), SegmentID: body.ID, Revision: revision})
+	if body.Text == "" {
+		// The device is still on its preparing screen; open the transcriber now
+		// so recording starts against a ready session. Bounded below the
+		// device's 4 s request timeout.
+		s.service.PrepareCapture(body.ID, prepareWait)
+	}
 	writeJSON(w, 201, map[string]any{"id": body.ID, "revision": revision})
+}
+
+// clearDraft discards the whole reviewed draft (the device's long-press Down).
+func (s *Server) clearDraft(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Revision int64 `json:"revision"`
+	}
+	if !readJSON(w, r, &body) {
+		return
+	}
+	revision, err := s.service.Store.ClearDraft(r.Context(), r.PathValue("session"), body.Revision)
+	if err != nil {
+		storeError(w, err)
+		return
+	}
+	s.service.Events.Publish(events.Event{Type: "draft.updated", SessionID: r.PathValue("session"), Revision: revision})
+	writeJSON(w, 200, map[string]any{"revision": revision})
 }
 
 func (s *Server) editSegment(w http.ResponseWriter, r *http.Request) {
@@ -655,7 +688,7 @@ func (s *Server) retry(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 503, "hermes_not_configured")
 		return
 	}
-	if err := s.service.Store.Retry(r.Context(), r.PathValue("session"), r.PathValue("message")); err != nil {
+	if err := s.service.Store.Retry(r.Context(), r.PathValue("session"), r.PathValue("message"), s.service.Hermes.Scope()); err != nil {
 		storeError(w, err)
 		return
 	}

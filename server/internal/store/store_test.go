@@ -146,7 +146,7 @@ func TestRestartKeepsInputAndRequiresSameMessageRecovery(t *testing.T) {
 	if err != nil || recovered.State != "unconfirmed" || recovered.Input != "保留文字" {
 		t.Fatalf("recovery: %+v %v", recovered, err)
 	}
-	if err := st.Retry(ctx, session, message.ID); err != nil {
+	if err := st.Retry(ctx, session, message.ID, "scope"); err != nil {
 		t.Fatal(err)
 	}
 	retained, err := st.Message(ctx, session, message.ID)

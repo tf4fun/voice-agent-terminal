@@ -14,10 +14,22 @@ Original font hashes, converter version, character inventory and generated
 payload identities are recorded in manifest.json. Reproduction is implemented
 by tools/generate_memo_fonts.py in the repository root.
 
-The 16 px Bold chat inventory includes all 6,763 GB2312 Chinese characters,
-including level-two characters such as U+6E25, and common Chinese/typographic
-punctuation including curly quotes, en/em dashes and ellipsis. The 20 px Regular
+The 16 px Bold chat inventory includes all of GB2312 (Chinese levels and symbol
+rows), all GBK ideographs U+4E00-U+9FA5, and the Latin, Greek, Cyrillic, kana,
+arrow, math, enclosed numeral, box drawing, symbol and fullwidth glyphs present
+in Noto Sans SC. The 20 px Regular
 UI subset includes these punctuation glyphs and falls
 back to the chat font. The 16 px Regular metadata subset covers printable ASCII
 for dates and battery percentages. Each output has a separate inventory and
 payload hash in manifest.json. Font bitmaps and tables are const Flash resources.
+
+Noto Emoji, Version 3.002 (monochrome, default wght 400 instance)
+Copyright 2013 Google LLC
+
+Source: https://github.com/google/fonts/tree/b979dba422e445492b0eb9951ac52ee0b4d648c3/ofl/notoemoji
+Source font name: NotoEmoji[wght].ttf
+Derived application font name: memo_font_emoji_16
+
+Noto Emoji is licensed under the SIL Open Font License 1.1. Its license text,
+with its own copyright line, is in OFL-NotoEmoji.txt. The derived 16 px font
+contains only emoji absent from Noto Sans SC and is the chat font's fallback.

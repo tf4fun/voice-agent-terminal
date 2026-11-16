@@ -7,8 +7,8 @@
 ## Agreed boundaries
 
 The handheld connects to the Go gateway discovered through mDNS. Go integrates
-with the existing Hermes API and OpenAI transcription. Credentials and upstream
-TLS connections live on the gateway.
+with the existing Hermes API and OpenAI transcription and speech synthesis.
+Credentials and upstream TLS connections live on the gateway.
 
 The initial chat integration uses Hermes `POST /v1/chat/completions` with
 `X-Hermes-Session-Id` and streaming replies. Go coordinates session creation,
@@ -19,10 +19,10 @@ against the selected Hermes version before depending on them.
 
 | Owner | Data and responsibilities |
 | --- | --- |
-| Device | Selected session, reviewed draft revision, one complete user input and one complete Hermes reply in RAM, local reading position, bounded audio transport buffers and interaction state |
-| Go | Device-to-Hermes session mapping, paginated session index, persistent drafts and segment order, complete message snapshots and retry identities, bounded SSE delivery and filtered reply storage |
+| Device | Selected session, reviewed draft revision, one complete user input and one complete Hermes reply in RAM, local reading position, bounded audio capture and playback buffers and interaction state |
+| Go | Device-to-Hermes session mapping, paginated session index, persistent drafts and segment order, complete message snapshots and retry identities, bounded SSE delivery, filtered reply storage and the cached spoken-reply streams |
 | Hermes | Conversation history, model context, session runtime and configured agent capabilities |
-| OpenAI | Transcription of the audio submitted by Go |
+| OpenAI | Transcription of the audio submitted by Go and synthesis of the completed reply text Go submits for speech |
 
 Go's session index serves the device's view of Hermes sessions. Creation and
 deletion have persisted pending states for interrupted-operation recovery.
@@ -40,8 +40,9 @@ loads another complete user/assistant exchange when requested. RAM allocation
 follows the selected text's actual size, and leaving the conversation releases
 its cache. Session-list pagination remains independent of message reading.
 
-Hermes replies arrive at the device cache through SSE. The card displays its
-status graphic and animation throughout generation. Completion reveals the
+While Hermes writes a reply the device polls only the turn's state, then
+fetches the complete reply into its cache (the web page streams it through
+SSE). The card displays its status graphic and animation throughout generation. Completion reveals the
 whole reply at its beginning. Up/down input controls the local reading position.
 The compact header combines the page title, time and battery. The role and
 status share the card's first row. The user can view their own input while
@@ -97,13 +98,28 @@ commit. Confirm account access, accepted formats and latency using real audio.
 Match upstream events by item identity and segment generation.
 
 The device streams mono PCM16 at 16 kHz over chunked HTTP and requires a
-connected gateway. An 8 KiB audio buffer bounds capture buffering. Bounded live
+connected gateway. A 16 KiB PCM buffer, shared with spoken-reply playback,
+bounds capture buffering. Bounded live
 transcription previews serve recording, and committed input is read as complete
 text for review. Hardware acceptance of the new complete-message revision
 remains NOT RUN.
 Benchmark capture and networking together on AI Passport, including total free
 heap, largest free block, stack high-water marks and bounded-backpressure behavior.
 The current voice-memo recording/upload lifecycle is an implementation reference.
+
+## Spoken replies
+
+When the gateway reports `speech`, the device reads each new newest reply of the
+open session aloud. Go waits until Hermes has finished the reply, removes
+Markdown marks, code blocks and link targets, and synthesizes the whole reply in
+one OpenAI Realtime request. Go frames the 16 kHz PCM16 result and caches the
+stream, so listeners share one synthesis and a dropped connection resumes at its
+exact byte offset. The device plays it through the PCM buffer it shares with
+recording; recording, a long Down and leaving the session stop playback. Framing,
+limits and provider settings are in the [server contract](server.md#spoken-replies)
+and playback buffering is in the
+[firmware guide](firmware.md#voice-first-sessions-and-spoken-replies). Device
+acceptance of spoken replies on the newest build needs its own evidence.
 
 ## Chat and recovery
 
@@ -119,7 +135,7 @@ device state after a broken connection. Reconnection reconciles the same message
 with cached output or upstream state. Active execution, retry evidence and reply
 delivery have separate lifetimes.
 
-For device recovery, establish the session SSE subscription before reading the
+For SSE clients (the web page) recovery, establish the session SSE subscription before reading the
 complete message snapshot. The initial `resync` event triggers metadata and full
 body reads. Returned UTF-8 byte lengths establish the delta baseline. Matching
 `chat.delta` offsets append to the same reply, already represented offsets are
@@ -144,14 +160,15 @@ interaction remains an open product decision.
 ## Discovery and device API
 
 The mDNS record names the Go service and advertises a protocol version. The
-gateway's capability response describes available chat, draft and transcription
-features. The implemented service type, routes, payload bounds and recovery
+gateway's capability response describes available chat, draft, transcription
+and speech features. The implemented service type, routes, payload bounds and recovery
 semantics are recorded in the [server contract](server.md).
 
-The server accepts HTTP PCM16 audio uploads and sends bounded SSE events. Audio
-upload and reply delivery have independent flow control. The device reads whole
-message snapshots and appends reply events into its selected RAM cache. Metadata
-polling supports discovery and recording state. Device memory and latency for
+The server accepts HTTP PCM16 audio uploads and sends bounded SSE events to the
+web page. Audio upload and reply delivery have independent flow control. The
+device polls turn metadata while a reply is written and then reads the whole
+message snapshot into its selected RAM cache. Metadata polling also supports
+discovery and recording state. Device memory and latency for
 this revision need hardware measurements. OpenAI's realtime transport runs in Go.
 
 ## References

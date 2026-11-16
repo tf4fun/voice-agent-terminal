@@ -21,7 +21,7 @@ void memo_fonts_init(void)
     s_body.fallback = &s_label;
 
     s_label = memo_font_16;
-    s_label.fallback = NULL;
+    s_label.fallback = &memo_font_emoji_16;
 
     s_ready = true;
 }
@@ -109,6 +109,14 @@ void memo_font_filter_text(char *text, bool body)
                 cp = *p & (n == 2 ? 0x1F : n == 3 ? 0x0F : 0x07);
                 for (size_t i = 1; i < n; i++) cp = (cp << 6) | (p[i] & 0x3F);
             }
+        }
+        // Variation selectors, joiners, keycap marks and skin-tone modifiers
+        // only shape neighbouring emoji; drop them instead of drawing '?'.
+        if (valid && (cp == 0x200B || cp == 0x200C || cp == 0x200D || cp == 0x2060 || cp == 0x20E3 ||
+                      cp == 0xFEFF || (cp >= 0xFE00 && cp <= 0xFE0F) || (cp >= 0x1F3FB && cp <= 0x1F3FF) ||
+                      (cp >= 0xE0000 && cp <= 0xE007F))) {
+            p += n;
+            continue;
         }
         lv_font_glyph_dsc_t glyph = {0};
         if ((cp == '\n' || cp == '\t') ||

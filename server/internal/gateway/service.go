@@ -14,6 +14,7 @@ import (
 	"github.com/tf4fun/voice-agent-terminal/server/internal/hermes"
 	"github.com/tf4fun/voice-agent-terminal/server/internal/model"
 	"github.com/tf4fun/voice-agent-terminal/server/internal/store"
+	"github.com/tf4fun/voice-agent-terminal/server/internal/tts"
 )
 
 type capture struct {
@@ -21,21 +22,33 @@ type capture struct {
 	cancel     context.CancelFunc
 }
 
+// preparedTTL bounds how long an unused upstream session stays open.
+var preparedTTL = 30 * time.Second
+
+type preparedCapture struct {
+	session asr.Prepared
+	timer   *time.Timer
+}
+
 type Service struct {
 	Store        *store.Store
 	Config       config.Config
 	Hermes       *hermes.Client
 	ASR          asr.Transcriber
+	TTS          tts.Synthesizer // Optional; nil disables spoken replies.
 	Events       *events.Hub
 	Log          *slog.Logger
 	mu           sync.Mutex
 	lifecycleMu  sync.Mutex
 	lifecycles   map[string]*sessionLifecycleLock
 	captures     map[string]capture
+	prepared     map[string]*preparedCapture
 	captureSlots chan struct{}
 	wake         chan struct{}
 	workers      sync.WaitGroup
 	cancel       context.CancelFunc
+	ctx          context.Context
+	speech       speechStreams
 }
 
 func New(st *store.Store, cfg config.Config, client *hermes.Client, transcriber asr.Transcriber, logger *slog.Logger) *Service {
@@ -44,6 +57,7 @@ func New(st *store.Store, cfg config.Config, client *hermes.Client, transcriber 
 		Events: events.NewHub(), Log: logger,
 		lifecycles:   make(map[string]*sessionLifecycleLock),
 		captures:     make(map[string]capture),
+		prepared:     make(map[string]*preparedCapture),
 		captureSlots: make(chan struct{}, 4),
 		wake:         make(chan struct{}, 1),
 	}
@@ -52,6 +66,19 @@ func New(st *store.Store, cfg config.Config, client *hermes.Client, transcriber 
 func (s *Service) Start(parent context.Context) {
 	ctx, cancel := context.WithCancel(parent)
 	s.cancel = cancel
+	s.mu.Lock()
+	s.ctx = ctx
+	s.mu.Unlock()
+	// Keep a configured speech session warm for the next spoken reply.
+	if warm, ok := s.TTS.(interface{ Run(context.Context) }); ok && s.TTS.Enabled() {
+		s.workers.Add(1)
+		go func() { defer s.workers.Done(); warm.Run(ctx) }()
+	}
+	// Keep a configured transcription session warm for the next recording.
+	if warm, ok := s.ASR.(interface{ Run(context.Context) }); ok && s.ASR.Enabled() {
+		s.workers.Add(1)
+		go func() { defer s.workers.Done(); warm.Run(ctx) }()
+	}
 	for index := 0; index < s.Config.Workers; index++ {
 		s.workers.Add(1)
 		go func() { defer s.workers.Done(); s.runMessages(ctx) }()
@@ -105,6 +132,11 @@ func (s *Service) Close() {
 	for _, active := range s.captures {
 		active.cancel()
 	}
+	for id, entry := range s.prepared {
+		entry.timer.Stop()
+		_ = entry.session.Close()
+		delete(s.prepared, id)
+	}
 	s.mu.Unlock()
 	s.workers.Wait()
 }
@@ -149,6 +181,62 @@ func (s *Service) Reconcile(ctx context.Context, session model.Session) error {
 	}
 	s.Events.Publish(events.Event{Type: "session.updated", SessionID: session.ID})
 	return err
+}
+
+// PrepareCapture opens the upstream transcription session for a recording
+// segment while the device shows its preparing animation. It waits at most
+// wait; a slower or failed handshake leaves the upload to open its own session.
+func (s *Service) PrepareCapture(segmentID string, wait time.Duration) {
+	preparer, ok := s.ASR.(asr.Preparer)
+	if !ok || s.ASR == nil || !s.ASR.Enabled() {
+		return
+	}
+	s.mu.Lock()
+	full := len(s.prepared) >= cap(s.captureSlots)
+	s.mu.Unlock()
+	if full {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), wait)
+	defer cancel()
+	started := time.Now()
+	session, err := preparer.Prepare(ctx)
+	if err != nil {
+		s.Log.Warn("transcription session not prepared", "segment_id", segmentID,
+			"elapsed_ms", time.Since(started).Milliseconds(), "error", err.Error())
+		return
+	}
+	s.Log.Info("transcription session prepared", "segment_id", segmentID, "elapsed_ms", time.Since(started).Milliseconds())
+	entry := &preparedCapture{session: session}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if old := s.prepared[segmentID]; old != nil && old.timer.Stop() {
+		_ = old.session.Close()
+	}
+	entry.timer = time.AfterFunc(preparedTTL, func() {
+		s.mu.Lock()
+		if s.prepared[segmentID] == entry {
+			delete(s.prepared, segmentID)
+		}
+		s.mu.Unlock()
+		_ = session.Close()
+	})
+	s.prepared[segmentID] = entry
+}
+
+// takePrepared hands a prepared session to exactly one upload.
+func (s *Service) takePrepared(segmentID string) asr.Prepared {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entry := s.prepared[segmentID]
+	if entry == nil {
+		return nil
+	}
+	delete(s.prepared, segmentID)
+	if !entry.timer.Stop() {
+		return nil // Expiry is already closing it.
+	}
+	return entry.session
 }
 
 func (s *Service) CancelCapture(segmentID string) {
@@ -263,7 +351,7 @@ func (s *Service) Capture(parent context.Context, sessionID, segmentID string, r
 	}
 	s.Events.Publish(events.Event{Type: "draft.updated", SessionID: sessionID, SegmentID: segmentID, Status: "capturing"})
 	finalized := false
-	err = s.ASR.Transcribe(ctx, input, rate, func(update asr.Update) error {
+	emit := func(update asr.Update) error {
 		state := "capturing"
 		if update.Final {
 			state = "ready"
@@ -279,9 +367,21 @@ func (s *Service) Capture(parent context.Context, sessionID, segmentID string, r
 		}
 		s.Events.Publish(events.Event{Type: "draft.updated", SessionID: sessionID, SegmentID: segmentID, Revision: next, Status: state})
 		return nil
-	})
+	}
+	prepared := s.takePrepared(segmentID)
+	if preparer, ok := s.ASR.(asr.Preparer); ok && prepared != nil {
+		err = preparer.TranscribePrepared(ctx, prepared, input, rate, emit)
+	} else {
+		if prepared != nil {
+			_ = prepared.Close()
+		}
+		err = s.ASR.Transcribe(ctx, input, rate, emit)
+	}
 	if err == nil && !finalized {
 		err = asr.ErrUpstream
+	}
+	if err != nil && parent.Err() == nil {
+		s.Log.Warn("transcription failed", "segment_id", segmentID, "prepared", prepared != nil, "error", err.Error())
 	}
 	return err
 }
@@ -410,4 +510,15 @@ func (s *Service) complete(parent context.Context, message model.Message) {
 		return
 	}
 	s.Events.Publish(events.Event{Type: "message.updated", SessionID: message.SessionID, MessageID: message.ID, Status: state})
+}
+
+// baseContext is the service lifetime; background work started by requests
+// (speech synthesis) outlives the request but not the service.
+func (s *Service) baseContext() context.Context {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.ctx == nil {
+		return context.Background()
+	}
+	return s.ctx
 }

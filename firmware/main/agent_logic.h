@@ -7,6 +7,7 @@ typedef enum {
     AGENT_PAGE_SESSIONS, AGENT_PAGE_CHAT,
     AGENT_PAGE_SETTINGS, AGENT_PAGE_PROVISION,
     AGENT_PAGE_PREPARING, AGENT_PAGE_RECORD,
+    AGENT_PAGE_VOICE, // A session's default view; recording happens here too.
 } agent_page_t;
 
 static const agent_page_t agent_root_pages[] = {AGENT_PAGE_SESSIONS, AGENT_PAGE_SETTINGS};
@@ -58,6 +59,6 @@ static inline agent_page_t agent_page_exit(agent_page_t page, bool editing)
 
 static inline bool agent_page_can_record(agent_page_t page)
 {
-    return page == AGENT_PAGE_SESSIONS || page == AGENT_PAGE_CHAT;
+    return page == AGENT_PAGE_SESSIONS || page == AGENT_PAGE_CHAT || page == AGENT_PAGE_VOICE;
 }
 

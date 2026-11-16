@@ -5,7 +5,7 @@
 # Voice Agent Terminal
 
 A handheld voice-chat terminal with editable message drafts, a Go gateway,
-OpenAI transcription, and Hermes Chat Completions.
+OpenAI transcription and speech, and Hermes Chat Completions.
 
 ## Project status
 
@@ -16,6 +16,9 @@ the server workflow. Real OpenAI transcription and two-turn Hermes chat passed
 on 2026-11-13 against Hermes 0.23.1. The initial AI Passport firmware implements
 sessions, recording, editable drafts and replies. Device tests passed discovery,
 recording, appended transcription, sending, reply display and settings navigation.
+The current increment adds a voice-first session view, spoken replies that the
+gateway synthesizes through the OpenAI Realtime API, a web chat client and device
+diagnostic reports; the [roadmap](docs/roadmap.md) records their validation status.
 Interaction refinement, workload memory measurements and fault recovery remain open.
 The existing [voice-memo](https://github.com/tf4fun/voice-memo) project provides
 hardware and reusable server foundations.
@@ -36,9 +39,9 @@ precedence. `/api/v1/health` reports local service health and `/api/v1/server`
 reports capabilities. Missing upstream keys leave the corresponding capability
 disabled while the local service remains inspectable.
 
-Open the server root in a browser to list sessions, preview conversations and
-delete unwanted sessions with Hermes synchronization.
-See [server configuration and API](docs/server.md) for request examples.
+Open the server root in a browser for a web chat client that shares sessions,
+drafts and replies with the device; deleting a session there also removes it
+from Hermes. See [server configuration and API](docs/server.md) for request examples.
 
 ## Validate and build
 
@@ -50,18 +53,30 @@ cd ..
 ./tools/smoke-server.sh
 ./tools/build-server.sh amd64
 ./tools/build-server.sh arm64
+./tools/test-firmware-host.sh
+./tools/ui-preview.sh
 ```
+
+The firmware host tests need only a C compiler and Python 3. `tools/ui-preview.sh`
+downloads the locked LVGL version once and renders the device screens into
+`build/ui-preview/frames/`.
+Building and flashing the firmware with ESP-IDF 5.5.3 is described in the
+[firmware guide](docs/firmware.md#build-and-validation).
 
 GitHub Actions runs the server checks and builds static Linux AMD64 and ARM64
 binaries with SHA-256 checksums. A separate ESP-IDF 5.5.3 job builds and verifies
-the ESP32-C3 firmware. Artifacts are attached to successful runs.
+the ESP32-C3 firmware. Artifacts are attached to successful runs. Pushing a
+`v*` tag runs both builds and publishes the full firmware image, both server
+binaries and a combined `SHA256SUMS` as GitHub release assets.
 
 ## Interaction
 
-1. Record a thought and view streaming transcription in a draft segment.
-2. Review the transcript in the conversation. Hold OK again to re-record it.
+1. Hold OK to record a thought and watch its live transcription.
+2. Review the transcript in the draft panel. Hold OK again to re-record it.
 3. Short-press OK to send the reviewed text directly in the selected session.
-4. Watch the waiting animation, then read the completed reply from its beginning.
+4. Watch the thinking animation. Once Hermes has finished, the device reads the
+   reply aloud (when the gateway offers speech) and the text card shows it from
+   its beginning.
 
 The device keeps one pending message. A successful re-recording replaces its
 earlier text. Sending commits the reviewed draft revision as an immutable message
@@ -73,13 +88,14 @@ completion updates the draft. The user's send action triggers Hermes.
 ```mermaid
 flowchart LR
     Device[Handheld terminal] <-->|Local device API| Gateway[Go gateway]
-    Gateway <-->|Realtime transcription| OpenAI[OpenAI]
+    Gateway <-->|Realtime transcription and speech| OpenAI[OpenAI]
     Gateway <-->|Chat Completions and sessions| Hermes[Hermes gateway]
 ```
 
 - The Go gateway advertises itself through mDNS and provides the device API.
 - OpenAI supplies streaming transcription. `gpt-live-transcribe` is the initial
-  candidate from the official guidance checked on 2026-11-13.
+  candidate from the official guidance checked on 2026-11-13. The gateway also
+  uses the OpenAI Realtime API to read completed replies aloud.
 - Hermes manages conversation history and serves Chat Completions through its
   existing API.
 - Go manages the device's session list, drafts, message identities, filtered

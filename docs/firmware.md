@@ -8,13 +8,95 @@ It adapts voice-memo's board support, Chinese fonts, settings,
 Wi-Fi and BLUFI lifecycle, immediate short-press detection and screen-off policy.
 The existing memo checkout remains the hardware reference.
 
+## Voice-first sessions and spoken replies
+
+Opening a session shows the voice view: an orb, one status line, a one-line
+strip and two key hints. Recording happens in the same view: the timer takes
+the status line and the strip shows the last ten characters of the live
+transcript. After release the strip spins while the transcript settles (no key
+acts in that moment), then expands into the draft panel. Sending collapses it
+to one line with the question while Hermes thinks: a comet arc orbits the orb,
+the bars rise in turn and the status counts the seconds waited; this lasts
+until Hermes has finished, since the device fetches the reply whole. While a
+reply is spoken the strip keeps the question, dimmed; while Hermes thinks and
+while it speaks the strip is a flat grey field without a border, marking the
+question as sent and no longer editable, unlike the bordered resting strip. The
+status reads
+"正在朗读" with the audio heard so far (such as 0:23; the full length is not
+known ahead, so there is no progress bar); when speech ends or is stopped the strip
+becomes a vertical ticker over the reply, from its first line: Markdown marks are
+dropped, every sentence starts a line, a sentence wider than the strip
+continues on further lines, and closing punctuation never starts one. Each
+line stays 220 ms per character (1.8–5 s) and the next slides up in 0.25 s;
+after the last line it rests 3 s and starts over. Up/down hold and move lines,
+the status shows the position, and 15 s without a key resumes the ticker. Notices replace the status line
+instead of overlaying other elements. The text card is the previous
+conversation page; it shows the reply once it is complete and shows
+"正在朗读" while speech plays. While Hermes writes, the device checks only the
+turn's state once a second (no SSE) and then downloads the complete reply. Two marks under the header tell the views apart.
+
+When the gateway reports `speech`, the device reads aloud each new newest
+exchange of the open session, whether it was sent from the device or from the
+web page; opening a session does not replay its last reply. `agent_speech.c`
+streams `/messages/{id}/speech` (a frame marking the start of speech, 16 kHz
+PCM and keepalives every 5 s while Hermes thinks), writes audio to the ES8311 at
+the capture format and publishes whether speech is audible, its loudness for the
+orb and the audio played so far.
+Recording stops speech before the microphone starts; long Down stops it in
+either view; leaving the session stops it. The I2S DMA ring holds only 90 ms,
+so playback is split: the stream reader passes audio straight from the HTTP
+reads into a 16 KiB buffer (about 512 ms) shared with recording
+(`agent_pcm_pool.c`; the two never run together, since recording ends
+playback), and a writer task at the capture task's priority feeds the codec
+after 400 ms of prebuffer, refilling 200 ms after running dry, with short fades
+around each dry spell so it does not click. A dropped connection resumes at the
+exact stream byte it stopped at (`?offset=`, up to three times, keepalives not
+counted), with the frame parser carried over. The speech trace event records
+underruns, the longest network gap and resumes; Wi-Fi modem sleep is held off
+while speech plays, and disconnect reasons are traced. The buffer and the
+writer are reserved once at boot: allocating them per reply fragmented the heap
+(after one spoken reply the largest free block fell from 59 KiB to 35 KiB while
+the minimum free heap reached 26.7 KiB).
+
+The resting ticker draws one still line and animates only the 0.25 s slide
+between lines, so it costs almost nothing to render. The orb sits 8 px below the mode marks so the thinking arc
+never touches the header. With a draft, long Down clears it through
+`DELETE /sessions/{id}/draft` at the reviewed revision.
+
+## Diagnostic reports
+
+The firmware keeps a diagnostic trace in RTC memory (`agent_trace.c`): the last
+160 events and about 1.5 KiB of warning/error log lines, 5.3 KiB in total. It
+survives software resets, panics and watchdog resets, and is cleared at power-on.
+Events cover button press/release, resolved gestures with page and capture
+state, page and capture transitions with heap figures, mutating HTTP requests
+and failed reads (status and elapsed time, no IDs or bodies), the audio upload
+result, the recording result flags, send requests and capture errors. Routine
+successful polls are not recorded, so they cannot flush the context.
+
+A report is uploaded to `POST /api/v1/device/logs` after a failed recording, a
+capture error, an abnormal reset (panic, watchdog, brownout, lockup) or a draft
+send within 5 s of a failed recording. The network task uploads while capture is
+idle, at most once per 15 s and 30 times per boot; a failed upload stays pending.
+The upload streams chunked JSON from a 5.3 KiB heap snapshot held only during the
+request. Reports never contain audio, transcripts or credentials.
+
+## Following messages from other clients
+
+While a conversation shows its newest exchange and that reply has settled, the
+sync task reads the session's newest turn metadata every 3 s. When the web page
+(or another client) has sent a newer message, the device switches to it, waits
+for its reply as described above and reads it aloud. Reading an older exchange is
+not interrupted.
+
 ## Screens and controls
 
 | Screen | Short press | Long press |
 | --- | --- | --- |
 | Sessions | Up/down select, crossing a page boundary loads four more sessions. OK opens the selected session. | OK creates a session and records while held. Up cycles to the next top-level page. Down sleeps. |
-| Conversation | Up/down scroll the complete local message. At its boundary, switch between input/reply or load the neighboring historical exchange. OK sends the reviewed draft directly, or retries a failed/unconfirmed reply. | OK records a new message or re-records the pending draft. Down returns to sessions. |
-| Recording | Release OK to finish transcription and show the pending text in the conversation. | Keep OK held to record. Down cancels before saving and returns to sessions. During saving, Down leaves the page while saving continues. |
+| Voice (default in a session) | Without a draft: OK opens the text card; the strip shows the last reply one line at a time and advances on its own; the first up/down press holds the line in view, then each press moves one line; past the last line, or after 15 s without a key, it advances on its own again. With a draft: OK sends it; up/down scroll it. On a failed or unconfirmed reply OK retries. | OK records (and interrupts speech). Down leaves the current state: stops speech, else clears the draft, else returns to sessions. |
+| Text card | Up/down scroll about 70 % of the visible text per press, in whole lines. At an edge a double press (second press within 0.5 s, hinted on the first) opens the previous/next message (input/reply, then neighbouring exchanges), always at its top; at the first or last message it says so. The status shows the exchange position, e.g. 第 3/7 轮. OK returns to the voice view on the newest exchange. | OK records. Down stops speech, else returns to sessions. |
+| Recording | Release OK to finish. There is no cancel while recording or transcribing. | Keep OK held to record. |
 | Settings | Up/down select, OK enters an editor or saves it. Up increases and down decreases a numeric value. | In the settings list, Up cycles to the next top-level page and Down sleeps. In an editor, Down cancels the unsaved edit and returns to settings. |
 | Provisioning | OK finishes provisioning and restores station networking. | Down finishes provisioning and returns to settings. |
 
@@ -24,7 +106,9 @@ staged first, then the device automatically confirms its atomic replacement of
 earlier pending segments. Cancellation while recording or finalizing preserves
 the earlier text. Once saving starts, Long Down leaves the page while saving
 continues. Failed re-recording preserves earlier text. Existing multi-segment drafts can be read
-as one complete joined input. Sessions and settings share a
+as one complete joined input. Each cached input, draft or reply is bounded to
+16 KiB. Longer content keeps a UTF-8 prefix, leaves the rest unread on the server,
+and ends with a notice that only the beginning is shown. Sessions and settings share a
 registered top-level page cycle. Long Up advances and wraps that cycle. Additional
 top-level pages use the same registry. Long Down sleeps at the top level and exits
 one level from detail screens. Manual sleep first pauses networking and waits for
@@ -33,7 +117,8 @@ rediscovery is available by confirming the server row in settings. Each short
 press is handled independently of the driver's multi-click events.
 
 Settings contain network, server, volume, brightness, screen-off delay,
-deep-sleep delay, theme, time zone and version. The sleep delay starts when the display goes dark.
+deep-sleep delay, theme, time zone and version. The sleep delay starts when the display goes dark;
+the screen stays on while recording, while Hermes thinks and while a reply is read aloud.
 Selected session titles scroll horizontally. Dates and unselected rows have
 bounded single-line layouts. Active pages own their widgets and animations.
 Switching pages deletes the inactive page after loading a fixed transition screen.
@@ -44,6 +129,42 @@ the title and asks Go to update Hermes. Internal IDs remain in protocol fields.
 The user authorized deletion of the two existing prototype sessions on
 2026-11-14. Both local deletion and Hermes synchronization completed. Their
 old title suffix handling and the v1 database migration were removed.
+
+## Visual refresh
+
+The refreshed interface keeps every key interaction. Warm paper-toned light and neutral dark
+palettes share a violet accent for selection, progress and icons; failures use
+the recording red. Session rows are rounded cards with a title-initial badge,
+and today's sessions show only the time. A two-dot indicator under the header
+marks the Sessions/Settings root cycle. The light palette avoids pure white,
+which glares on the small backlit panel. The recording page shows a large timer,
+a status pill, a symmetric three-bar level meter (short outer bars, tall centre)
+and a transcript card. Empty states,
+provisioning and settings use accent-tinted circular icon badges, and numeric
+setting values use large figures with a pill meter. The design adds no shadows,
+gradients or translucent layers, and its animations are the two existing
+spinners.
+
+On 2026-11-15 the user authorized segmented flashing of `e1bc3c5` (full image
+SHA-256 `39b58fd51b3c1def819678183629c5b96bb9c57939a5ec183744e6b510bc1394`,
+application 5,991,296 bytes); all three writes verified and NVS was retained.
+Application-ready free heap was 82,752 bytes with a 69,632-byte largest block.
+A three-minute observation covered two successful recordings (0.9 s and 5.8 s,
+both `audio response=200`) without a PCM queue overflow. Minimum free heap was
+71,060 bytes and the lowest sampled largest block was 65,536 bytes. The earlier
+sixteen-bar build `fcc93bb` overflowed the PCM queue once in two recordings,
+which led to the three-bar meter. A five-minute run of nine recordings then
+showed the real cause: seven succeeded (up to 57.9 s), while the first recording
+in a new session and the first after about 30 s idle overflowed at 2.8-2.9 s.
+The gateway did not read the upload until the OpenAI session reported
+`session.updated`, about 2.5 s on a cold connection through the proxy, so TCP
+backpressure filled the 8 KiB device queue. The gateway now prefetches up to
+16 MiB of upload per capture (see the server document). Minimum free heap in
+that run was 67,304 bytes with a 65,536-byte lowest largest block.
+
+`tools/ui-preview.sh` renders every screen on the host in both themes with the
+locked LVGL version and the production `agent_app.c`, writing PNG frames and
+contact sheets under `build/ui-preview/frames/`.
 
 ## Whole-message and SSE validation checkpoint
 
@@ -432,8 +553,15 @@ time-zone settings. The implementation and latest build are recorded below.
 ## Fonts and coverage
 
 Chat and session titles use Noto Sans SC Bold at 16 px. The inventory includes
-all 6,763 GB2312 level-one and level-two Chinese characters, plus Latin and
-punctuation, for 7,040 emitted code points. Chinese curly double and single quotes
+all of GB2312, including its symbol rows, all 20,902 GBK ideographs
+U+4E00-U+9FA5 for traditional and rare characters, and the Noto Sans SC glyphs
+for Latin-1/Latin Extended-A, Greek, Cyrillic, kana, arrows, math operators,
+enclosed numerals, box drawing, geometric and miscellaneous symbols and fullwidth
+forms, for 22,668 emitted code points. Temperatures such as `12°C` and `℃` render
+directly. A 16 px monochrome Noto Emoji 3.002 font supplies 1,353 emoji absent
+from Noto Sans SC as the chat font's fallback. Variation selectors, zero-width
+joiners, keycap marks and skin-tone modifiers are removed before display, so a
+joined sequence shows its component emoji. Chinese curly double and single quotes
 (U+2018/U+2019/U+201C/U+201D), en/em dashes, ellipsis and common typographic marks
 are included in both the chat and 20 px UI inventories. The reported missing
 character U+6E25 is covered. The 20 px Regular UI font falls back to this expanded
@@ -450,12 +578,15 @@ provenance accompany the assets. Reproduce the maintained payloads using the
 pinned converter and licensed source files.
 
 ```sh
-python3 tools/generate_memo_fonts.py --check \
-  --source-dir /path/to/NotoSansSC \
+python3 tools/generate_memo_fonts.py --check --fetch \
+  --source-dir /path/to/font-sources \
   --converter /path/to/lv_font_conv
 ```
 
-Host checks cover both GB2312 Chinese levels, generated payload hashes, fixed UI
+The expanded inventories add about 1.6 MB of constant Flash and no RAM.
+
+Host checks cover both GB2312 Chinese levels, the GBK ideograph range, common
+reply symbols, emoji fallback separation, generated payload hashes, fixed UI
 strings and the proportional battery width. Native LVGL checks also exercise the
 real glyph descriptors, U+6E25 rendering, the 20 px fallback and 40-line partial
 rendering. Owned whole-message snapshots preserve and render curly quotations
@@ -468,8 +599,8 @@ and accepted the revised chat spacing on `04c3dd73`.
 
 Recording streams mono PCM16 at 16 kHz over chunked HTTP to Go, which owns
 OpenAI transcription, provider credentials and upstream TLS/WebSocket connections.
-The device keeps an 8 KiB PCM queue, four session/segment metadata records and a
-512-byte live transcription preview. A completed draft is loaded in full for review.
+The device keeps a 16 KiB PCM buffer shared with spoken-reply playback, four
+session/segment metadata records and a 512-byte live transcription preview. A completed draft is loaded in full for review.
 
 The selected exchange owns one complete user input and one complete Hermes reply
 in RAM, allocated according to their actual byte lengths. History selection loads
@@ -478,27 +609,23 @@ server storage. The visible LVGL label owns a separate filtered display snapshot
 replaced and freed under the LVGL lock. Allocation failure preserves the displayed
 snapshot and reports memory pressure. Cache buffers are released before BLE startup.
 
-Device reply updates use SSE. The reader subscribes before fetching a complete
-snapshot, applies deltas by byte offset, ignores exact replayed prefixes and reloads
-the snapshot on gaps/reset. Session changes, recording and provisioning interrupt
-the stream through bounded read timeouts. The SSE inactivity timeout is 40 ms
-to reduce small-event batching in ESP-IDF's fill-oriented read. This is a
-per-read inactivity timeout, not an end-to-end delivery guarantee. Unchanged
-card background colors are not reapplied, avoiding continuous invalidation
-of a static message. Repeated transport failure invalidates
-the discovered endpoint so the gateway can be found again.
+The device does not use SSE. While a reply is being written, the sync task reads
+only the turn metadata once a second; once the state settles it fetches the
+complete reply in one read. Unchanged card background colors are not reapplied,
+avoiding continuous invalidation of a static message. Repeated transport failure
+invalidates the discovered endpoint so the gateway can be found again.
 
 Whole messages scroll locally. A left back chevron and centered, truncated title
 share the compact header with time and battery. The assistant waiting state draws
-a lightweight animated ring with three dots throughout generation. Completion
+a lightweight spinning arc throughout generation. Completion
 reveals the entire reply at its beginning, with up/down input controlling reading.
 While waiting, Up can select the user input. Failed or interrupted replies reveal
 retained text and their outcome status. Draft send and reply wait have explicit
 state labels.
 
-The device requires `whole_messages`, `reply_sse`, `draft_text`, `replace_recording`,
+The device requires `whole_messages`, `draft_text`, `replace_recording`,
 `staged_recording` and `replacement_reservation` capabilities plus bounded live-transcription and session-list
-metadata. Discovery remains `_voiceagent._tcp.local`; BLUFI advertises as
+metadata, and uses `speech` and `draft_clear` when the gateway reports them. Discovery remains `_voiceagent._tcp.local`; BLUFI advertises as
 `BLUFI_AGENT`. `CONFIG_AGENT_API_KEY` configures the optional gateway credential.
 
 ## Build and validation

@@ -8,6 +8,8 @@
 esp_err_t agent_capture_init(void);
 esp_err_t agent_capture_begin(void);
 void agent_capture_end(void);
+// Returns the shared PCM buffer once capture has stopped and its audio was read.
+void agent_capture_release(void);
 bool agent_capture_running(void);
 esp_err_t agent_capture_error(void);
 size_t agent_capture_read(void *buffer, size_t capacity, uint32_t wait_ms);

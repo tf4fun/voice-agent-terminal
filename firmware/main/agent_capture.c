@@ -1,4 +1,6 @@
 #include "agent_capture.h"
+#include "agent_trace.h"
+#include "agent_pcm_pool.h"
 
 #include <stdatomic.h>
 #include "bsp_audio.h"
@@ -30,7 +32,7 @@ static void capture_task(void *arg)
                  (unsigned)uxTaskGetStackHighWaterMark(NULL));
         while (s_requested) {
             esp_err_t err = bsp_audio_read(s_samples, sizeof(s_samples));
-            if (err != ESP_OK) { s_error = err; break; }
+            if (err != ESP_OK) { s_error = err; agent_trace(TRACE_CAPTURE_ERROR, 1, (int32_t)err, NULL); agent_trace_request(TRACE_TRIGGER_CAPTURE_ERROR); break; }
             uint32_t level = 0;
             for (size_t i = 0; i < 320; i++) level += s_samples[i] < 0 ? -(int32_t)s_samples[i] : s_samples[i];
             level = level / 320 / 128;
@@ -38,6 +40,8 @@ static void capture_task(void *arg)
             if (xStreamBufferSend(s_pcm, s_samples, sizeof(s_samples), 0) != sizeof(s_samples)) {
                 s_error = ESP_ERR_NO_MEM;
                 ESP_LOGW(TAG, "PCM queue full; network consumer is behind capture");
+                agent_trace(TRACE_CAPTURE_ERROR, 0, (int32_t)ESP_ERR_NO_MEM, NULL);
+                agent_trace_request(TRACE_TRIGGER_CAPTURE_ERROR);
                 break;
             }
             captured_samples += sizeof(s_samples) / sizeof(s_samples[0]);
@@ -59,8 +63,7 @@ static void capture_task(void *arg)
 esp_err_t agent_capture_init(void)
 {
     if (s_task != NULL) return ESP_OK;
-    if (s_pcm == NULL) s_pcm = xStreamBufferCreate(8192, 1);
-    if (s_pcm == NULL) return ESP_ERR_NO_MEM;
+    if (agent_pcm_pool_init() != ESP_OK) return ESP_ERR_NO_MEM;
     if (xTaskCreate(capture_task, "agent_pcm", 3072, NULL, 6, &s_task) != pdPASS) return ESP_ERR_NO_MEM;
     return ESP_OK;
 }
@@ -68,10 +71,14 @@ esp_err_t agent_capture_init(void)
 esp_err_t agent_capture_begin(void)
 {
     if (s_task == NULL || s_running || s_requested) return ESP_ERR_INVALID_STATE;
+    // A spoken reply was told to stop before recording; give it a moment to
+    // hand the shared buffer back.
+    StreamBufferHandle_t pcm = NULL;
+    for (int i = 0; i < 150 && (pcm = agent_pcm_pool_take(AGENT_PCM_CAPTURE)) == NULL; i++) vTaskDelay(pdMS_TO_TICKS(10));
+    if (pcm == NULL) return ESP_ERR_INVALID_STATE;
     esp_err_t err = bsp_audio_set_format(16000, 16, 1);
-    if (err != ESP_OK) return err;
-    // The producer and consumer are idle at this boundary.
-    if (xStreamBufferReset(s_pcm) != pdPASS) return ESP_ERR_INVALID_STATE;
+    if (err != ESP_OK) { agent_pcm_pool_release(AGENT_PCM_CAPTURE); return err; }
+    s_pcm = pcm;
     s_error = ESP_OK;
     s_duration = 0;
     s_requested = true;
@@ -80,11 +87,15 @@ esp_err_t agent_capture_begin(void)
 }
 
 void agent_capture_end(void) { s_requested = false; }
+void agent_capture_release(void)
+{
+    if (!agent_capture_running()) agent_pcm_pool_release(AGENT_PCM_CAPTURE);
+}
 bool agent_capture_running(void) { return s_requested || s_running; }
 esp_err_t agent_capture_error(void) { return s_error; }
 size_t agent_capture_read(void *buffer, size_t capacity, uint32_t wait_ms)
 {
-    return xStreamBufferReceive(s_pcm, buffer, capacity, pdMS_TO_TICKS(wait_ms));
+    return s_pcm != NULL ? xStreamBufferReceive(s_pcm, buffer, capacity, pdMS_TO_TICKS(wait_ms)) : 0;
 }
 uint32_t agent_capture_duration_ms(void) { return s_duration; }
 uint8_t agent_capture_level(void) { return s_level; }

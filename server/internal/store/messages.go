@@ -123,7 +123,10 @@ func (s *Store) AppendReply(ctx context.Context, id, text string) (int, error) {
 	return offset, err
 }
 
-func (s *Store) Retry(ctx context.Context, sessionID, id string) error {
+// Retry requeues an unconfirmed or failed message after explicit user confirmation.
+// The message adopts the current upstream scope, so a message stranded by a
+// Hermes URL or key change can be resent instead of failing the scope check forever.
+func (s *Store) Retry(ctx context.Context, sessionID, id, scope string) error {
 	return s.transaction(ctx, func(tx *sql.Tx) error {
 		session, err := readSession(ctx, tx, sessionID)
 		if err != nil {
@@ -147,7 +150,7 @@ func (s *Store) Retry(ctx context.Context, sessionID, id string) error {
 		if others > 0 {
 			return ErrBusy
 		}
-		_, err = tx.ExecContext(ctx, "UPDATE messages SET state='queued',attempts=attempts+1,finish_reason='',error='',updated_at=?,revision=revision+1 WHERE id=?", time.Now().UnixMilli(), id)
+		_, err = tx.ExecContext(ctx, "UPDATE messages SET state='queued',upstream_scope=?,attempts=attempts+1,finish_reason='',error='',updated_at=?,revision=revision+1 WHERE id=?", scope, time.Now().UnixMilli(), id)
 		return err
 	})
 }

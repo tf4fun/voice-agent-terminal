@@ -90,9 +90,10 @@ static inline memo_list_columns_t memo_list_columns(int row_width)
 
 static inline memo_rows_layout_t memo_rows_layout(int width, int height)
 {
-    // Keep text inside the rounded panel's 24 px horizontal safe inset.
-    const int pitch = (height - 34 - 12 + 6) / 4;
-    return (memo_rows_layout_t){.x=16,.top=34,.width=width-32,.rows=4,
+    // Keep text inside the rounded panel's 24 px horizontal safe inset. The
+    // first row starts below the header and the root-page indicator.
+    const int pitch = (height - 44 - 12 + 6) / 4;
+    return (memo_rows_layout_t){.x=16,.top=44,.width=width-32,.rows=4,
         .pitch=pitch,.row_height=pitch-6};
 }
 

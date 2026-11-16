@@ -1,0 +1,58 @@
+name: Release
+
+# Pushing a v* tag builds the verified firmware image and both static server
+# binaries through the regular CI workflows, then publishes them as release assets.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  firmware:
+    uses: ./.github/workflows/firmware.yml
+  server:
+    uses: ./.github/workflows/server.yml
+  publish:
+    needs: [firmware, server]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download firmware and server artifacts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: artifacts
+      - name: Collect release files and combined checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir release
+          cp artifacts/voice-agent-terminal-esp32c3/Voice-Agent-Terminal-full.bin release/
+          cat artifacts/voice-agent-terminal-esp32c3/Voice-Agent-Terminal-full.bin.sha256 > release/SHA256SUMS
+          for arch in amd64 arm64; do
+            cp "artifacts/voice-agent-server-linux-${arch}/voice-agent-server-linux-${arch}" release/
+            cat "artifacts/voice-agent-server-linux-${arch}/SHA256SUMS" >> release/SHA256SUMS
+          done
+          chmod 0755 release/voice-agent-server-linux-*
+          cd release
+          sha256sum --check SHA256SUMS
+          ls -l
+      - name: Publish GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --verify-tag --generate-notes --title "$TAG"
+          fi
+          gh release upload "$TAG" --clobber release/*

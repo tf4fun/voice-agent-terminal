@@ -7,7 +7,7 @@
 #include <strings.h>
 #include <errno.h>
 #include <limits.h>
-#include "agent_sse.h"
+#include "agent_trace.h"
 #include "memo_text.h"
 #include "agent_capture.h"
 #include "cJSON.h"
@@ -26,7 +26,7 @@
 
 typedef enum {
     CMD_REFRESH, CMD_OPEN, CMD_CLOSE, CMD_RECORD, CMD_SEND,
-    CMD_REVIEW, CMD_RETRY, CMD_PROVISION, CMD_PAUSE,
+    CMD_REVIEW, CMD_RETRY, CMD_PROVISION, CMD_PAUSE, CMD_CLEAR,
 } command_kind_t;
 
 typedef struct {
@@ -46,28 +46,47 @@ static atomic_bool s_resync;
 static char s_operation_body[4096], s_sync_body[8192];
 static uint8_t s_audio_chunk[1280];
 static bool s_audio_started;
+// When the last recording failed; a send shortly after one is reported.
+static _Atomic uint32_t s_record_failed_ms; // 0 = none; 32-bit for single-word atomics.
 static char s_pending_message[37];
 static uint32_t s_pending_revision;
 static int s_draft_total;
 static agent_view_t s_read_view;
+// Whole-content caches must fit the ESP32-C3 heap (about a 64 KiB largest block)
+// together with the UI snapshot copy. Longer content keeps only a UTF-8 prefix.
+#ifndef AGENT_CONTENT_MAX_BYTES
+#define AGENT_CONTENT_MAX_BYTES 16384
+#endif
+#define AGENT_TRUNCATED_NOTICE "\n\n……（内容过长，设备仅显示开头部分）"
 static char *s_input_text, *s_reply_text;
-static size_t s_reply_capacity;
+// Server byte counts; they exceed the cached prefix length when truncated.
+static size_t s_input_total, s_reply_total;
+static bool s_input_truncated, s_reply_truncated;
 static char s_cached_message[37];
 static uint32_t s_cached_draft_revision;
 static bool s_input_loaded, s_reply_loaded;
-static agent_sse_t s_events;
 
 typedef struct {
-    uint32_t revision;
+    uint32_t revision, total;
     char state[16];
+    bool truncated;
 } content_headers_t;
+
+static void reset_reply_cache(void)
+{
+    free(s_reply_text);
+    s_reply_text = NULL;
+    s_reply_total = 0;
+    s_reply_truncated = false;
+}
 
 static void clear_message_cache(void)
 {
     free(s_input_text);
-    free(s_reply_text);
-    s_input_text = s_reply_text = NULL;
-    s_reply_capacity = 0;
+    s_input_text = NULL;
+    s_input_total = 0;
+    s_input_truncated = false;
+    reset_reply_cache();
     s_cached_message[0] = '\0';
     s_cached_draft_revision = 0;
     s_input_loaded = s_reply_loaded = false;
@@ -182,12 +201,33 @@ static int read_response(esp_http_client_handle_t client, char *body, size_t cap
     return esp_http_client_get_status_code(client);
 }
 
+static const char *method_name(esp_http_client_method_t method)
+{
+    switch (method) {
+    case HTTP_METHOD_GET: return "G";
+    case HTTP_METHOD_POST: return "P";
+    case HTTP_METHOD_PATCH: return "U"; // Update; distinct from POST in the one-letter tag.
+    case HTTP_METHOD_DELETE: return "D";
+    default: return "?";
+    }
+}
+
+// Mutations and failures only; the sync task's routine reads would flood the ring.
+static void trace_request(esp_http_client_method_t method, const char *path, int status, int64_t started_us)
+{
+    if (method == HTTP_METHOD_GET && status >= 200 && status < 300) return;
+    char tag[AGENT_TRACE_TAG_BYTES];
+    agent_trace_path_tag(method_name(method), path, tag);
+    agent_trace(TRACE_HTTP, (uint16_t)status, (int32_t)((esp_timer_get_time() - started_us) / 1000), tag);
+}
+
 static int request(esp_http_client_method_t method, const char *path, const char *payload,
                    char *body, size_t capacity)
 {
     body[0] = '\0';
+    const int64_t started = esp_timer_get_time();
     esp_http_client_handle_t client = http_client(path, method);
-    if (client == NULL) return 0;
+    if (client == NULL) { trace_request(method, path, 0, started); return 0; }
     const size_t size = payload == NULL ? 0 : strlen(payload);
     if (payload != NULL) esp_http_client_set_header(client, "Content-Type", "application/json");
     int status = 0;
@@ -195,6 +235,7 @@ static int request(esp_http_client_method_t method, const char *path, const char
         status = read_response(client, body, capacity);
     esp_http_client_close(client);
     esp_http_client_cleanup(client);
+    trace_request(method, path, status, started);
     return status;
 }
 
@@ -236,8 +277,11 @@ static void discover_server(void)
             cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, "replace_recording")) &&
             cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, "staged_recording")) &&
             cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, "replacement_reservation")) &&
-            cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, "whole_messages")) &&
-            cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, "reply_sse"))) {
+            cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, "whole_messages"))) {
+            lock();
+            s_view.speech = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, "speech"));
+            s_view.draft_clear = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, "draft_clear"));
+            unlock();
             memo_discovery_confirm(&endpoint);
             notice("");
         } else {
@@ -380,7 +424,24 @@ static bool poll_text(agent_view_t *view)
     return true;
 }
 
-// Return complete UTF-8 content with one exact allocation and no JSON text copy.
+// Longest prefix of text[0, length) that does not split a UTF-8 sequence.
+static size_t utf8_complete_prefix(const char *text, size_t length)
+{
+    size_t start = length;
+    unsigned continuation = 0;
+    while (start > 0 && continuation < 4 && ((unsigned char)text[start - 1] & 0xC0) == 0x80) {
+        start--;
+        continuation++;
+    }
+    if (start == 0) return 0;
+    const unsigned char lead = (unsigned char)text[start - 1];
+    const size_t need = lead < 0x80 ? 1 : (lead & 0xE0) == 0xC0 ? 2 : (lead & 0xF0) == 0xE0 ? 3 :
+        (lead & 0xF8) == 0xF0 ? 4 : 1;
+    return length - (start - 1) >= need ? length : start - 1;
+}
+
+// Return UTF-8 content with one bounded allocation and no JSON text copy. Content
+// beyond AGENT_CONTENT_MAX_BYTES is left unread; headers report the full length.
 static int read_content(const char *path, char **text, content_headers_t *headers)
 {
     *text = NULL;
@@ -392,23 +453,27 @@ static int read_content(const char *path, char **text, content_headers_t *header
         const int64_t length = esp_http_client_fetch_headers(client);
         status = esp_http_client_get_status_code(client);
         if (status == 200 && length >= 0 && length < UINT32_MAX) {
-            char *body = malloc((size_t)length + 1);
+            const bool truncated = length > AGENT_CONTENT_MAX_BYTES;
+            const size_t wanted = truncated ? AGENT_CONTENT_MAX_BYTES : (size_t)length;
+            char *body = malloc(wanted + 1);
             if (body == NULL) {
                 notice("内存不足，请退出会话");
                 status = 0;
             } else {
                 size_t used = 0;
-                while (used < (size_t)length) {
-                    const size_t remaining = (size_t)length - used;
-                    const int capacity = remaining > INT_MAX ? INT_MAX : (int)remaining;
-                    const int received = esp_http_client_read(client, body + used, capacity);
+                while (used < wanted) {
+                    const int received = esp_http_client_read(client, body + used, (int)(wanted - used));
                     if (received <= 0) break;
                     used += (size_t)received;
                 }
+                const bool complete = used == wanted && memchr(body, '\0', used) == NULL &&
+                    (truncated || esp_http_client_is_complete_data_received(client));
+                if (complete && truncated) used = utf8_complete_prefix(body, used);
                 body[used] = '\0';
-                if (used == (size_t)length && memchr(body, '\0', used) == NULL &&
-                    memo_text_is_valid_utf8(body) && esp_http_client_is_complete_data_received(client)) {
+                if (complete && memo_text_is_valid_utf8(body)) {
                     *text = body;
+                    headers->total = (uint32_t)length;
+                    headers->truncated = truncated;
                 } else {
                     free(body);
                     status = 0;
@@ -426,16 +491,36 @@ char *agent_client_text_copy(uint32_t selection, uint32_t generation)
     lock();
     const char *source = s_view.text_kind == AGENT_TEXT_REPLY ?
         (s_reply_text == NULL ? "" : s_reply_text) : s_input_text;
-    if (s_view.text_kind == AGENT_TEXT_SEGMENT) source = s_view.text.text;
+    bool truncated = s_view.text_kind == AGENT_TEXT_REPLY ? s_reply_truncated : s_input_truncated;
+    if (s_view.text_kind == AGENT_TEXT_SEGMENT) { source = s_view.text.text; truncated = false; }
     char *copy = NULL;
     if (selection == s_view.selection && generation == s_view.text_generation && source != NULL) {
         const size_t length = strlen(source);
-        copy = malloc(length + 1);
-        if (copy != NULL) memcpy(copy, source, length + 1);
-        else {
+        const size_t suffix = truncated ? sizeof(AGENT_TRUNCATED_NOTICE) - 1 : 0;
+        copy = malloc(length + suffix + 1);
+        if (copy != NULL) {
+            memcpy(copy, source, length);
+            memcpy(copy + length, AGENT_TRUNCATED_NOTICE, suffix);
+            copy[length + suffix] = '\0';
+        } else {
             agent_copy_text(s_view.notice, sizeof(s_view.notice), "内存不足，请退出会话");
             changed();
         }
+    }
+    unlock();
+    return copy;
+}
+
+char *agent_client_part_copy(uint32_t selection, bool input)
+{
+    lock();
+    const bool loaded = input ? s_input_loaded && s_view.text_kind != AGENT_TEXT_DRAFT : s_reply_loaded;
+    const char *source = input ? s_input_text : s_reply_text;
+    char *copy = NULL;
+    if (selection == s_view.selection && loaded && source != NULL) {
+        const size_t length = strlen(source);
+        copy = malloc(length + 1);
+        if (copy != NULL) memcpy(copy, source, length + 1);
     }
     unlock();
     return copy;
@@ -451,9 +536,9 @@ static bool poll_full_draft(agent_view_t *view)
         if (still_selected(view) && s_view.text_request == view->text_request &&
             s_view.text_kind == AGENT_TEXT_DRAFT &&
             (s_view.text_loading || s_view.text.revision != s_cached_draft_revision ||
-             s_view.text.total != strlen(s_input_text) || s_view.chat_loading)) {
+             s_view.text.total != s_input_total || s_view.chat_loading)) {
             s_view.text.revision = s_cached_draft_revision;
-            s_view.text.total = (uint32_t)strlen(s_input_text);
+            s_view.text.total = (uint32_t)s_input_total;
             s_view.text_loading = s_view.chat_loading = s_view.chat_sending = false;
             s_view.chat_ready = true;
             s_view.text_generation++;
@@ -475,11 +560,13 @@ static bool poll_full_draft(agent_view_t *view)
         free(s_input_text);
         s_input_text = text;
         text = NULL;
+        s_input_total = headers.total;
+        s_input_truncated = headers.truncated;
         s_input_loaded = true;
         s_cached_message[0] = '\0';
         s_cached_draft_revision = headers.revision;
         s_view.draft_revision = s_view.text.revision = headers.revision;
-        s_view.text.total = (uint32_t)strlen(s_input_text);
+        s_view.text.total = headers.total;
         s_view.text_loading = s_view.chat_loading = s_view.chat_sending = false;
         s_view.chat_ready = true;
         s_view.text_generation++;
@@ -520,8 +607,10 @@ static bool poll_turn(agent_view_t *view)
         agent_copy_text(s_cached_message, sizeof(s_cached_message), turn.message.id);
     }
     const bool need_input = !s_input_loaded;
-    const bool need_reply = !s_reply_loaded || turn.message.revision != s_view.message.revision ||
-        turn.message.reply_bytes != (s_reply_text == NULL ? 0 : strlen(s_reply_text));
+    // The reply is fetched whole once Hermes has finished writing it.
+    const bool need_reply = !agent_message_active(turn.message.state) &&
+        (!s_reply_loaded || turn.message.revision != s_view.message.revision ||
+         turn.message.reply_bytes != s_reply_total);
     unlock();
     char *input = NULL, *reply = NULL;
     content_headers_t input_headers = {0}, reply_headers = {0};
@@ -534,17 +623,25 @@ static bool poll_turn(agent_view_t *view)
         if (read_content(path, &reply, &reply_headers) != 200 || reply == NULL) goto failed;
         if (reply_headers.revision != 0) turn.message.revision = reply_headers.revision;
         if (reply_headers.state[0] != '\0') agent_copy_text(turn.message.state, sizeof(turn.message.state), reply_headers.state);
-        turn.message.reply_bytes = (uint32_t)strlen(reply);
+        turn.message.reply_bytes = reply_headers.total;
     }
     lock();
     if (still_selected(view) && s_view.chat_request == view->chat_request &&
         s_view.capture == AGENT_IDLE && s_view.text_kind != AGENT_TEXT_DRAFT &&
         strcmp(s_cached_message, turn.message.id) == 0) {
-        if (input != NULL) { free(s_input_text); s_input_text = input; input = NULL; s_input_loaded = true; }
+        if (input != NULL) {
+            free(s_input_text);
+            s_input_text = input;
+            input = NULL;
+            s_input_total = input_headers.total;
+            s_input_truncated = input_headers.truncated;
+            s_input_loaded = true;
+        }
         if (reply != NULL) {
-            free(s_reply_text);
+            reset_reply_cache();
             s_reply_text = reply;
-            s_reply_capacity = strlen(reply) + 1;
+            s_reply_total = reply_headers.total;
+            s_reply_truncated = reply_headers.truncated;
             reply = NULL;
             s_reply_loaded = true;
         }
@@ -569,131 +666,63 @@ failed:
     return false;
 }
 
-typedef struct {
-    char session[37];
-    uint32_t selection, request;
-} watch_context_t;
-
-static bool watch_current(const watch_context_t *watch)
+// While a reply is being written, only its small turn metadata is checked;
+// once it settles (or another message takes over) the whole turn is loaded.
+static bool poll_reply_state(agent_view_t *view)
 {
+    char path[192];
+    if (view->turn_anchor[0] == '\0')
+        snprintf(path, sizeof(path), "/sessions/%s/turn", view->session_id);
+    else
+        snprintf(path, sizeof(path), "/sessions/%s/turn?message=%s", view->session_id, view->turn_anchor);
+    agent_turn_t turn;
+    const int status = request(HTTP_METHOD_GET, path, NULL, s_sync_body, sizeof(s_sync_body));
+    if (status != 200 || !agent_parse_turn(s_sync_body, &turn)) return false;
     lock();
-    const bool current = !s_paused && memo_net_has_ip() && s_view.capture == AGENT_IDLE &&
-        s_view.text_kind != AGENT_TEXT_DRAFT && s_view.selection == watch->selection &&
-        s_view.chat_request == watch->request && strcmp(s_view.session_id, watch->session) == 0;
+    const bool same = turn.present && still_selected(view) && strcmp(turn.message.id, s_view.message.id) == 0;
+    const bool active = same && agent_message_active(turn.message.state);
+    if (active && (strcmp(turn.message.state, s_view.message.state) != 0 ||
+                   turn.message.reply_bytes != s_view.message.reply_bytes)) {
+        s_view.message = turn.message;
+        s_view.turn.message = turn.message;
+        changed();
+    }
     unlock();
-    return current;
+    return active ? true : poll_turn(view);
 }
 
-static bool append_reply(const char *id, size_t offset, const char *delta)
+// A message sent from another client (the web page) only shows up in the
+// session's newest turn. While the newest turn is open and settled, check its
+// small metadata now and then and switch to a newer message when one appears;
+// reading older history is left alone.
+static bool poll_latest(agent_view_t *view)
 {
-    const size_t incoming = strlen(delta);
-    if (!memo_text_is_valid_utf8(delta)) return false;
-    lock();
-    if (strcmp(id, s_cached_message) != 0) { unlock(); return true; }
-    const size_t current = s_reply_text == NULL ? 0 : strlen(s_reply_text);
-    if (offset > current) { unlock(); return false; }
-    const size_t overlap = current - offset < incoming ? current - offset : incoming;
-    if (overlap != 0 && memcmp(s_reply_text + offset, delta, overlap) != 0) { unlock(); return false; }
-    const size_t extra = incoming - overlap;
-    if (extra == 0) { unlock(); return true; }
-    if (extra > SIZE_MAX - current - 1) { unlock(); return false; }
-    const size_t needed = current + extra + 1;
-    if (needed > s_reply_capacity) {
-        size_t capacity = s_reply_capacity + s_reply_capacity / 2;
-        if (capacity < needed) capacity = needed;
-        char *next = realloc(s_reply_text, capacity);
-        if (next == NULL) {
-            agent_copy_text(s_view.notice, sizeof(s_view.notice), "内存不足，请退出会话");
-            changed();
-            unlock();
-            return false;
-        }
-        s_reply_text = next;
-        s_reply_capacity = capacity;
-    }
-    memcpy(s_reply_text + current, delta + overlap, extra);
-    s_reply_text[current + extra] = '\0';
-    s_reply_loaded = true;
-    s_view.message.reply_bytes = (uint32_t)(current + extra);
-    agent_copy_text(s_view.message.state, sizeof(s_view.message.state), "receiving");
-    s_view.turn.message = s_view.message;
-    if (s_view.text_kind == AGENT_TEXT_REPLY) s_view.text_generation++;
-    changed();
-    unlock();
-    return true;
-}
-
-static bool stream_event(const char *json, void *context)
-{
-    watch_context_t *watch = context;
-    if (!watch_current(watch)) return false;
-    cJSON *root = cJSON_Parse(json);
-    const cJSON *type = cJSON_GetObjectItemCaseSensitive(root, "type");
-    const cJSON *id = cJSON_GetObjectItemCaseSensitive(root, "message_id");
-    bool refresh = false, ok = cJSON_IsString(type);
-    if (ok && strcmp(type->valuestring, "resync") == 0) refresh = true;
-    else if (ok && cJSON_IsString(id)) {
-        lock();
-        const bool selected = strcmp(id->valuestring, s_cached_message) == 0;
-        unlock();
-        if (selected && strcmp(type->valuestring, "chat.delta") == 0) {
-            const cJSON *text = cJSON_GetObjectItemCaseSensitive(root, "text");
-            const cJSON *offset = cJSON_GetObjectItemCaseSensitive(root, "offset");
-            const bool valid_offset = offset == NULL || (cJSON_IsNumber(offset) &&
-                offset->valuedouble >= 0 && offset->valuedouble <= UINT32_MAX &&
-                offset->valuedouble == (uint32_t)offset->valuedouble);
-            if (!cJSON_IsString(text) || !valid_offset) ok = false;
-            else refresh = !append_reply(id->valuestring, offset == NULL ? 0 : (size_t)offset->valuedouble, text->valuestring);
-        } else if (selected && (strcmp(type->valuestring, "chat.reset") == 0 ||
-                   strcmp(type->valuestring, "message.updated") == 0)) refresh = true;
-    }
-    cJSON_Delete(root);
-    if (refresh && watch_current(watch)) {
-        agent_client_copy(&s_read_view);
-        ok = poll_turn(&s_read_view);
-    }
-    return ok;
-}
-
-static bool watch_reply(agent_view_t *view)
-{
+    if (!view->turn.present || view->turn.after[0] != '\0' || view->turn_anchor[0] == '\0') return true;
     char path[112];
-    snprintf(path, sizeof(path), "/events?session_id=%s", view->session_id);
-    watch_context_t watch = {.selection = view->selection, .request = view->chat_request};
-    agent_copy_text(watch.session, sizeof(watch.session), view->session_id);
-    esp_http_client_handle_t client = http_client(path, HTTP_METHOD_GET);
-    if (client == NULL) return false;
-    esp_http_client_set_header(client, "Accept", "text/event-stream");
-    bool opened = esp_http_client_open(client, 0) == ESP_OK;
-    if (opened) opened = esp_http_client_fetch_headers(client) >= 0 && esp_http_client_get_status_code(client) == 200;
-    if (opened) {
-        // IDF reads try to fill the requested buffer. Bound the small-event tail
-        // wait to one UI frame instead of holding tokens for a quarter second.
-        esp_http_client_set_timeout_ms(client, 40);
-        memset(&s_events, 0, sizeof(s_events));
-        char bytes[256];
-        while (watch_current(&watch)) {
-            const int count = esp_http_client_read(client, bytes, sizeof(bytes));
-            if (count == -ESP_ERR_HTTP_EAGAIN) continue;
-            if (count <= 0 || !agent_sse_feed(&s_events, bytes, (size_t)count, stream_event, &watch)) break;
-            lock();
-            const bool active = agent_message_active(s_view.message.state);
-            unlock();
-            if (!active) break;
-        }
-    }
-    esp_http_client_close(client);
-    esp_http_client_cleanup(client);
+    snprintf(path, sizeof(path), "/sessions/%s/turn", view->session_id);
+    agent_turn_t latest;
+    const int status = request(HTTP_METHOD_GET, path, NULL, s_sync_body, sizeof(s_sync_body));
+    if (status != 200 || !agent_parse_turn(s_sync_body, &latest)) return false;
+    if (!latest.present || strcmp(latest.message.id, view->turn_anchor) == 0) return true;
     lock();
-    const bool active = agent_message_active(s_view.message.state);
+    const bool selected = still_selected(view) && s_view.chat_request == view->chat_request &&
+        s_view.capture == AGENT_IDLE && s_view.text_kind != AGENT_TEXT_DRAFT &&
+        strcmp(s_view.turn_anchor, view->turn_anchor) == 0;
+    if (selected) {
+        s_view.turn_anchor[0] = '\0'; // Follow the newest turn.
+        s_view.text_kind = AGENT_TEXT_REPLY;
+    }
     unlock();
-    return !watch_current(&watch) || !active;
+    if (!selected) return true;
+    agent_trace(TRACE_PAGE, 0xfe, 0, "newer turn");
+    agent_client_copy(view);
+    return poll_turn(view);
 }
 
 static void sync_task(void *arg)
 {
     (void)arg;
-    int64_t last_list = 0;
+    int64_t last_list = 0, last_latest = 0, last_state = 0;
     unsigned failures = 0;
     for (;;) {
         if (!s_paused && connected()) {
@@ -723,9 +752,23 @@ static void sync_task(void *arg)
                 }
                 if (ok && s_read_view.text_kind == AGENT_TEXT_DRAFT) ok = poll_full_draft(&s_read_view);
                 else if (ok && (urgent || s_read_view.chat_loading || !s_read_view.chat_ready)) ok = poll_turn(&s_read_view);
+                else if (ok && s_read_view.chat_ready &&
+                         !agent_message_active(s_read_view.message.state)) {
+                    const int64_t now = esp_timer_get_time();
+                    if (now - last_latest >= 3000000) {
+                        last_latest = now;
+                        ok = poll_latest(&s_read_view);
+                    }
+                }
                 agent_client_copy(&s_read_view);
-                if (ok && s_read_view.text_kind != AGENT_TEXT_DRAFT &&
-                    s_read_view.turn.present && agent_message_active(s_read_view.message.state)) ok = watch_reply(&s_read_view);
+                if (ok && s_read_view.text_kind != AGENT_TEXT_DRAFT && s_read_view.turn.present &&
+                    agent_message_active(s_read_view.message.state)) {
+                    const int64_t now = esp_timer_get_time();
+                    if (now - last_state >= 1000000) {
+                        last_state = now;
+                        ok = poll_reply_state(&s_read_view);
+                    }
+                }
             }
             if (!ok && !s_paused) {
                 lock();
@@ -829,6 +872,7 @@ static bool upload_audio(const char *session, const char *segment, uint32_t revi
     }
     agent_capture_end();
     while (agent_capture_running()) vTaskDelay(pdMS_TO_TICKS(10));
+    agent_capture_release(); // Spoken replies may use the shared buffer again.
     if (agent_capture_error() != ESP_OK || sent < 3200 || s_cancelled) ok = false;
     lock();
     s_view.capture = AGENT_FINALIZING;
@@ -842,6 +886,7 @@ static bool upload_audio(const char *session, const char *segment, uint32_t revi
             status = read_response(client, s_operation_body, sizeof(s_operation_body));
         ESP_LOGI(TAG, "audio response=%d bytes=%u network_stack=%u", status, (unsigned)sent,
                  (unsigned)uxTaskGetStackHighWaterMark(NULL));
+        agent_trace(TRACE_AUDIO, (uint16_t)status, (int32_t)sent, NULL);
         ok = status == 200 && agent_parse_revision(s_operation_body, &commit_revision) && commit_revision > 0;
     }
     // Release the upload client before allocating the commit request client.
@@ -983,6 +1028,12 @@ static void record(const command_t *command)
     ESP_LOGI(TAG, "record result saved=%d resolved=%d started=%d cancelled=%d capture_error=%d network_stack=%u",
              saved, resolved, s_audio_started, (bool)s_cancelled, (int)agent_capture_error(),
              (unsigned)uxTaskGetStackHighWaterMark(NULL));
+    agent_trace(TRACE_RECORD, (uint16_t)((saved ? 1 : 0) | (resolved ? 2 : 0) | (s_audio_started ? 4 : 0) |
+                (s_cancelled ? 8 : 0)), (int32_t)agent_capture_error(), NULL);
+    if (!saved && !s_cancelled && (s_audio_started || s_held)) {
+        s_record_failed_ms = (uint32_t)(esp_timer_get_time() / 1000) | 1;
+        agent_trace_request(TRACE_TRIGGER_RECORD_FAILED);
+    }
     if (saved) {
         audio_kept = true;
         if (create || strcmp(command->title, "新会话") == 0) name_session(session, segment);
@@ -998,7 +1049,7 @@ static void record(const command_t *command)
     } else {
         // An unresolved commit may already have saved a new session's message.
         audio_kept = !resolved;
-        notice(resolved ? "转写失败，请重新录音" : "结果待确认，请稍后重试");
+        notice(resolved ? "没有听清，请再说一次" : "结果待确认，请稍后重试");
     }
 finished:
     if (prepared) {
@@ -1141,6 +1192,21 @@ static void execute(const command_t *command)
     const bool selected = command->selection == s_view.selection;
     unlock();
     if (!selected || !connected()) { notice("请先连接服务器"); return; }
+    if (command->kind == CMD_CLEAR) {
+        snprintf(path, sizeof(path), "/sessions/%s/draft", session);
+        snprintf(body, sizeof(body), "{\"revision\":%lu}", (unsigned long)command->revision);
+        const int status = request(HTTP_METHOD_DELETE, path, body, s_operation_body, sizeof(s_operation_body));
+        uint32_t revision = 0;
+        if (status == 200 && agent_parse_revision(s_operation_body, &revision)) {
+            lock();
+            s_view.draft_revision = revision;
+            changed();
+            unlock();
+            notice("");
+        } else notice(http_notice(status));
+        s_resync = true; // The draft poll switches the view back to the exchange.
+        return;
+    }
     if (command->kind == CMD_SEND) {
         if (s_pending_message[0] == '\0' || s_pending_revision != command->revision) {
             uuid(s_pending_message);
@@ -1156,9 +1222,7 @@ static void execute(const command_t *command)
             s_view.turn = (agent_turn_t){.message = message, .present = true};
             agent_copy_text(s_cached_message, sizeof(s_cached_message), message.id);
             s_cached_draft_revision = 0;
-            free(s_reply_text);
-            s_reply_text = NULL;
-            s_reply_capacity = 0;
+            reset_reply_cache();
             s_reply_loaded = true;
             s_view.text_generation++;
             agent_copy_text(s_view.text_id, sizeof(s_view.text_id), message.id);
@@ -1204,6 +1268,66 @@ static void execute(const command_t *command)
     s_resync = true;
 }
 
+typedef struct {
+    esp_http_client_handle_t client;
+} trace_upload_t;
+
+static bool trace_chunk(void *context, const char *data, size_t length)
+{
+    trace_upload_t *upload = context;
+    char prefix[16];
+    const int size = snprintf(prefix, sizeof(prefix), "%x\r\n", (unsigned)length);
+    return write_all(upload->client, prefix, (size_t)size) && write_all(upload->client, data, length) &&
+           write_all(upload->client, "\r\n", 2);
+}
+
+// Streams the diagnostic ring as chunked JSON; a 5 KiB snapshot is held only
+// for the duration of the upload.
+static bool upload_trace(agent_trace_trigger_t trigger)
+{
+    agent_trace_store_t *snapshot = malloc(sizeof(*snapshot));
+    if (snapshot == NULL) return false;
+    agent_trace_snapshot(snapshot);
+    agent_trace_meta_t meta;
+    agent_trace_meta(&meta, trigger);
+    bool ok = false;
+    esp_http_client_handle_t client = http_client("/device/logs", HTTP_METHOD_POST);
+    if (client != NULL) {
+        esp_http_client_set_header(client, "Content-Type", "application/json");
+        trace_upload_t upload = {.client = client};
+        if (esp_http_client_open(client, -1) == ESP_OK && agent_trace_core_encode(snapshot, &meta, trace_chunk, &upload) &&
+            write_all(client, "0\r\n\r\n", 5)) {
+            char body[96];
+            const int status = read_response(client, body, sizeof(body));
+            ok = status == 201;
+            if (!ok) ESP_LOGW(TAG, "diagnostic upload status=%d", status);
+        }
+        esp_http_client_close(client);
+        esp_http_client_cleanup(client);
+    }
+    free(snapshot);
+    return ok;
+}
+
+static void report_trace(void)
+{
+    static int64_t last_us;
+    static unsigned uploads;
+    const agent_trace_trigger_t trigger = agent_trace_pending();
+    if (trigger == TRACE_TRIGGER_NONE) return;
+    lock();
+    const bool idle = s_view.capture == AGENT_IDLE;
+    unlock();
+    const int64_t now = esp_timer_get_time();
+    if (!idle || (last_us != 0 && now - last_us < 15000000)) return;
+    last_us = now;
+    if (uploads >= 30) { agent_trace_reported(trigger, false, true); return; } // Bounded per boot.
+    uploads++;
+    const bool ok = upload_trace(trigger);
+    agent_trace_reported(trigger, ok, ok); // A failed upload stays pending for a later retry.
+    ESP_LOGI(TAG, "diagnostic report trigger=%s uploaded=%d", agent_trace_trigger_name(trigger), ok);
+}
+
 static void network_task(void *arg)
 {
     (void)arg;
@@ -1220,6 +1344,7 @@ static void network_task(void *arg)
         lock();
         if (s_view.connected != online) { s_view.connected = online; changed(); }
         unlock();
+        if (online && !s_paused) report_trace();
         const int64_t now = esp_timer_get_time();
         if (!s_paused && !online && memo_net_has_ip() && now - last_search > 10000000) {
             discover_server();
@@ -1381,10 +1506,44 @@ esp_err_t agent_client_send(uint32_t revision, uint32_t selection)
         s_view.text_kind == AGENT_TEXT_DRAFT && s_view.text.revision == revision &&
         s_view.draft_revision == revision && s_view.text.total > 0;
     unlock();
+    agent_trace(TRACE_SEND, ready ? 1 : 0, (int32_t)revision, NULL);
     if (!ready) return ESP_ERR_INVALID_STATE;
+    const uint32_t failed = s_record_failed_ms;
+    if (failed != 0 && (uint32_t)(esp_timer_get_time() / 1000) - failed < 5000) agent_trace_request(TRACE_TRIGGER_SEND_AFTER_FAILURE);
     command_t c = {.kind = CMD_SEND, .revision = revision, .selection = selection};
     return queue(&c);
 }
+esp_err_t agent_client_clear_draft(void)
+{
+    lock();
+    // Like a send, only the draft revision on screen is cleared.
+    const bool ready = s_view.draft_clear && !s_view.busy && s_view.capture == AGENT_IDLE &&
+        s_view.segment_total > 0 && s_view.text_kind == AGENT_TEXT_DRAFT &&
+        s_view.draft_revision > 0 && s_view.text.revision == s_view.draft_revision;
+    command_t c = {.kind = CMD_CLEAR, .revision = s_view.draft_revision, .selection = s_view.selection};
+    unlock();
+    return ready ? queue(&c) : ESP_ERR_INVALID_STATE;
+}
+
+esp_err_t agent_client_show_latest(void)
+{
+    lock();
+    if (s_view.capture != AGENT_IDLE || s_view.turn_anchor[0] == '\0' || s_view.turn.after[0] == '\0') {
+        unlock();
+        return ESP_ERR_INVALID_STATE;
+    }
+    s_view.turn_anchor[0] = '\0';
+    s_view.text_kind = AGENT_TEXT_REPLY;
+    s_view.chat_loading = s_view.text_loading = true;
+    s_view.chat_request++;
+    s_view.text_request++;
+    s_view.text_generation++;
+    changed();
+    unlock();
+    xTaskNotifyGive(s_sync_task);
+    return ESP_OK;
+}
+
 esp_err_t agent_client_review_draft(void)
 {
     command_t command = {.kind = CMD_REVIEW};

@@ -15,6 +15,9 @@ var managementCSS []byte
 //go:embed web/app.js
 var managementJS []byte
 
+//go:embed web/icon.svg
+var managementIcon []byte
+
 func managementAsset(content []byte, contentType string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", contentType)
@@ -34,5 +37,9 @@ func managementPageRequest(r *http.Request) bool {
 	if r.Method != "GET" && r.Method != "HEAD" {
 		return false
 	}
-	return r.URL.Path == "/" || r.URL.Path == "/ui/app.css" || r.URL.Path == "/ui/app.js"
+	switch r.URL.Path {
+	case "/", "/ui/app.css", "/ui/app.js", "/ui/icon.svg":
+		return true
+	}
+	return false
 }

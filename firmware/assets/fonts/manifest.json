@@ -7,9 +7,9 @@
   "upstream": "https://github.com/notofonts/noto-cjk/tree/Sans2.004",
   "converter_version": "1.5.2",
   "converter_upstream": "https://github.com/lvgl/lv_font_conv",
-  "charset_sha256": "099be24337a8a911e9c08009b7a8c5e59e04cb979b09d5983806dcc5b91aa7ae",
-  "requested_codepoints": 7041,
-  "emitted_codepoints": 7040,
+  "charset_sha256": "3187d8311d03be2ea28501f2e02058117a0303ecefe6302b3559a3a46bed9b38",
+  "requested_codepoints": 22669,
+  "emitted_codepoints": 22668,
   "omitted_unassigned_codepoints": [
     "U+FF00"
   ],
@@ -21,6 +21,15 @@
     "NotoSansSC-Regular.otf": {
       "url": "https://raw.githubusercontent.com/notofonts/noto-cjk/Sans2.004/Sans/SubsetOTF/SC/NotoSansSC-Regular.otf",
       "sha256": "faa6c9df652116dde789d351359f3d7e5d2285a2b2a1f04a2d7244df706d5ea9"
+    },
+    "NotoEmoji-wght.ttf": {
+      "url": "https://raw.githubusercontent.com/google/fonts/b979dba422e445492b0eb9951ac52ee0b4d648c3/ofl/notoemoji/NotoEmoji%5Bwght%5D.ttf",
+      "sha256": "de6c18832938afc99caf132b39d6a30a19bac7f2e812e28db2535b4608d27551",
+      "family": "Noto Emoji",
+      "release": "3.002",
+      "copyright": "Copyright 2013 Google LLC",
+      "license": "OFL-1.1",
+      "instance": "default wght 400"
     }
   },
   "outputs": {
@@ -29,10 +38,10 @@
       "size": 16,
       "bpp": 4,
       "line_height": 31,
-      "payload_sha256": "37d871d8095c74e7d197871628dc3c6a6fa92f4ca6081a90746f47ba047dc8f8",
+      "payload_sha256": "2fc374c5fdee746f9a68461770ddbd731aacb615a214582edc0addbf6cc0111e",
       "charset": "charset.txt",
-      "charset_sha256": "099be24337a8a911e9c08009b7a8c5e59e04cb979b09d5983806dcc5b91aa7ae",
-      "emitted_codepoints": 7040,
+      "charset_sha256": "3187d8311d03be2ea28501f2e02058117a0303ecefe6302b3559a3a46bed9b38",
+      "emitted_codepoints": 22668,
       "omitted_codepoints": [
         "U+FF00"
       ]
@@ -60,7 +69,18 @@
       "payload_sha256": "c6c6880d2d3b0962ed977a91eb8c01f7359d245ffb116ca94aa2d2a91e8ab638",
       "emitted_codepoints": 95,
       "omitted_codepoints": []
+    },
+    "memo_font_emoji_16.c": {
+      "source": "NotoEmoji-wght.ttf",
+      "size": 16,
+      "bpp": 4,
+      "line_height": 19,
+      "payload_sha256": "e63033c3c5ac1012eff9527a5bd87c7ba277e2d53dceb5e3926340dd8df2c157",
+      "charset": "charset-emoji.txt",
+      "charset_sha256": "657b8273101ace59a8e50f7c7feaca6f8eb703c2579f6d6e25d9b13381702313",
+      "emitted_codepoints": 1353,
+      "omitted_codepoints": []
     }
   },
-  "coverage": "16 px chat includes both GB2312 Chinese levels and common Chinese/typographic punctuation; 20 px UI includes the same punctuation; metadata uses ASCII."
+  "coverage": "16 px chat includes all of GB2312 (Chinese levels and symbol rows), all 20,902 GBK CJK ideographs U+4E00-U+9FA5, Latin-1/Latin Extended-A, Greek, Cyrillic, kana, arrows, math, enclosed numerals, box drawing, geometric/misc symbols and fullwidth forms present in Noto Sans SC; 16 px monochrome Noto Emoji supplies emoji absent from Noto Sans SC as the chat fallback; 20 px UI covers fixed UI text; metadata uses ASCII."
 }

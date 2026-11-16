@@ -355,7 +355,7 @@ func TestStagedReadyRecoveryAfterReopen(t *testing.T) {
 }
 
 func TestUnsupportedSchemaIsRejectedWithoutMigration(t *testing.T) {
-	for _, version := range []int{1, 3} {
+	for _, version := range []int{1, 4} {
 		directory := t.TempDir()
 		path := filepath.Join(directory, "gateway.db")
 		db, err := sql.Open("sqlite", path)

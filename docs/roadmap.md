@@ -6,6 +6,21 @@
 
 ## Current increment
 
+Sessions open on a voice-first view (orb, status line, one-line strip and key
+hints) with the text card as a second view; the firmware guide describes it.
+The gateway synthesizes each completed reply in one OpenAI Realtime request and
+streams it as framed 16 kHz PCM, which the device plays through a buffer shared
+with recording and resumes by byte offset after a dropped connection. The device
+no longer subscribes to SSE: it polls the turn state once a second while Hermes
+writes and then fetches the complete reply; the web chat page keeps SSE. The
+device keeps an RTC diagnostic trace and uploads reports after failures, which
+the gateway stores and renders. Server tests, firmware host tests and the host
+UI preview cover this increment. Firmware `e1bc3c5` was flashed and measured on
+2026-11-15 (see the firmware guide); device acceptance of the voice view and
+spoken replies on the newest build needs its own evidence.
+
+## Complete-message increment
+
 The agreed device model keeps one complete user input and one complete Hermes
 reply in RAM. The gateway returns complete message bodies and neighboring
 exchange IDs. History navigation loads another whole exchange on demand.
@@ -92,7 +107,7 @@ model described above.
 
 ## Decisions to resolve through implementation
 
-- Measure the current PCM16/HTTP capture together with whole-message RAM growth and SSE recovery on the board.
+- Measure the current PCM16/HTTP capture together with whole-message RAM growth and spoken-reply playback on the board.
 - Refine draft editing and the implemented button mappings through device acceptance.
 - Validate the implemented API limits and session page size against the device.
 - Verify cache release on history/session changes and measure free heap, largest block and stack headroom for representative full messages.

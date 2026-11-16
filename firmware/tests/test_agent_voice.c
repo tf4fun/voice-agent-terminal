@@ -1,0 +1,118 @@
+#include <assert.h>
+#include <stdio.h>
+#include <string.h>
+
+#include "agent_speech_frames.h"
+#include "agent_voice.h"
+
+static void test_modes(void)
+{
+    assert(agent_voice_mode(2, true, true, "completed", true) == AGENT_VOICE_RECORDING);
+    assert(agent_voice_mode(3, false, true, "completed", false) == AGENT_VOICE_TRANSCRIBING);
+    assert(agent_voice_mode(4, false, true, "completed", false) == AGENT_VOICE_TRANSCRIBING);
+    assert(agent_voice_mode(0, true, true, "completed", true) == AGENT_VOICE_DRAFT);
+    assert(agent_voice_mode(0, false, true, "completed", true) == AGENT_VOICE_SPEAKING);
+    assert(agent_voice_mode(0, false, true, "waiting", false) == AGENT_VOICE_THINKING);
+    assert(agent_voice_mode(0, false, true, "receiving", false) == AGENT_VOICE_THINKING);
+    assert(agent_voice_mode(0, false, true, "failed", false) == AGENT_VOICE_FAILED);
+    assert(agent_voice_mode(0, false, true, "completed", false) == AGENT_VOICE_IDLE);
+    assert(agent_voice_mode(0, false, false, "", false) == AGENT_VOICE_IDLE);
+    // Trace codes stay stable for stored diagnostic reports.
+    assert(AGENT_VOICE_THINKING == 5 && AGENT_VOICE_SPEAKING == 7 && AGENT_VOICE_FAILED == 8);
+}
+
+static void test_text(void)
+{
+    assert(agent_sentence_end("好。", 3, 3) && !agent_sentence_end("3.5", 1, 1) && agent_sentence_end("end.", 3, 1));
+    assert(strcmp(agent_utf8_tail("帮我查一下天气", 3), "下天气") == 0);
+    assert(strcmp(agent_utf8_tail("ab", 5), "ab") == 0);
+}
+
+static void test_frames(void)
+{
+    // A sentence, audio split across reads, and an end frame, fed two bytes at a time.
+    const uint8_t stream[] = {1, 5, 0, 2, 0, 'h', 'i', '!', 2, 6, 0, 1, 2, 3, 4, 5, 6, 3, 1, 0, 0};
+    agent_speech_parser_t parser;
+    agent_speech_parser_reset(&parser);
+    int sentences = 0, ends = 0;
+    uint8_t audio[8];
+    size_t audio_used = 0;
+    for (size_t i = 0; i < sizeof(stream);) {
+        agent_speech_event_t event;
+        const size_t step = i + 2 <= sizeof(stream) ? 2 : 1;
+        size_t used = 0;
+        while (used < step) {
+            used += agent_speech_parse(&parser, stream + i + used, step - used, &event);
+            if (event.kind == AGENT_SPEECH_SENTENCE) {
+                sentences++;
+                assert(event.complete && event.size == 5 && event.data[2] == 'h');
+            } else if (event.kind == AGENT_SPEECH_AUDIO) {
+                memcpy(audio + audio_used, event.data, event.size);
+                audio_used += event.size;
+            } else if (event.kind == AGENT_SPEECH_END) {
+                ends++;
+                assert(event.size == 1 && event.data[0] == 0);
+            }
+        }
+        i += step;
+    }
+    assert(sentences == 1 && ends == 1 && audio_used == 6 && audio[0] == 1 && audio[5] == 6 && !parser.invalid);
+    // A long sentence keeps only its start.
+    uint8_t long_frame[3 + 600] = {1, 0x58, 0x02};
+    memset(long_frame + 3, 'x', 600);
+    agent_speech_parser_reset(&parser);
+    agent_speech_event_t event;
+    size_t at = 0;
+    do { at += agent_speech_parse(&parser, long_frame + at, sizeof(long_frame) - at, &event); } while (event.kind == 0);
+    assert(at == sizeof(long_frame) && event.size == AGENT_SPEECH_TEXT_MAX);
+    const uint8_t bad[] = {9, 0, 0};
+    agent_speech_parser_reset(&parser);
+    agent_speech_parse(&parser, bad, sizeof(bad), &event);
+    assert(parser.invalid);
+}
+
+// A connection dropped at any byte, with keepalives between frames on the
+// wire, resumes from the cached stream and yields the same audio and text.
+static void test_resume(void)
+{
+    const uint8_t cached[] = {1, 4, 0, 0, 0, 'h', 'i', 2, 5, 0, 1, 2, 3, 4, 5, 2, 3, 0, 6, 7, 8, 3, 1, 0, 0};
+    for (size_t cut = 1; cut < sizeof(cached); cut++) {
+        agent_speech_parser_t parser;
+        agent_speech_parser_reset(&parser);
+        uint8_t audio[16];
+        size_t audio_used = 0, offset = 0;
+        int sentences = 0, ends = 0;
+        // First connection: a keepalive before the stream, then `cut` stream bytes.
+        uint8_t wire[64] = {4, 0, 0};
+        memcpy(wire + 3, cached, cut);
+        const uint8_t *data = wire;
+        size_t size = 3 + cut;
+        for (int connection = 0; connection < 2; connection++) {
+            for (size_t at = 0; at < size;) {
+                agent_speech_event_t event;
+                const size_t used = agent_speech_parse(&parser, data + at, size - at, &event);
+                at += used;
+                agent_speech_track(&offset, used, &event);
+                assert(!parser.invalid);
+                if (event.kind == AGENT_SPEECH_AUDIO) { memcpy(audio + audio_used, event.data, event.size); audio_used += event.size; }
+                if (event.kind == AGENT_SPEECH_SENTENCE) { sentences++; assert(event.size == 4 && event.data[3] == 'i'); }
+                if (event.kind == AGENT_SPEECH_END) ends++;
+            }
+            agent_speech_resume(&parser, &offset);
+            data = cached + offset;
+            size = sizeof(cached) - offset;
+        }
+        assert(sentences == 1 && ends == 1 && audio_used == 8);
+        for (int i = 0; i < 8; i++) assert(audio[i] == i + 1);
+    }
+}
+
+int main(void)
+{
+    test_modes();
+    test_text();
+    test_frames();
+    test_resume();
+    puts("voice page logic and speech frames: PASS");
+    return 0;
+}
