@@ -165,11 +165,13 @@ typedef struct {
     size_t capacity;
 } speech_header_t;
 
+// Reads X-Speech-Stream. user_data points into open_stream's frame, so it is
+// cleared once the headers are in: body reads still raise events.
 static esp_err_t speech_header(esp_http_client_event_t *event)
 {
+    if (event->event_id != HTTP_EVENT_ON_HEADER) return ESP_OK;
     speech_header_t *target = event->user_data;
     if (target == NULL || target->id == NULL || target->capacity == 0 ||
-        event->event_id != HTTP_EVENT_ON_HEADER ||
         event->header_key == NULL || event->header_value == NULL) return ESP_OK;
     if (strcasecmp(event->header_key, "X-Speech-Stream") == 0)
         snprintf(target->id, target->capacity, "%s", event->header_value);
@@ -212,6 +214,7 @@ static esp_http_client_handle_t open_stream(const char *session, const char *mes
     }
     if (esp_http_client_open(client, 0) == ESP_OK && esp_http_client_fetch_headers(client) >= 0)
         *status = esp_http_client_get_status_code(client);
+    esp_http_client_set_user_data(client, NULL);
     if (*status == 200 && offset > 0 && received_id != NULL && received_id[0] != '\0' &&
         strcmp(received_id, stream_id) != 0) {
         *status = 409;

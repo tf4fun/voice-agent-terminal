@@ -275,7 +275,9 @@ approval controls remain a subsequent product decision.
 `GET /api/v1/sessions/{id}/messages/{message}/speech` streams a reply's voice.
 The gateway waits until Hermes has finished the reply, cleans complete Markdown
 structures (code blocks, links, inline code, markup) before line breaks, and
-synthesizes the whole reply in one request, so speech has no per-sentence start-up
+synthesizes the whole reply in one request (only the first 64 KiB of the reply
+are cleaned, and a link or code span longer than 1 KiB stays text, so cleaning
+costs linear time), so speech has no per-sentence start-up
 gaps. The response is framed binary with an `X-Speech-Stream` stream identity
 header: one kind byte, a little-endian uint16 length, then the payload.
 Kind 1 starts speech (uint16 index 0 and the first 240 bytes of the text; the

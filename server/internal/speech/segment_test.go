@@ -1,49 +1,30 @@
 package speech
 
 import (
-	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
-func TestSentencesFromMarkdownReply(t *testing.T) {
+func TestSpokenTextFromMarkdownReply(t *testing.T) {
 	reply := "## 天气\n周六多云，22 到 28 度。适合登山！\n\n" +
 		"1. **南门**上山，经[鸣春谷](https://example.com/a)。\n" +
 		"- 全程约 3.5 小时 🙂\n\n" +
 		"```python\nprint('skip me')\n```\n" +
 		"| 名称 | 数量 |\n| --- | ---: |\n" +
 		"详情见 https://example.com/page 。OK, see you at 9:41 PM. Bye"
-	got := Sentences(reply)
-	want := []string{"天气", "周六多云，22 到 28 度。", "适合登山！", "南门上山，经鸣春谷。", "全程约 3.5 小时",
-		"名称 ， 数量", "详情见 链接 。", "OK, see you at 9:41 PM.", "Bye"}
-	if !reflect.DeepEqual(got, want) {
+	want := "天气\n周六多云，22 到 28 度。适合登山！\n南门上山，经鸣春谷。\n全程约 3.5 小时\n" +
+		"名称 ， 数量\n详情见 链接 。OK, see you at 9:41 PM. Bye"
+	if got := SpokenText(reply); got != want {
 		t.Fatalf("got %q", got)
 	}
 }
 
 func TestCodeBlocksAreSkipped(t *testing.T) {
 	// An unclosed block at the end is dropped too.
-	got := Sentences("先看代码：\n```go\nfmt.Println(1)\n```\n结束了。\n```sh\nls")
-	if want := []string{"先看代码：", "结束了。"}; !reflect.DeepEqual(got, want) {
+	got := SpokenText("先看代码：\n```go\nfmt.Println(1)\n```\n结束了。\n```sh\nls")
+	if want := "先看代码：\n结束了。"; got != want {
 		t.Fatalf("got %q", got)
-	}
-}
-
-func TestLongRunsSplitAtSoftBreaks(t *testing.T) {
-	long := strings.Repeat("很长的一段话没有句号，", 12)
-	got := Sentences(long)
-	for _, s := range got {
-		if n := len([]rune(s)); n > MaxSentenceRunes {
-			t.Fatalf("unit of %d runes", n)
-		}
-		// Units end at a comma (trimmed when spoken), never mid-phrase.
-		if !strings.HasSuffix(s, "句号") {
-			t.Fatalf("split mid-phrase: %q", s)
-		}
-	}
-	strip := func(s string) string { return strings.ReplaceAll(s, "，", "") }
-	if strip(strings.Join(got, "")) != strip(long) {
-		t.Fatalf("lost text: %q", got)
 	}
 }
 
@@ -54,20 +35,12 @@ func TestMarkdownCleanedBeforePausesPreservesLinksAndCodeSpans(t *testing.T) {
 	if got := SpokenText(input); got != "详情：说明。" {
 		t.Fatalf("SpokenText=%q", got)
 	}
-	if got := Sentences(input); !reflect.DeepEqual(got, []string{"详情：说明。"}) {
-		t.Fatalf("Sentences=%q", got)
-	}
 
 	// Links and inline code longer than 80 runes must be cleaned whole.
 	longLabel := strings.Repeat("长标题说明文字", 15) + "。还有补充！"
 	longLink := "请查看[" + longLabel + "](https://en.wikipedia.org/wiki/Go_(programming_language))。"
 	if got := SpokenText(longLink); got != "请查看"+longLabel+"。" {
 		t.Fatalf("long link SpokenText=%q", got)
-	}
-	for _, unit := range Sentences(longLink) {
-		if strings.Contains(unit, "http") || strings.Contains(unit, "](") || strings.Contains(unit, "链接") {
-			t.Fatalf("leaked link markup in unit: %q", unit)
-		}
 	}
 
 	longCode := strings.Repeat("identifier_segment_", 6)
@@ -80,5 +53,35 @@ func TestMarkdownCleanedBeforePausesPreservesLinksAndCodeSpans(t *testing.T) {
 	fenced := "前文。\n   ~~~markdown\n```not-closing\n[inside](https://skip.example)\n~~~\n后文。"
 	if got := SpokenText(fenced); got != "前文。\n后文。" {
 		t.Fatalf("fenced SpokenText=%q", got)
+	}
+}
+
+func TestCleaningCostStaysLinear(t *testing.T) {
+	// Unmatched brackets and backticks once rescanned the rest of the reply
+	// for each opener; a 256 KiB reply of them took about 19 s.
+	for _, reply := range []string{
+		strings.Repeat("[", 2<<20),
+		strings.Repeat("![a", 1<<20),
+		strings.Repeat("[a](", 1<<20),
+		strings.Repeat("`a``", 1<<20),
+	} {
+		started := time.Now()
+		SpokenText(reply)
+		if elapsed := time.Since(started); elapsed > 3*time.Second {
+			t.Fatalf("cleaning %q… took %v", reply[:8], elapsed)
+		}
+	}
+}
+
+func TestOnlyTheStartOfAReplyIsCleaned(t *testing.T) {
+	reply := strings.Repeat("汉", MaxInputBytes/3) + "尾巴"
+	got := SpokenText(reply)
+	if strings.Contains(got, "尾巴") || len(got) > MaxInputBytes {
+		t.Fatalf("read past the input bound: %d bytes", len(got))
+	}
+	// A link longer than the span bound stays text instead of being searched for.
+	long := "[" + strings.Repeat("字", maxSpan) + "](https://example.com)"
+	if got := SpokenText(long); !strings.Contains(got, "](链接)") {
+		t.Fatalf("long link was matched: %q", got[len(got)-40:])
 	}
 }

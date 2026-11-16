@@ -1,19 +1,21 @@
 // Package speech turns a complete assistant reply into speakable plain text.
 // Replies arrive as Markdown; complete Markdown structures (code blocks, links,
 // inline code, emphasis, headings, lists and tables) are cleaned before any
-// spoken pauses or sentence breaks are handled.
+// line breaks become spoken pauses.
 package speech
 
 import (
 	"regexp"
 	"strings"
-	"unicode"
-	"unicode/utf8"
 )
 
-// MaxSentenceRunes bounds one spoken unit when splitting into sentences; a
-// longer run without sentence punctuation is split at its last soft break.
-const MaxSentenceRunes = 80
+// MaxInputBytes bounds how much of a reply is cleaned. Only the first 8000
+// bytes of spoken text are read aloud, so the rest is never needed.
+const MaxInputBytes = 64 << 10
+
+// maxSpan bounds the search for the end of one link or inline code span, so a
+// reply full of unmatched brackets or backticks costs linear time.
+const maxSpan = 1024
 
 var (
 	fenceOpen      = regexp.MustCompile("^ {0,3}(`{3,}|~{3,})(.*)$")
@@ -168,7 +170,10 @@ func finalizeLine(line string) string {
 	return line
 }
 
+// findBacktickClose finds the run of exactly n backticks closing a code span
+// opened before start, looking no further than maxSpan bytes.
 func findBacktickClose(s string, start, n int) (int, int, bool) {
+	s = s[:min(len(s), start+maxSpan)]
 	for i := start; i < len(s); {
 		if s[i] != '`' {
 			i++
@@ -186,7 +191,10 @@ func findBacktickClose(s string, start, n int) (int, int, bool) {
 	return 0, 0, false
 }
 
+// matchLink matches [label](target) or ![label](target) at start; a link
+// longer than maxSpan bytes is left as text.
 func matchLink(s string, start int) (label string, end int, ok bool) {
+	s = s[:min(len(s), start+maxSpan)]
 	pos := start
 	if pos < len(s) && s[pos] == '!' {
 		pos++
@@ -334,102 +342,11 @@ func isEmoji(r rune) bool {
 }
 
 // SpokenText converts a complete Markdown reply into clean plain text ready for
-// whole-reply speech synthesis, preserving natural line breaks as pauses.
+// whole-reply speech synthesis, preserving natural line breaks as pauses. Only
+// the first MaxInputBytes of the reply are read.
 func SpokenText(text string) string {
+	if len(text) > MaxInputBytes {
+		text = strings.ToValidUTF8(text[:MaxInputBytes], "")
+	}
 	return strings.Join(extractMarkdown(text), "\n")
-}
-
-// Clean converts one Markdown fragment to plain speakable text.
-func Clean(raw string) string {
-	return strings.Join(extractMarkdown(raw), " ")
-}
-
-// nextPlainUnit splits already-cleaned plain text into bounded spoken units.
-func nextPlainUnit(text string, offset int) (string, int, bool) {
-	rest := text[offset:]
-	trimmed := strings.TrimLeft(rest, " \t\r\n")
-	start := offset + len(rest) - len(trimmed)
-	if start >= len(text) {
-		return "", len(text), false
-	}
-	runes := 0
-	soft := -1
-	for i := start; i < len(text); {
-		r, size := utf8.DecodeRuneInString(text[i:])
-		i += size
-		runes++
-		if hardStop(r, text, i, len(text)) {
-			end := extendClosers(text, i, len(text))
-			return text[start:end], end, true
-		}
-		if softStop(r) {
-			soft = i
-		}
-		if runes >= MaxSentenceRunes {
-			if soft > start {
-				return text[start:soft], soft, true
-			}
-			return text[start:i], i, true
-		}
-	}
-	if len(text) > start {
-		return text[start:], len(text), true
-	}
-	return "", offset, false
-}
-
-func hardStop(r rune, text string, after, limit int) bool {
-	switch r {
-	case '。', '！', '？', '；', '…', '\n':
-		return true
-	case '!', '?', ';':
-		return after >= limit || isSpace(text, after)
-	case '.':
-		// A period ends a sentence only before whitespace: 3.14 and example.com do not.
-		return after < limit && isSpace(text, after)
-	}
-	return false
-}
-
-func softStop(r rune) bool {
-	switch r {
-	case '，', '、', '：', ',', ':', '）', ')':
-		return true
-	}
-	return false
-}
-
-func isSpace(text string, at int) bool {
-	r, _ := utf8.DecodeRuneInString(text[at:])
-	return unicode.IsSpace(r)
-}
-
-// extendClosers keeps closing quotes and brackets with their sentence.
-func extendClosers(text string, at, limit int) int {
-	for at < limit {
-		r, size := utf8.DecodeRuneInString(text[at:])
-		if !strings.ContainsRune("”’」』）)\"'】》", r) {
-			break
-		}
-		at += size
-	}
-	return at
-}
-
-// Sentences cleans Markdown structures first, then splits the plain text into
-// speakable units.
-func Sentences(text string) []string {
-	plain := SpokenText(text)
-	var out []string
-	for offset := 0; offset < len(plain); {
-		unit, next, ok := nextPlainUnit(plain, offset)
-		if !ok || next <= offset {
-			break
-		}
-		offset = next
-		if unit = finalizeLine(unit); unit != "" {
-			out = append(out, unit)
-		}
-	}
-	return out
 }

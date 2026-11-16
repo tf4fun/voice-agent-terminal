@@ -60,7 +60,12 @@ limit_exceeded` rather than `502 transcription_failed`; unused helpers in
 `memo_browse.h` were removed; and the firmware voice view displays `等待审批`
 for `attention` while continuing to poll and blocking new sends. Server tests,
 firmware host tests and `tools/test-web.mjs` cover each fix; device acceptance
-of the firmware changes is NOT RUN.
+of the firmware changes is NOT RUN. A follow-up bounded the new Markdown cleaning
+(it rescanned the rest of the reply for every unmatched bracket: 19 s for 256 KiB
+of `[`) to the first 64 KiB of a reply and 1 KiB per link or code span, removed
+the per-sentence splitter that only tests still used, and stopped the device's
+`X-Speech-Stream` header callback from reading a pointer into a returned stack
+frame on later body events.
 
 Sessions open on a voice-first view (orb, status line, one-line strip and key
 hints) with the text card as a second view; the firmware guide describes it.

@@ -40,7 +40,10 @@ attempt 重合成、缓存淘汰和网关重启的旧流续传；朗读文本先
 `internal/realtime` 共享 WebSocket 常驻连接池生命周期；单次转写超过 16 KiB 返回 `413
 limit_exceeded` 而非 `502 transcription_failed`；清理了 `memo_browse.h` 中未使用的旧辅助
 函数。服务端测试、固件宿主测试和 `tools/test-web.mjs` 分别覆盖；固件改动的实机验收为
-NOT RUN。
+NOT RUN。后续修正：新的 Markdown 清理对每个未配对的方括号都会重扫回复剩余部分（256 KiB
+的 `[` 需 19 秒），现限定为只清理回复前 64 KiB、每个链接或行内代码最多查找 1 KiB；删除了
+只剩测试在用的逐句切分代码；设备读取 `X-Speech-Stream` 的响应头回调不再在之后的正文事件中
+读取已返回函数栈上的指针。
 
 进入会话后先显示语音优先界面（圆点、状态行、单行文字条和按键提示），文字卡片作为
 第二个界面，详见固件指南。网关在回复完成后用一次 OpenAI Realtime 请求合成整条回复，
