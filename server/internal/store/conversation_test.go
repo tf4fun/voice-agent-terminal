@@ -22,7 +22,7 @@ func TestConversationPagesBothRolesWithoutGaps(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		id := model.NewID()
 		input := strings.Repeat("第一个问题你好", i*20+1)
-		message, _, err := st.Send(ctx, session, id, "model", "scope", input, false)
+		message, _, err := st.Send(ctx, session, id, "model", "scope", "", input, false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -108,7 +108,7 @@ func TestConversationRefreshesAnInitiallyEmptyReply(t *testing.T) {
 	ctx := context.Background()
 	st, session := fixture(t)
 	id := model.NewID()
-	if _, _, err := st.Send(ctx, session, id, "model", "scope", "我的问题", false); err != nil {
+	if _, _, err := st.Send(ctx, session, id, "model", "scope", "", "我的问题", false); err != nil {
 		t.Fatal(err)
 	}
 	page, err := st.Conversation(ctx, session, "tail", "")

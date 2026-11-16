@@ -23,6 +23,14 @@ system prompt asks for replies within 300 characters, and the device caches at
 most 8000 bytes of an input or reply, the gateway's spoken-text bound. Device
 acceptance of that change, the 140-character limit and draft clearing is NOT RUN.
 
+Review issue #3 fixes: a cancel accepted after the transcript arrives keeps the
+earlier draft (the cancel check, replacement and end of capture share one
+critical section); each message stores its system prompt, so a retry repeats
+the original request (schema v5, no migration); a session still `creating` can
+be deleted with its unsent first message; and the gateway holds at most 16
+transcriptions. Server tests and firmware host tests cover each; device
+acceptance of the firmware change is NOT RUN.
+
 Sessions open on a voice-first view (orb, status line, one-line strip and key
 hints) with the text card as a second view; the firmware guide describes it.
 The gateway synthesizes each completed reply in one OpenAI Realtime request and

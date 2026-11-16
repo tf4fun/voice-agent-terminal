@@ -22,7 +22,7 @@ func TestBusyPortDoesNotRecoverActiveMessage(t *testing.T) {
 	}
 	defer st.Close()
 	session, id := model.NewID(), model.NewID()
-	if _, _, err := st.Send(ctx, session, id, "m", "scope", "in flight", true); err != nil {
+	if _, _, err := st.Send(ctx, session, id, "m", "scope", "", "in flight", true); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.SetSessionReady(ctx, session); err != nil {

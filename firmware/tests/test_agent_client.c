@@ -57,6 +57,7 @@ static unsigned dropped_sends; // Message POSTs whose response is lost.
 enum capture_case {
     CAPTURE_NORMAL, CAPTURE_CANCEL_RECORDING, CAPTURE_CANCEL_FINALIZING, CAPTURE_SHORT,
     CAPTURE_NO_SPEECH, CAPTURE_TOO_LARGE, CAPTURE_TOO_MANY_CHARS,
+    CAPTURE_CANCEL_BEFORE_SAVE, // After upload_audio() returns text, before record() saves it.
 };
 static bool capture_mode, capture_running, cancel_accepted, audio_eof;
 static char trace_body[16384];
@@ -65,6 +66,7 @@ static unsigned trace_uploads;
 static int trace_status = 201;
 static unsigned chunks_read, cancel_attempts;
 static enum capture_case capture_case;
+static bool cancel_on_lock; // The next lock taken is record()'s save.
 static void try_cancel(void)
 {
     cancel_attempts++;
@@ -97,7 +99,12 @@ int xQueueReceive(QueueHandle_t handle, void *item, unsigned timeout)
 }
 unsigned uxQueueMessagesWaiting(QueueHandle_t handle) { return ((struct fake_queue *)handle)->count; }
 SemaphoreHandle_t xSemaphoreCreateMutex(void) { return (void *)1; }
-int xSemaphoreTake(SemaphoreHandle_t handle, unsigned timeout) { (void)handle;(void)timeout;return pdTRUE; }
+int xSemaphoreTake(SemaphoreHandle_t handle, unsigned timeout)
+{
+    (void)handle;(void)timeout;
+    if(cancel_on_lock) { cancel_on_lock=false;try_cancel(); } // Cancel just before the lock is held.
+    return pdTRUE;
+}
 int xSemaphoreGive(SemaphoreHandle_t handle) { (void)handle;return pdTRUE; }
 int xTaskCreate(void (*callback)(void *), const char *name, unsigned stack,
                 void *argument, unsigned priority, TaskHandle_t *task)
@@ -264,7 +271,11 @@ int esp_http_client_get_status_code(esp_http_client_handle_t client) { return cl
 esp_err_t esp_http_client_set_timeout_ms(esp_http_client_handle_t client,int timeout)
 { if (strstr(client->url,"/events?")) stream_timeout_ms=timeout;return ESP_OK; }
 esp_err_t esp_http_client_close(esp_http_client_handle_t client) { (void)client;return ESP_OK; }
-esp_err_t esp_http_client_cleanup(esp_http_client_handle_t client) { free(client);return ESP_OK; }
+esp_err_t esp_http_client_cleanup(esp_http_client_handle_t client)
+{
+    if(capture_case==CAPTURE_CANCEL_BEFORE_SAVE&&strstr(client->url,"/audio?"))cancel_on_lock=true;
+    free(client);return ESP_OK;
+}
 
 static void dispatch(void)
 {
@@ -446,6 +457,8 @@ static void test_upload(enum capture_case test_case)
     case CAPTURE_TOO_MANY_CHARS:
         CHECK(text&&utf8_chars(text)==AGENT_DRAFT_MAX_CHARS+1); // record() rejects it.
         break;
+    case CAPTURE_CANCEL_BEFORE_SAVE: // Covered through record() by test_late_cancel_keeps_draft().
+        break;
     }
     printf("upload case=%d status=%d text=%d cancel_accepted=%d\n",test_case,status,text!=NULL,cancel_accepted);
     free(text);
@@ -490,6 +503,19 @@ static void test_failed_rerecord_keeps_draft(enum capture_case test_case, const 
     CHECK(s_draft&&strcmp(s_draft,"旧草稿")==0&&s_view.draft_serial==serial&&s_view.draft_chars==3);
     CHECK(s_view.text_kind==AGENT_TEXT_DRAFT&&s_view.capture==AGENT_IDLE&&s_view.capture_serial==0);
     CHECK(strcmp(s_view.notice,notice_text)==0);
+    capture_mode=false;
+}
+
+// A cancel accepted after the transcript arrives keeps the earlier draft.
+static void test_late_cancel_keeps_draft(void)
+{
+    setup();hold_draft("旧草稿");
+    const uint32_t serial=s_view.draft_serial;
+    arm_capture(CAPTURE_CANCEL_BEFORE_SAVE);
+    CHECK(agent_client_record(false)==ESP_OK);dispatch();
+    CHECK(cancel_attempts==1&&cancel_accepted&&!cancel_on_lock);
+    CHECK(s_draft&&strcmp(s_draft,"旧草稿")==0&&s_view.draft_serial==serial&&s_view.capture_serial==0);
+    CHECK(s_view.capture==AGENT_IDLE&&!agent_client_cancel_record());
     capture_mode=false;
 }
 
@@ -659,6 +685,7 @@ int main(void)
     for(enum capture_case item=CAPTURE_NORMAL;item<=CAPTURE_TOO_MANY_CHARS;item++)test_upload(item);
     test_new_chat_is_created_by_its_first_send();
     test_rerecord_replaces_draft();
+    test_late_cancel_keeps_draft();
     test_failed_rerecord_keeps_draft(CAPTURE_NO_SPEECH,"没有听清，请再说一次");
     test_failed_rerecord_keeps_draft(CAPTURE_TOO_LARGE,AGENT_DRAFT_TOO_LONG);
     test_failed_rerecord_keeps_draft(CAPTURE_TOO_MANY_CHARS,AGENT_DRAFT_TOO_LONG);

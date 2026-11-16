@@ -11,6 +11,7 @@ CREATE TABLE messages (
     session_id TEXT NOT NULL REFERENCES sessions(id),
     model TEXT NOT NULL,
     upstream_scope TEXT NOT NULL,
+    system_prompt TEXT NOT NULL DEFAULT '',
     attempts INTEGER NOT NULL DEFAULT 0,
     input TEXT NOT NULL,
     reply TEXT NOT NULL DEFAULT '',

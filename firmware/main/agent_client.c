@@ -882,18 +882,25 @@ static void record(const command_t *command)
         agent_trace_request(TRACE_TRIGGER_RECORD_FAILED);
     }
     if (saved) {
+        // A cancel is accepted until capture is idle, so the cancel check, the
+        // replacement and the end of the cancellable phase share one critical
+        // section. The command keeps busy set, so no new recording starts here.
         lock();
-        if (strcmp(s_view.session_id, session) == 0) {
+        saved = !s_cancelled;
+        if (saved && strcmp(s_view.session_id, session) == 0) {
             free(s_draft);
             s_draft = text;
             text = NULL;
             s_view.draft_chars = chars;
             s_view.draft_serial++;
             s_view.capture_serial++;
-            changed();
         }
+        s_view.capture = AGENT_IDLE;
+        changed();
         unlock();
-        free(text); // The session was left while transcribing.
+        free(text); // Cancelled, or the session was left while transcribing.
+    }
+    if (saved) {
         notice("");
     } else if (s_cancelled) {
         notice("");

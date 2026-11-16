@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -35,7 +36,7 @@ func lifecycleFixture(t *testing.T, transport http.RoundTripper) (*Service, mode
 	// A session is created by its first message. Failing that message leaves a
 	// still-creating session that create, delete and rename can race over.
 	id, first := model.NewID(), model.NewID()
-	if _, _, err := st.Send(context.Background(), id, first, "m", "scope", "lifecycle", true); err != nil {
+	if _, _, err := st.Send(context.Background(), id, first, "m", "scope", "", "lifecycle", true); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.SetMessageState(context.Background(), first, "failed", "", "test"); err != nil {
@@ -439,7 +440,7 @@ func TestRetryRescopesMessageAfterHermesIdentityChange(t *testing.T) {
 		t.Fatal(err)
 	}
 	id := model.NewID()
-	if _, _, err := service.Store.Send(ctx, session.ID, id, "hermes-agent", "retired-scope", "旧身份消息", false); err != nil {
+	if _, _, err := service.Store.Send(ctx, session.ID, id, "hermes-agent", "retired-scope", "", "旧身份消息", false); err != nil {
 		t.Fatal(err)
 	}
 	claimed, err := service.Store.Claim(ctx)
@@ -508,5 +509,93 @@ func TestPreparedCaptureIsTakenOnceAndExpires(t *testing.T) {
 	service.Close()
 	if fake.sessions[2].closed.Load() != 1 {
 		t.Fatal("closing the service must close prepared sessions")
+	}
+}
+
+// A retry repeats the stored request even after the configured prompt changes,
+// so the idempotency key never stands for two different requests.
+func TestRetryRepeatsTheStoredSystemPrompt(t *testing.T) {
+	ctx := context.Background()
+	var mu sync.Mutex
+	var prompts, keys []string
+	transport := lifecycleTransport(func(r *http.Request) (*http.Response, error) {
+		var body struct {
+			Messages []struct{ Role, Content string } `json:"messages"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		mu.Lock()
+		defer mu.Unlock()
+		prompt := ""
+		if len(body.Messages) > 0 && body.Messages[0].Role == "system" {
+			prompt = body.Messages[0].Content
+		}
+		prompts, keys = append(prompts, prompt), append(keys, r.Header.Get("Idempotency-Key"))
+		if len(prompts) == 1 {
+			return nil, errors.New("connection lost")
+		}
+		response := lifecycleResponse(200, `{"choices":[{"message":{"content":"完整回复"},"finish_reason":"stop"}]}`)
+		response.Header.Set("Content-Type", "application/json")
+		return response, nil
+	})
+	service, session := lifecycleFixture(t, transport)
+	service.Config.ChatTimeout = time.Minute
+	if err := service.Store.SetSessionReady(ctx, session.ID); err != nil {
+		t.Fatal(err)
+	}
+	id := model.NewID()
+	if _, _, err := service.Store.Send(ctx, session.ID, id, "hermes-agent", service.Hermes.Scope(), "旧提示", "问题", false); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := service.Store.Claim(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.complete(ctx, claimed)
+	if lost, err := service.Store.Message(ctx, session.ID, id); err != nil || lost.State != "unconfirmed" {
+		t.Fatalf("lost connection: %+v %v", lost, err)
+	}
+	service.Config.HermesPrompt = "新提示" // Changed and restarted while the message was unconfirmed.
+	if err := service.Store.Retry(ctx, session.ID, id, service.Hermes.Scope()); err != nil {
+		t.Fatal(err)
+	}
+	if claimed, err = service.Store.Claim(ctx); err != nil {
+		t.Fatal(err)
+	}
+	service.complete(ctx, claimed)
+	done, err := service.Store.Message(ctx, session.ID, id)
+	if err != nil || done.State != "completed" || done.Reply != "完整回复" {
+		t.Fatalf("recovered: %+v %v", done, err)
+	}
+	if len(prompts) != 2 || prompts[0] != "旧提示" || prompts[1] != "旧提示" || keys[0] != keys[1] {
+		t.Fatalf("prompts %q keys %q", prompts, keys)
+	}
+}
+
+// Finished transcriptions are kept for a while, but never more than
+// transcriptsKept at once: the oldest finished one gives way.
+func TestTranscriptionTableIsBounded(t *testing.T) {
+	svc, _ := lifecycleFixture(t, nil)
+	svc.Config.CaptureTimeout = time.Second
+	release := make(chan struct{})
+	close(release)
+	svc.ASR = &scriptedASR{final: "一句话", release: release}
+	ids := make([]string, transcriptsKept+10)
+	for i := range ids {
+		ids[i] = model.NewID()
+		if text, err := svc.Transcribe(context.Background(), ids[i], io.NopCloser(strings.NewReader("pcm")), 16000); err != nil || text != "一句话" {
+			t.Fatalf("transcription %d: %q %v", i, text, err)
+		}
+	}
+	svc.mu.Lock()
+	kept := len(svc.transcripts)
+	svc.mu.Unlock()
+	if kept != transcriptsKept {
+		t.Fatalf("kept %d transcriptions", kept)
+	}
+	if _, _, ok := svc.TranscriptText(ids[0]); ok {
+		t.Fatal("the oldest finished transcription was kept")
+	}
+	if text, _, ok := svc.TranscriptText(ids[len(ids)-1]); !ok || text != "一句话" {
+		t.Fatalf("the newest transcription was evicted: %q %v", text, ok)
 	}
 }

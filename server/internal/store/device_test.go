@@ -34,7 +34,7 @@ func TestDeviceReportsAreBoundedAndOrdered(t *testing.T) {
 	}
 }
 
-// Schema 4 dropped gateway drafts; an earlier database is refused rather than
+// Schema 5 stores message prompts; an earlier database is refused rather than
 // migrated, and a fresh one starts at the current version.
 func TestEarlierSchemaIsRefused(t *testing.T) {
 	directory := t.TempDir()
@@ -51,12 +51,29 @@ func TestEarlierSchemaIsRefused(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec("PRAGMA user_version=3"); err != nil {
+	if _, err := db.Exec("PRAGMA user_version=4"); err != nil {
 		t.Fatal(err)
 	}
 	db.Close()
 	if st, err = Open(directory); err == nil {
 		st.Close()
-		t.Fatal("schema 3 opened")
+		t.Fatal("schema 4 opened")
+	}
+}
+
+// Each message keeps the system prompt it was sent with.
+func TestSendStoresTheSystemPrompt(t *testing.T) {
+	st, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+	session, id := "00000000-0000-4000-8000-0000000000a1", "00000000-0000-4000-8000-0000000000a2"
+	if _, _, err := st.Send(ctx, session, id, "m", "scope", "简短回答", "新消息", true); err != nil {
+		t.Fatal(err)
+	}
+	if message, err := st.Message(ctx, session, id); err != nil || message.SystemPrompt != "简短回答" {
+		t.Fatalf("stored prompt %+v %v", message, err)
 	}
 }

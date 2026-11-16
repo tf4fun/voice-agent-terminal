@@ -21,7 +21,7 @@
 | `HERMES_BASE_URL` | Hermes API 根地址，默认 `http://127.0.0.1:8642`，可包含 Profile 前缀 |
 | `HERMES_API_KEY` | Hermes API 服务凭据 |
 | `HERMES_MODEL` | 请求模型或路由别名，默认 `hermes-agent` |
-| `HERMES_SYSTEM_PROMPT` | 每次对话请求最前面的 system 消息，Hermes 将其叠加在自身提示之上。默认要求回答控制在 300 字以内，用户明确要求长文时除外 |
+| `HERMES_SYSTEM_PROMPT` | 每次对话请求最前面的 system 消息，Hermes 将其叠加在自身提示之上。每条消息保存发送时的提示，修改只影响新消息，重试沿用原提示。默认要求回答控制在 300 字以内，用户明确要求长文时除外 |
 | `VOICE_ASR_PROVIDER` | 默认 `openai`，离线转写测试使用 `fake` |
 | `OPENAI_API_KEY` | Go 持有的 OpenAI 凭据 |
 | `OPENAI_TRANSCRIBE_MODEL` | 默认 `gpt-live-transcribe` |
@@ -88,7 +88,9 @@ API 会话。如果 Hermes 返回 `400 invalid_title`，则保持同一会话 ID
 
 `GET /api/v1/sessions` 返回本地会话索引。对 `/api/v1/sessions/{id}`
 使用 `GET` 读取元数据，使用 `PATCH` 修改 Hermes 与本地标题。`DELETE` 将状态改为
-删除中，协调上游删除后保留已退役的本地 ID。活动或结果未确认的消息会返回忙碌。
+删除中，协调上游删除后保留已退役的本地 ID。活动或结果未确认的消息会返回忙碌；
+仍处于 `creating` 的会话除外：它排队的首条消息从未发出，因此总能删除，消息随会话
+一并删除。之后才成功的上游创建也会被删除。
 删除前核对上游会话的 API 来源。
 
 ## 转写
@@ -124,13 +126,13 @@ OpenAI。成功时返回 `200`，整个 `text/plain; charset=utf-8` 响应体就
 
 `GET /api/v1/transcriptions/{id}/text` 通过有界 UTF-8 窗口接口（`offset`、`limit`、
 `before=<字节边界>` 或 `tail=1`；修订号计更新次数）读取进行中转写的实时文字。文字在
-上传期间及结束后一分钟内保存在内存中；未知或已释放的 ID 返回 404，上传开始前同样
-返回 404。
+上传期间及结束后一分钟内保存在内存中，同时最多保留 16 条（满时淘汰最早结束的一条）；
+未知或已释放的 ID 返回 404，上传开始前同样返回 404。
 
 `/api/v1/server` 报告 `protocol: 2`，以及 `bounded_paging`、`text_before`、
 `text_tail`、`conversation_windows`、`whole_messages`、`reply_sse`、
 `max_input_bytes`、`max_transcript_bytes`、`device_logs` 和 `speech`；设备要求
-协议 2。SQLite 结构 v4 只保存会话、消息和设备诊断报告。启动时拒绝更早的数据库
+协议 2。SQLite 结构 v5 只保存会话、消息（含各自发送时的 system 提示）和设备诊断报告。启动时拒绝更早的数据库
 而不做迁移：删除 `gateway.db` 后从空库开始。
 
 ## 完整消息
@@ -174,7 +176,7 @@ UTF-8 字节边界及最多 256 字节文字。正在生成且暂为空的回复
 的消息时返回忙碌。
 
 后台任务通过会话 ID 和稳定的幂等键，向 Hermes Chat Completions 提交一条
-新的用户消息。保存模型、输入和上游身份摘要，保持消息关联。
+新的用户消息。保存模型、system 提示、输入和上游身份摘要，保持消息关联，重试时发送同一请求。
 存储层的活动消息约束确保同一会话的发送串行进行。
 
 `GET /api/v1/sessions/{id}/messages` 返回消息元数据列表。
