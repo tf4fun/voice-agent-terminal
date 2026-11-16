@@ -970,7 +970,12 @@ static void render_voice(void)
         snprintf(line, sizeof(line), "Hermes 正在思考 %llus", (unsigned long long)((now - s_think_since) / 1000000));
         status = line;
         break;
-    case AGENT_VOICE_SPEAKING: status = "正在朗读"; break;
+    case AGENT_VOICE_SPEAKING: { // Audio heard so far; the length is not known ahead.
+        const uint32_t seconds = s_speech.played_ms / 1000;
+        snprintf(line, sizeof(line), "正在朗读 %lu:%02lu", (unsigned long)(seconds / 60), (unsigned long)(seconds % 60));
+        status = line;
+        break;
+    }
     case AGENT_VOICE_REPLYING: status = "正在回复"; break;
     case AGENT_VOICE_FAILED: status = message_status(s_view.message.state); tone = UI_RECORDING; break;
     case AGENT_VOICE_IDLE:
@@ -1006,7 +1011,8 @@ static void render_voice(void)
             agent_copy_text(line, sizeof(line), mode == AGENT_VOICE_RECORDING ? "请开始说话" : "…");
             strip_tone = UI_DIM;
         }
-    } else if (mode == AGENT_VOICE_THINKING) {
+    } else if (mode == AGENT_VOICE_THINKING || mode == AGENT_VOICE_SPEAKING) {
+        // The question stays in view, dimmed, until the reply has been heard.
         if (strcmp(s_voice_question_id, s_view.message.id) != 0) {
             char *question = agent_client_part_copy(s_view.selection, true);
             if (question != NULL) {

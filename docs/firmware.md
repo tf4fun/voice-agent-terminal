@@ -18,8 +18,9 @@ acts in that moment), then expands into the draft panel. Sending collapses it
 to one line with the question while Hermes thinks: a comet arc orbits the orb,
 the bars rise in turn and the status counts the seconds waited; this lasts
 until Hermes has finished, since the device fetches the reply whole. While a
-reply is spoken the strip stays hidden, leaving the "正在朗读" status and the
-bars that follow the audio level; when speech ends or is stopped the strip
+reply is spoken the strip keeps the question, dimmed, and the status reads
+"正在朗读" with the audio heard so far (such as 0:23; the full length is not
+known ahead, so there is no progress bar); when speech ends or is stopped the strip
 becomes a vertical ticker over the reply, from its first line: Markdown marks are
 dropped, every sentence starts a line, a sentence wider than the strip
 continues on further lines, and closing punctuation never starts one. Each

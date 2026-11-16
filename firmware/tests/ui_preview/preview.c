@@ -262,7 +262,7 @@ static void scene_voice(const char *out, const char *suffix)
     frame(out, "18-voice-thinking", suffix);
 
     voice_session(true, "receiving");
-    g_speech = (agent_speech_view_t){.active = true, .audible = true, .index = 1, .level = 60};
+    g_speech = (agent_speech_view_t){.active = true, .audible = true, .index = 1, .level = 60, .played_ms = 23400};
     snprintf(g_speech.sentence, sizeof(g_speech.sentence), "%s", "推荐从南门上山，经鸣春谷到摩星岭，再从西门下山，全程约三小时。");
     snprintf(g_speech.message_id, sizeof(g_speech.message_id), "%s", s_view.message.id);
     show(AGENT_PAGE_VOICE);
