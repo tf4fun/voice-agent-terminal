@@ -8,8 +8,12 @@ typedef enum { AGENT_IDLE, AGENT_PREPARING, AGENT_RECORDING, AGENT_FINALIZING } 
 typedef enum { AGENT_TEXT_REPLY, AGENT_TEXT_INPUT, AGENT_TEXT_SEGMENT, AGENT_TEXT_DRAFT } agent_text_kind_t;
 
 // The voice draft lives only in device RAM until it is sent; a reboot loses it.
-#define AGENT_DRAFT_MAX_CHARS 2000
+// Spoken instructions are short, so it is bounded like a short message.
+#define AGENT_DRAFT_MAX_CHARS 140
 #define AGENT_DRAFT_MAX_BYTES (AGENT_DRAFT_MAX_CHARS * 4)
+#define AGENT_STR_(value) #value
+#define AGENT_STR(value) AGENT_STR_(value)
+#define AGENT_DRAFT_TOO_LONG "超过 " AGENT_STR(AGENT_DRAFT_MAX_CHARS) " 字，请缩短后重录"
 
 typedef struct {
     agent_session_t sessions[AGENT_PAGE_SIZE];
@@ -61,6 +65,9 @@ esp_err_t agent_client_retry(const char *id, uint32_t reviewed_selection);
 // The loaded input or reply of the shown exchange regardless of which one the
 // text card displays (voice page). Caller owns the copy; NULL when not loaded.
 char *agent_client_part_copy(uint32_t selection, bool input);
+// The opening of that part, cut at a UTF-8 boundary into the caller's buffer;
+// nothing is allocated. False when it is not loaded.
+bool agent_client_part_prefix(uint32_t selection, bool input, char *out, size_t capacity);
 // Discards the unsent draft (long Down on the voice page); nothing is sent.
 esp_err_t agent_client_clear_draft(void);
 // Returns from older history to the newest exchange.

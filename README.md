@@ -78,7 +78,7 @@ binaries and a combined `SHA256SUMS` as GitHub release assets.
    reply aloud (when the gateway offers speech) and the text card shows it from
    its beginning.
 
-The device keeps one pending message in RAM, bounded to 2000 characters and
+The device keeps one pending message in RAM, bounded to 140 characters and
 shown with its count. A successful re-recording replaces its earlier text, and
 long Down clears it. Transcription is a side channel: the gateway returns the
 text and stores nothing. Sending carries the complete text as an immutable

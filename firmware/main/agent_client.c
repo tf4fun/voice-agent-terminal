@@ -500,6 +500,19 @@ char *agent_client_part_copy(uint32_t selection, bool input)
     return copy;
 }
 
+bool agent_client_part_prefix(uint32_t selection, bool input, char *out, size_t capacity)
+{
+    if (capacity == 0) return false;
+    out[0] = '\0';
+    lock();
+    const bool loaded = input ? s_input_loaded : s_reply_loaded;
+    const char *source = input ? s_input_text : s_reply_text;
+    const bool ok = selection == s_view.selection && loaded && source != NULL;
+    if (ok) agent_copy_text(out, capacity, source);
+    unlock();
+    return ok;
+}
+
 static bool poll_turn(agent_view_t *view)
 {
     char path[192];
@@ -889,7 +902,7 @@ static void record(const command_t *command)
     } else if (status == 422) {
         notice("没有听清，请再说一次");
     } else if (status == 413) {
-        notice("超过 2000 字，请缩短后重录");
+        notice(AGENT_DRAFT_TOO_LONG);
     } else {
         notice("转写失败，请重试");
     }

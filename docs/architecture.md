@@ -19,7 +19,7 @@ against the selected Hermes version before depending on them.
 
 | Owner | Data and responsibilities |
 | --- | --- |
-| Device | Selected session, the unsent voice draft (RAM only, up to 2000 characters), one complete user input and one complete Hermes reply in RAM, local reading position, bounded audio capture and playback buffers and interaction state |
+| Device | Selected session, the unsent voice draft (RAM only, up to 140 characters), one complete user input and one complete Hermes reply in RAM, local reading position, bounded audio capture and playback buffers and interaction state |
 | Go | Device-to-Hermes session mapping, paginated session index, side-channel transcription that stores nothing, complete message snapshots and retry identities, bounded SSE delivery, filtered reply storage and the cached spoken-reply streams |
 | Hermes | Conversation history, model context, session runtime and configured agent capabilities |
 | OpenAI | Transcription of the audio submitted by Go and synthesis of the completed reply text Go submits for speech |
@@ -62,7 +62,7 @@ Since protocol 2 (2026-11-16) a draft belongs to the client composing it and
 never reaches the gateway before it is sent. Voice input is equivalent to
 typing: transcription is a side channel that returns text and persists nothing.
 
-- The device keeps one pending message in RAM, bounded to 2000 characters and
+- The device keeps one pending message in RAM, bounded to 140 characters and
   shown with its character count. A successful re-recording replaces it, a
   failed one keeps it, long Down clears it and leaving the session discards it.
   While it exists the screen may go dark but the device does not enter deep

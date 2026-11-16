@@ -48,6 +48,12 @@ char *agent_client_part_copy(uint32_t selection, bool input)
     (void)selection;
     return strdup(input ? g_input : g_reply);
 }
+bool agent_client_part_prefix(uint32_t selection, bool input, char *out, size_t capacity)
+{
+    (void)selection;
+    agent_copy_text(out, capacity, input ? g_input : g_reply);
+    return true;
+}
 void agent_speech_copy(agent_speech_view_t *out) { *out = g_speech; }
 void agent_trace(agent_trace_type_t type, uint16_t a, int32_t b, const char *s) { (void)type; (void)a; (void)b; (void)s; }
 uint32_t agent_capture_duration_ms(void) { return g_duration_ms; }
@@ -326,6 +332,29 @@ static void scene_settings(const char *out, const char *suffix)
     save(out, name);
 }
 
+// The ticker text is stripped in place and a long reply is trimmed to the
+// lines the table can reach, so it is held once beside the client's cache.
+static void check_voice_wrap(void)
+{
+    voice_wrap_lines(strdup("# 标题\n- **要点**：`代码`\n\n\n第二段。"));
+    if (s_voice_display == NULL || strcmp(s_voice_display, "标题\n要点：代码\n第二段。") != 0) {
+        fprintf(stderr, "voice wrap stripped text: %s\n", s_voice_display ? s_voice_display : "(null)");
+        exit(1);
+    }
+    const size_t length = 32 * 1024;
+    char *reply = malloc(length + 1);
+    for (size_t i = 0; i + 3 <= length; i += 3) memcpy(reply + i, i % 90 == 87 ? "。" : "长", 3);
+    reply[length / 3 * 3] = '\0';
+    voice_wrap_lines(reply);
+    if (s_voice_line_count != VOICE_MAX_LINES || strlen(s_voice_display) != s_voice_lines[VOICE_MAX_LINES] ||
+        strlen(s_voice_display) >= length / 2) {
+        fprintf(stderr, "voice wrap kept %zu bytes for %d lines\n", strlen(s_voice_display), s_voice_line_count);
+        exit(1);
+    }
+    printf("voice wrap: in place, %d lines, %zu of %zu bytes kept\n", s_voice_line_count, strlen(s_voice_display), length);
+    voice_wrap_lines(NULL);
+}
+
 int main(int argc, char **argv)
 {
     const char *out = argc > 1 ? argv[1] : ".";
@@ -335,6 +364,7 @@ int main(int argc, char **argv)
     lv_display_set_buffers(display, g_draw, NULL, sizeof(g_draw), LV_DISPLAY_RENDER_MODE_PARTIAL);
     lv_display_set_flush_cb(display, flush);
     memo_fonts_init();
+    check_voice_wrap();
     s_transition = lv_obj_create(NULL);
     memo_ui_flat_rect(s_transition, UI_BG, 0);
     lv_screen_load(s_transition);

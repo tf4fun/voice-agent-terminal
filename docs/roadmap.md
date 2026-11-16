@@ -8,7 +8,7 @@
 
 Protocol 2 (2026-11-16) makes voice input equivalent to typing. Transcription is
 a gateway side channel that returns text and stores nothing; the draft stays on
-the composing client (device RAM, bounded to 2000 characters with a visible
+the composing client (device RAM, bounded to 140 characters with a visible
 count; web page memory). A send carries the complete text, and a new session is
 created and titled by its first send, so no empty sessions arise and neither the
 gateway nor Hermes needs to reclaim any. Drafts no longer synchronize between

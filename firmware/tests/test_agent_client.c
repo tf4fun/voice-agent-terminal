@@ -660,8 +660,8 @@ int main(void)
     test_new_chat_is_created_by_its_first_send();
     test_rerecord_replaces_draft();
     test_failed_rerecord_keeps_draft(CAPTURE_NO_SPEECH,"没有听清，请再说一次");
-    test_failed_rerecord_keeps_draft(CAPTURE_TOO_LARGE,"超过 2000 字，请缩短后重录");
-    test_failed_rerecord_keeps_draft(CAPTURE_TOO_MANY_CHARS,"超过 2000 字，请缩短后重录");
+    test_failed_rerecord_keeps_draft(CAPTURE_TOO_LARGE,AGENT_DRAFT_TOO_LONG);
+    test_failed_rerecord_keeps_draft(CAPTURE_TOO_MANY_CHARS,AGENT_DRAFT_TOO_LONG);
     test_lost_send_response_reuses_ids();
     test_clear_is_local_and_cancels_queued_send();
     test_leaving_session_discards_draft();

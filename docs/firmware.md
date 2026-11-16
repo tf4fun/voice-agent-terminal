@@ -15,7 +15,7 @@ strip and two key hints. Recording happens in the same view: the timer takes
 the status line and the strip shows the last ten characters of the live
 transcript. After release the strip spins while the transcript settles (no key
 acts in that moment), then expands into the draft panel, whose header shows
-the draft's character count against its 2000-character bound (red from 90 %). Sending collapses it
+the draft's character count against its 140-character bound (red from 90 %). Sending collapses it
 to one line with the question while Hermes thinks: a comet arc orbits the orb,
 the bars rise in turn and the status counts the seconds waited; this lasts
 until Hermes has finished, since the device fetches the reply whole. While a
@@ -106,7 +106,7 @@ RAM (protocol 2, 2026-11-16): transcription is a gateway side channel that
 returns the final text and stores nothing. Short OK sends the text shown, with
 its draft serial, so a newer recording or a clear cancels a send still queued.
 Long OK re-records: a successful transcript replaces the draft, while
-cancellation, no speech (`没有听清`), a transcript over 2000 characters or a
+cancellation, no speech (`没有听清`), a transcript over 140 characters or a
 failed upload keeps the earlier text. Leaving the session discards the draft.
 An unsent draft keeps the device out of deep sleep while still letting the
 screen go dark; a reboot loses it. Each cached input or reply is bounded to
@@ -606,13 +606,17 @@ Recording streams mono PCM16 at 16 kHz over chunked HTTP to Go, which owns
 OpenAI transcription, provider credentials and upstream TLS/WebSocket connections.
 The device keeps a 16 KiB PCM buffer shared with spoken-reply playback, four
 session metadata records, a 512-byte live transcription preview and the draft
-itself, allocated to its size (at most 8000 bytes for 2000 characters).
+itself, allocated to its size (at most 560 bytes for 140 characters).
 
 The selected exchange owns one complete user input and one complete Hermes reply
 in RAM, allocated according to their actual byte lengths. History selection loads
 another whole exchange and releases the previous cache. Message content stays in
 server storage. The visible LVGL label owns a separate filtered display snapshot,
-replaced and freed under the LVGL lock. Allocation failure preserves the displayed
+replaced and freed under the LVGL lock; the old snapshot is freed before the next
+is copied, so a reply is never held twice beside the cache. The voice page strips
+its ticker text in place from one copy and trims it to the 256 lines the ticker
+can reach (a 32 KiB reply keeps about 7.5 KiB), and the question strip keeps only
+the input's first 255 bytes in a static buffer. Allocation failure preserves the displayed
 snapshot and reports memory pressure. Cache buffers are released before BLE startup.
 
 The device does not use SSE. While a reply is being written, the sync task reads
