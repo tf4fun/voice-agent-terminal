@@ -21,6 +21,7 @@
 | `HERMES_BASE_URL` | Hermes API 根地址，默认 `http://127.0.0.1:8642`，可包含 Profile 前缀 |
 | `HERMES_API_KEY` | Hermes API 服务凭据 |
 | `HERMES_MODEL` | 请求模型或路由别名，默认 `hermes-agent` |
+| `HERMES_SYSTEM_PROMPT` | 每次对话请求最前面的 system 消息，Hermes 将其叠加在自身提示之上。默认要求回答控制在 300 字以内，用户明确要求长文时除外 |
 | `VOICE_ASR_PROVIDER` | 默认 `openai`，离线转写测试使用 `fake` |
 | `OPENAI_API_KEY` | Go 持有的 OpenAI 凭据 |
 | `OPENAI_TRANSCRIBE_MODEL` | 默认 `gpt-live-transcribe` |

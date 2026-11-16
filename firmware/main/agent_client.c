@@ -58,9 +58,9 @@ static agent_view_t s_read_view;
 // Whole-content caches must fit the ESP32-C3 heap (about a 64 KiB largest block)
 // together with the UI snapshot copy. Longer content keeps only a UTF-8 prefix.
 #ifndef AGENT_CONTENT_MAX_BYTES
-#define AGENT_CONTENT_MAX_BYTES 16384
+#define AGENT_CONTENT_MAX_BYTES 8000 // Matches the gateway's spoken-text bound, so the shown and spoken parts agree.
 #endif
-#define AGENT_TRUNCATED_NOTICE "\n\n……（内容过长，设备仅显示开头部分）"
+#define AGENT_TRUNCATED_NOTICE "\n\n……（内容过长，设备只显示开头，完整内容请在网页查看）"
 static char *s_input_text, *s_reply_text;
 // Server byte counts; they exceed the cached prefix length when truncated.
 static size_t s_input_total, s_reply_total;

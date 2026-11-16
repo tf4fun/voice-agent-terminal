@@ -109,8 +109,10 @@ Long OK re-records: a successful transcript replaces the draft, while
 cancellation, no speech (`没有听清`), a transcript over 140 characters or a
 failed upload keeps the earlier text. Leaving the session discards the draft.
 An unsent draft does not delay sleep; deep sleep or a reboot loses it. Each cached input or reply is bounded to
-16 KiB. Longer content keeps a UTF-8 prefix, leaves the rest unread on the server,
-and ends with a notice that only the beginning is shown. Sessions and settings share a
+8000 bytes, the gateway's spoken-text bound, so the shown and spoken parts
+agree. Longer content keeps a UTF-8 prefix, leaves the rest unread on the server,
+and ends with a notice that only the beginning is shown and the web page has it
+in full. Sessions and settings share a
 registered top-level page cycle. Long Up advances and wraps that cycle. Additional
 top-level pages use the same registry. Long Down sleeps at the top level and exits
 one level from detail screens. Manual sleep first pauses networking and waits for
@@ -614,7 +616,7 @@ server storage. The visible LVGL label owns a separate filtered display snapshot
 replaced and freed under the LVGL lock; the old snapshot is freed before the next
 is copied, so a reply is never held twice beside the cache. The voice page strips
 its ticker text in place from one copy and trims it to the 256 lines the ticker
-can reach (a 32 KiB reply keeps about 7.5 KiB), and the question strip keeps only
+can reach (about 7.5 KiB), and the question strip keeps only
 the input's first 255 bytes in a static buffer. Allocation failure preserves the displayed
 snapshot and reports memory pressure. Cache buffers are released before BLE startup.
 

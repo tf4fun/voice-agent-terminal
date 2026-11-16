@@ -22,6 +22,7 @@ Existing process variables take precedence.
 | `HERMES_BASE_URL` | Hermes API root, default `http://127.0.0.1:8642`; a profile prefix can be included |
 | `HERMES_API_KEY` | Hermes API server credential |
 | `HERMES_MODEL` | Request model/route alias, default `hermes-agent` |
+| `HERMES_SYSTEM_PROMPT` | System message that leads every chat request; Hermes layers it on its own prompt. The default asks for replies within 300 characters unless a long one is requested |
 | `VOICE_ASR_PROVIDER` | `openai` by default; `fake` for offline transcription tests |
 | `OPENAI_API_KEY` | OpenAI credential, held by Go |
 | `OPENAI_TRANSCRIBE_MODEL` | Default `gpt-live-transcribe` |

@@ -309,26 +309,26 @@ static void arm_capture(enum capture_case test_case)
 
 static const char turn_response[]=
     "{\"message\":{\"id\":\"00000000-0000-4000-8000-000000000002\",\"state\":\"completed\","
-    "\"revision\":8,\"input_bytes\":14000,\"reply_bytes\":15000},"
+    "\"revision\":8,\"input_bytes\":6000,\"reply_bytes\":7000},"
     "\"before\":\"00000000-0000-4000-8000-000000000004\",\"after\":\"\"}";
 
 static void test_whole_pair_and_history(void)
 {
     setup();
-    char *input=malloc(14001),*reply=malloc(15001);assert(input&&reply);
-    memset(input,'A',14000);input[14000]=0;memset(reply,'B',15000);reply[15000]=0;
+    char *input=malloc(6001),*reply=malloc(7001);assert(input&&reply);
+    memset(input,'A',6000);input[6000]=0;memset(reply,'B',7000);reply[7000]=0;
     whole_input=input;whole_reply=reply;injected_response=turn_response;
     s_view.text_kind=AGENT_TEXT_REPLY;s_view.chat_loading=true;
     agent_view_t view=s_view;
     CHECK(poll_turn(&view));
-    CHECK(strlen(s_input_text)==14000&&strlen(s_reply_text)==15000);
+    CHECK(strlen(s_input_text)==6000&&strlen(s_reply_text)==7000);
     CHECK(s_view.turn.present&&!s_view.chat_loading);
     CHECK(strcmp(s_view.text_id,message_id)==0);
     char *snapshot=agent_client_text_copy(s_view.selection,s_view.text_generation);
-    CHECK(snapshot&&strlen(snapshot)==15000);free(snapshot);
+    CHECK(snapshot&&strlen(snapshot)==7000);free(snapshot);
     agent_client_message_select(true);
     snapshot=agent_client_text_copy(s_view.selection,s_view.text_generation);
-    CHECK(snapshot&&strlen(snapshot)==14000);free(snapshot);
+    CHECK(snapshot&&strlen(snapshot)==6000);free(snapshot);
     const uint32_t generation=s_view.chat_request;
     CHECK(agent_client_history(-1)==ESP_OK);
     CHECK(s_view.chat_request>generation&&s_view.chat_loading);

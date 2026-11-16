@@ -27,10 +27,13 @@ func TestChatContinuationMediaFilteringAndFinish(t *testing.T) {
 		mu.Unlock()
 		var request struct {
 			Messages []struct {
+				Role    string `json:"role"`
 				Content string `json:"content"`
 			} `json:"messages"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&request); err != nil || len(request.Messages) != 1 || request.Messages[0].Content != message.Input {
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil || len(request.Messages) != 2 ||
+			request.Messages[0].Role != "system" || request.Messages[0].Content != "简短回答" ||
+			request.Messages[1].Role != "user" || request.Messages[1].Content != message.Input {
 			t.Error("new message body changed")
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -43,7 +46,7 @@ func TestChatContinuationMediaFilteringAndFinish(t *testing.T) {
 		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
 	}))
 	defer upstream.Close()
-	client := Client{BaseURL: upstream.URL, APIKey: "test-secret"}
+	client := Client{BaseURL: upstream.URL, APIKey: "test-secret", SystemPrompt: "简短回答"}
 	for iteration := 0; iteration < 2; iteration++ {
 		var reply strings.Builder
 		finish, err := client.Chat(context.Background(), message, func(update Update) error { reply.WriteString(update.Text); return nil })

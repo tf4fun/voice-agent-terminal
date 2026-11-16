@@ -120,7 +120,8 @@ try:
             break
         time.sleep(0.05)
     assert result["state"] == "completed", result
-    assert len(calls) == 1 and calls[0][0]["messages"][0]["content"] == "修改第一段\n\n测试转写"
+    assert len(calls) == 1 and calls[0][0]["messages"][-1]["content"] == "修改第一段\n\n测试转写"
+    assert calls[0][0]["messages"][0]["role"] == "system"
     assert request("GET", path + f"/messages/{message}/text")["text"] == "你好，测试回复"
     stop(process)
     process = None

@@ -146,6 +146,21 @@ Represent omitted media with a small resource description. Deliver complete
 message bodies and bounded incremental events. Transport event limits and RAM
 allocation checks preserve the logical identity and complete stored message.
 
+Text has one hard bound per stage. A default system prompt
+(`HERMES_SYSTEM_PROMPT`) asks Hermes for replies within 300 characters unless a
+long one is requested, so the bounds below are a backstop:
+
+| Stage | Bound | Beyond it |
+| --- | --- | --- |
+| Device voice draft | 140 characters | The recording is refused and the earlier draft kept |
+| Message input (any client) | 64 KiB | `413 input_too_large` |
+| One transcript | 16 KiB | `413` |
+| Stored reply | 2 MiB | The message ends `incomplete`; the web page shows what was kept |
+| Spoken text | 8000 bytes (about 2600 Chinese characters) | Not read aloud |
+| Spoken audio | 16 MiB (about 8.7 min), 10 min per reply | Synthesis stops |
+| Device input and reply cache | 8000 bytes each | A notice points to the web page |
+| Voice page ticker | 256 lines (about 7.5 KiB) | Not reachable on that page |
+
 Approval events, reasoning and progress have explicit presentation policies.
 The initial device feature set centers on text chat. Pending approvals retain
 their waiting state and produce a concise attention status; detailed approval

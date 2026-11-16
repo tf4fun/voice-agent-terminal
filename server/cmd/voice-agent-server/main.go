@@ -77,7 +77,7 @@ func run(arguments []string) error {
 	if cfg.ASRProvider == "fake" {
 		transcriber = &asr.Fake{}
 	}
-	client := &hermes.Client{BaseURL: cfg.HermesURL, APIKey: cfg.HermesKey}
+	client := &hermes.Client{BaseURL: cfg.HermesURL, APIKey: cfg.HermesKey, SystemPrompt: cfg.HermesPrompt}
 	service := gateway.New(st, cfg, client, transcriber, logger)
 	switch cfg.TTSProvider {
 	case "openai":

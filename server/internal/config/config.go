@@ -21,6 +21,7 @@ type Config struct {
 	HermesURL      string
 	HermesKey      string
 	HermesModel    string
+	HermesPrompt   string
 	ASRProvider    string
 	OpenAIKey      string
 	OpenAIURL      string
@@ -41,6 +42,10 @@ func (c Config) CaptureRequestTimeout() time.Duration {
 	return c.CaptureTimeout + time.Minute
 }
 
+// DefaultSystemPrompt keeps replies sized for the device, which shows and
+// reads aloud only their opening; the web page shows any reply in full.
+const DefaultSystemPrompt = "你的回答会显示在 240×320 的小屏上并被朗读。默认简洁作答，控制在 300 字以内；用户明确要求长文时再展开。"
+
 func Load(getenv func(string) string) (Config, error) {
 	value := func(key, fallback string) string {
 		if text := strings.TrimSpace(getenv(key)); text != "" {
@@ -54,7 +59,8 @@ func Load(getenv func(string) string) (Config, error) {
 		MDNSInterface: value("VOICE_MDNS_INTERFACE", ""),
 		HermesURL:     strings.TrimRight(value("HERMES_BASE_URL", "http://127.0.0.1:8642"), "/"),
 		HermesKey:     getenv("HERMES_API_KEY"), HermesModel: value("HERMES_MODEL", "hermes-agent"),
-		ASRProvider: value("VOICE_ASR_PROVIDER", "openai"), OpenAIKey: getenv("OPENAI_API_KEY"),
+		HermesPrompt: value("HERMES_SYSTEM_PROMPT", DefaultSystemPrompt),
+		ASRProvider:  value("VOICE_ASR_PROVIDER", "openai"), OpenAIKey: getenv("OPENAI_API_KEY"),
 		OpenAIURL:   value("OPENAI_REALTIME_URL", "wss://api.openai.com/v1/realtime?intent=transcription"),
 		OpenAIModel: value("OPENAI_TRANSCRIBE_MODEL", "gpt-live-transcribe"),
 		TTSProvider: value("VOICE_TTS_PROVIDER", "openai"), TTSURL: value("OPENAI_TTS_URL", "wss://api.openai.com/v1/realtime"),

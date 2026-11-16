@@ -14,8 +14,14 @@ created and titled by its first send, so no empty sessions arise and neither the
 gateway nor Hermes needs to reclaim any. Drafts no longer synchronize between
 the device and the web page. An unsent device draft does not delay sleep; deep
 sleep or a reboot loses it. Gateway SQLite moved to schema v4 without
-migration. Server tests, firmware host tests and the UI preview cover it; device
-acceptance of this build is NOT RUN.
+migration. Server tests, firmware host tests and the UI preview cover it. On the
+device (d6eb351) re-recording, first-send session creation and spoken replies
+passed; a 68 KB reply left 12.5 KB minimum free heap with the text card open.
+Text therefore has one hard bound per stage (see
+[architecture](architecture.md#bounded-content-delivery)): a default Hermes
+system prompt asks for replies within 300 characters, and the device caches at
+most 8000 bytes of an input or reply, the gateway's spoken-text bound. Device
+acceptance of that change, the 140-character limit and draft clearing is NOT RUN.
 
 Sessions open on a voice-first view (orb, status line, one-line strip and key
 hints) with the text card as a second view; the firmware guide describes it.
