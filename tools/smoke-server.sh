@@ -10,6 +10,7 @@ import http.server
 import json
 import os
 import pathlib
+import re
 import socket
 import subprocess
 import sys
@@ -100,7 +101,8 @@ def stop(child):
         child.stderr.close()
 
 try:
-    assert subprocess.check_output([binary, "version"], text=True).strip() == "0.2.0"
+    version = re.search(r'const Version = "([^"]+)"', pathlib.Path("internal/httpapi/server.go").read_text()).group(1)
+    assert subprocess.check_output([binary, "version"], text=True).strip() == version
     process = start()
     session, recording, message = [str(uuid.uuid4()) for _ in range(3)]
     path = f"/api/v1/sessions/{session}"

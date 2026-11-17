@@ -10,15 +10,19 @@ lvgl="$work/lvgl-$lvgl_version"
 preview="$repo_root/firmware/tests/ui_preview"
 mkdir -p "$work/obj-$lvgl_version"
 if [[ ! -f "$lvgl/lvgl.h" ]]; then
-    curl -fsSL "https://github.com/lvgl/lvgl/archive/refs/tags/v$lvgl_version.tar.gz" | tar xz -C "$work"
+    # Unpack beside the cache and move it in only once complete, so an
+    # interrupted download is fetched again instead of reused half-written.
+    unpack="$(mktemp -d "$work/lvgl-download.XXXXXX")"
+    trap 'rm -rf -- "$unpack"' EXIT
+    curl -fsSL "https://github.com/lvgl/lvgl/archive/refs/tags/v$lvgl_version.tar.gz" | tar xz -C "$unpack"
+    rm -rf -- "$lvgl"
+    mv "$unpack/lvgl-$lvgl_version" "$lvgl"
 fi
 cflags=(-std=gnu11 -O1 -fno-pie -DLV_CONF_INCLUDE_SIMPLE -DLV_LVGL_H_INCLUDE_SIMPLE -I"$preview" -I"$lvgl")
 library="$work/liblvgl-$lvgl_version.a"
 if [[ ! -f "$library" ]]; then
-    objects=()
     while IFS= read -r source; do
         object="$work/obj-$lvgl_version/$(echo "${source#"$lvgl/"}" | tr / _).o"
-        objects+=("$object")
         echo "${CC:-cc} ${cflags[*]} -w -c $source -o $object"
     done < <(find "$lvgl/src" -name '*.c') | xargs -P "$(nproc)" -I{} sh -c '{}'
     ar rcs "$library" "$work"/obj-"$lvgl_version"/*.o

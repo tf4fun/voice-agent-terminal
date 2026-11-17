@@ -3,7 +3,7 @@ name: AI Passport firmware
 on:
   pull_request:
   push:
-    branches: [main, 'codex/**']
+    branches: ['**']
   workflow_dispatch:
   workflow_call:
 
