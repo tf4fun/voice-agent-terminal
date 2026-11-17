@@ -14,7 +14,7 @@ created and titled by its first send, so no empty sessions arise and neither the
 gateway nor Hermes needs to reclaim any. Drafts no longer synchronize between
 the device and the web page. An unsent device draft does not delay sleep; deep
 sleep or a reboot loses it. Gateway SQLite moved to schema v4 without
-migration. Server tests, firmware host tests and the UI preview cover it. On the
+migration (v5 since review issue #3, below). Server tests, firmware host tests and the UI preview cover it. On the
 device (d6eb351) re-recording, first-send session creation and spoken replies
 passed; a 68 KB reply left 12.5 KB minimum free heap with the text card open.
 Text therefore has one hard bound per stage (see
@@ -91,6 +91,9 @@ UI preview cover this increment. Firmware `e1bc3c5` was flashed and measured on
 spoken replies on the newest build needs its own evidence.
 
 ## Complete-message increment
+
+This increment predates protocol 2: its device SSE subscription was later
+removed (the device now polls the turn once a second, see above).
 
 The agreed device model keeps one complete user input and one complete Hermes
 reply in RAM. The gateway returns complete message bodies and neighboring

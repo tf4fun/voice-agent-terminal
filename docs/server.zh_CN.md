@@ -124,8 +124,9 @@ API 会话。如果 Hermes 返回 `400 invalid_title`，则保持同一会话 ID
 小端 PCM16，使用 `Content-Type: audio/pcm`。输入采样率支持 16000 和 24000，允许
 分块请求，EOF 表示提交本段音频。Go 增量地将 16 kHz 输入重采样为 24 kHz，并连接
 OpenAI。成功时返回 `200`，整个 `text/plain; charset=utf-8` 响应体就是去掉首尾空白的
-最终转写。转写为空返回 `422 no_speech`，ID 重复使用返回 `409`，四路并发上传已满返回
-`409 busy`，上传过大返回 `413 audio_too_large`，转写结果超过 16 KiB 返回
+最终转写。转写为空返回 `422 no_speech`，ID 重复使用返回 `409`（转写仍保留期间，见下文），四路并发上传已满返回
+`409 busy`，上传过大返回 `413 audio_too_large`，音频为空或字节数为奇数返回
+`400 invalid_audio`，转写结果超过 16 KiB 返回
 `413 limit_exceeded`，上游失败返回 `502 transcription_failed`。断开连接即
 取消转写。音频字节只按流处理。
 
@@ -134,10 +135,12 @@ OpenAI。成功时返回 `200`，整个 `text/plain; charset=utf-8` 响应体就
 上传期间及结束后一分钟内保存在内存中，同时最多保留 16 条（满时淘汰最早结束的一条）；
 未知或已释放的 ID 返回 404，上传开始前同样返回 404。
 
-`/api/v1/server` 报告 `protocol: 2`，以及 `bounded_paging`、`text_before`、
-`text_tail`、`whole_messages`、`reply_sse`、
-`max_input_bytes`、`max_transcript_bytes`、`device_logs` 和 `speech`；设备要求
-协议 2。SQLite 结构 v5 只保存会话、消息（含各自发送时的 system 提示）和设备诊断报告。启动时拒绝更早的数据库
+`/api/v1/server` 报告 `protocol: 2` 和 `version`；已启用的上游（`chat`、带
+`asr_provider` 的 `transcription`、`speech`）；格式（`audio_format`、`sample_rates`、
+`speech_format`、`speech_rate`）；功能标志 `bounded_paging`、`text_before`、`text_tail`、
+`whole_messages`、`reply_sse` 和 `device_logs`；以及上限 `max_input_bytes`、
+`max_transcript_bytes`、`max_text_window_bytes`、`max_event_bytes` 和 `max_audio_ms`。
+设备要求协议 2，并检查 `bounded_paging`、`text_tail` 和 `whole_messages`。SQLite 结构 v5 只保存会话、消息（含各自发送时的 system 提示）和设备诊断报告。启动时拒绝更早的数据库
 而不做迁移：删除 `gateway.db` 后从空库开始。
 
 ## 完整消息
@@ -269,6 +272,9 @@ UTF-8 窗口、流式 PCM、模拟 OpenAI WebSocket、Hermes HTTP/SSE 和媒体�
 仍需集成验收。
 
 ## 2026-11-15 网页聊天验证
+
+本次验证基于协议 1。其中设备草稿与暂存录音相关的行为已随协议 2 移除：草稿不再同步，
+转写不保存任何内容。
 
 Go 测试通过，包括 `/ui/icon.svg` 公开资源检查。在无头 Chromium 中驱动使用假转写
 和假流式 Hermes 的本地中转服务，覆盖：密钥拒绝与登录、首次发送创建并命名会话、

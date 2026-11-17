@@ -15,7 +15,7 @@ message recovery. Offline adapter tests and a real-binary smoke test exercise
 the server workflow. Real OpenAI transcription and two-turn Hermes chat passed
 on 2026-11-13 against Hermes 0.23.1. The initial AI Passport firmware implements
 sessions, recording, editable drafts and replies. Device tests passed discovery,
-recording, appended transcription, sending, reply display and settings navigation.
+recording, transcription (then appended; a re-recording now replaces the draft), sending, reply display and settings navigation.
 The current increment adds a voice-first session view, spoken replies that the
 gateway synthesizes through the OpenAI Realtime API, a web chat client and device
 diagnostic reports; the [roadmap](docs/roadmap.md) records their validation status.
@@ -115,6 +115,7 @@ described in the firmware guide.
 ## Documentation
 
 - [Firmware, controls and validation](docs/firmware.md)
+- [Firmware validation history](docs/firmware-history.md)
 - [Architecture and data ownership](docs/architecture.md)
 - [Milestones and acceptance](docs/roadmap.md)
 - [Server configuration and API](docs/server.md)
