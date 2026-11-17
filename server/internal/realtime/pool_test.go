@@ -104,3 +104,48 @@ func TestPoolLifecycleReuseStaleAndDiscard(t *testing.T) {
 		t.Fatal("stale session was not rotated")
 	}
 }
+
+func TestPoolKeepsCheckedOutSessionAlive(t *testing.T) {
+	// A silent upstream that only answers pings: without pings a checked-out
+	// session would hit its read deadline while the caller streams audio.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}))
+	defer upstream.Close()
+	wsURL := "ws" + strings.TrimPrefix(upstream.URL, "http")
+	pool := &Pool[testEvent]{
+		Name:         "test",
+		PingInterval: 20 * time.Millisecond,
+		Open: func(ctx context.Context) (*Conn[testEvent], error) {
+			conn, _, err := websocket.DefaultDialer.DialContext(ctx, wsURL, nil)
+			if err != nil {
+				return nil, err
+			}
+			return NewConn[testEvent](conn, 64<<10, 8, 100*time.Millisecond, time.Minute), nil
+		},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { pool.Run(ctx); close(done) }()
+	defer func() { cancel(); <-done }()
+
+	c, err := pool.Acquire(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Release(c, false)
+	select {
+	case <-c.Done:
+		t.Fatal("checked-out session hit its read deadline")
+	case <-time.After(500 * time.Millisecond):
+	}
+}

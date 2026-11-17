@@ -414,6 +414,22 @@ const tests = {
     assert.equal(app.ui.send.disabled, false);
     assert.equal(app.findMessage(mid).reply, "checking tool... done");
   },
+
+  async "an unconfirmed message blocks new sends until it is retried"() {
+    const sid = "99999999-9999-4999-8999-999999999999";
+    const mid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const app = await load(base([session(sid)], [
+      [/^GET \/sessions\/[^/]+\/messages\?/, () => response(200, { items: [meta(mid, sid, "unconfirmed", 3)], has_more: false })],
+      [/^GET \/sessions\/[^/]+\/messages\/[^/]+\/content\?part=input$/, () => response(200, "q", { "X-Revision": 3, "X-Message-State": "unconfirmed" })],
+      [/^GET \/sessions\/[^/]+\/messages\/[^/]+\/content\?part=reply$/, () => response(200, "", { "X-Revision": 3, "X-Message-State": "unconfirmed" })],
+    ]));
+    await app.openSession(sid);
+    app.ui.input.value = "next";
+    app.composerChanged();
+    assert.equal(app.ui.send.disabled, true);
+    await app.send();
+    assert.equal(app.calls.filter(c => c.startsWith("POST ")).length, 0, "the gateway would answer busy");
+  },
 };
 
 let failed = 0;

@@ -49,12 +49,8 @@ status share the card's first row. The user can view their own input while
 waiting. An interrupted or failed reply
 reveals any retained text together with its outcome status.
 
-Firmware `9b06632b` passed authorized flashing, startup/discovery and one
-recording/reply workload. The user confirmed improved SSE appending and correct
-Chinese quotation marks. Firmware `077092ec` subsequently passed user acceptance
-of the compact header/status layout, card spacing, completion waiting, top-of-reply
-opening and manual scrolling. Long-message stress and reconnect recovery require
-separate device checks. Measurements and results describe their recorded builds.
+Device acceptance of each build, with its measurements, is recorded in the
+[roadmap](roadmap.md) and the [firmware validation history](firmware-history.md).
 
 ## Drafts and sessions
 
@@ -95,8 +91,8 @@ The device streams mono PCM16 at 16 kHz over chunked HTTP and requires a
 connected gateway. A 16 KiB PCM buffer, shared with spoken-reply playback,
 bounds capture buffering. Bounded live
 transcription previews serve recording, and the final text is held in RAM for
-review. Hardware acceptance of the new complete-message revision
-remains NOT RUN.
+review. Measured heap and device results for the current build are in the
+[roadmap](roadmap.md).
 Benchmark capture and networking together on AI Passport, including total free
 heap, largest free block, stack high-water marks and bounded-backpressure behavior.
 The current voice-memo recording/upload lifecycle is an implementation reference.

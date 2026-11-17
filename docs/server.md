@@ -136,8 +136,10 @@ because completion order across turns is not guaranteed. Each recording sends
 `input_audio_buffer.clear`, appends its audio, commits once and accepts only the
 first item after its clear. A cleanly finished session returns to the pool; a
 failed or cancelled turn discards its session, because buffered audio or an
-in-flight item may remain. A dedicated reader per connection answers keepalive
-pings sent every 20 s, detects drops at once and triggers a reconnect with
+in-flight item may remain. Every 20 s the pool pings both the idle session and
+those checked out (an upstream that sends no events while audio streams in
+would otherwise hit the 50 s read deadline); a dedicated reader per connection
+detects drops at once and triggers a reconnect with
 exponential backoff up to 60 s. Sessions are replaced after 50 minutes, inside
 the documented realtime session limit. A second concurrent recording opens its
 own session.
@@ -163,9 +165,10 @@ little-endian PCM16 with `Content-Type: audio/pcm`. Supported input rates are
 incrementally resamples 16 kHz input to 24 kHz and connects to OpenAI. A
 successful response is `200` with the final transcript, trimmed, as the whole
 `text/plain; charset=utf-8` body. A blank transcript returns `422 no_speech`,
-a reused ID `409`, a full set of four concurrent uploads `409 busy`, an
-oversized upload `413 audio_too_large`, an oversized transcript (> 16 KiB)
-`413 limit_exceeded`, and an upstream failure `502 transcription_failed`.
+a reused ID `409` (while the transcription is kept, see below), a full set of four concurrent uploads `409 busy`, an
+oversized upload `413 audio_too_large`, empty audio or an odd byte count
+`400 invalid_audio`, an oversized transcript (> 16 KiB) `413 limit_exceeded`,
+and an upstream failure `502 transcription_failed`.
 Closing the connection cancels the transcription. Audio bytes are transient.
 
 `GET /api/v1/transcriptions/{id}/text` reads the live text of a running
@@ -175,10 +178,14 @@ kept in memory while the upload runs and for one minute after it ends, at most
 16 transcriptions at once (the oldest finished one gives way); an unknown or
 released ID returns 404, including before the upload has started.
 
-`/api/v1/server` reports `protocol: 2` with `bounded_paging`, `text_before`,
-`text_tail`, `whole_messages`, `reply_sse`,
-`max_input_bytes`, `max_transcript_bytes`, `device_logs` and `speech`; the
-device requires protocol 2. SQLite schema v5 holds sessions, messages (with
+`/api/v1/server` reports `protocol: 2` and `version`; the enabled upstreams
+(`chat`, `transcription` with `asr_provider`, `speech`); the formats
+(`audio_format`, `sample_rates`, `speech_format`, `speech_rate`); the feature
+flags `bounded_paging`, `text_before`, `text_tail`, `whole_messages`,
+`reply_sse` and `device_logs`; and the bounds `max_input_bytes`,
+`max_transcript_bytes`, `max_text_window_bytes`, `max_event_bytes` and
+`max_audio_ms`. The device requires protocol 2 and checks `bounded_paging`,
+`text_tail` and `whole_messages`. SQLite schema v5 holds sessions, messages (with
 the system prompt each was sent with) and device reports only. An earlier database is refused at startup rather than
 migrated: remove `gateway.db` to start empty.
 
@@ -364,6 +371,10 @@ release assets. Real provider credentials, LAN mDNS,
 microphone accuracy/latency and device RAM remain integration acceptance work.
 
 ## Web chat validation on 2026-11-15
+
+This check ran on protocol 1. The device-draft and staged-recording behaviors
+it lists were removed by protocol 2: drafts no longer synchronize and
+transcription stores nothing.
 
 Go tests passed, including the public asset check for `/ui/icon.svg`. A local
 gateway with fake ASR and a fake streaming Hermes was driven in headless

@@ -65,13 +65,10 @@ static lv_obj_t *s_transition, *s_screen, *s_status, *s_title;
 static lv_obj_t *s_rows[4], *s_row_titles[4], *s_row_details[4];
 static lv_obj_t *s_row_badges[4], *s_row_initials[4];
 static bool s_row_selected[4];
-static lv_obj_t *s_scroll, *s_text, *s_arc, *s_clock, *s_record_dot;
+static lv_obj_t *s_scroll;
 #define AGENT_WAVE_BARS 3
-#define AGENT_WAVE_WIDTH 10
-#define AGENT_WAVE_PITCH 18
-#define AGENT_WAVE_CENTER 166
 static lv_obj_t *s_wave[AGENT_WAVE_BARS];
-static uint8_t s_levels[AGENT_WAVE_BARS];
+static uint8_t s_level; // Smoothed loudness driving the wave bars.
 static lv_obj_t *s_chat_card, *s_chat_role, *s_chat_body, *s_chat_dot;
 static lv_obj_t *s_chat_wait, *s_chat_wait_arc;
 static char s_chat_title[AGENT_TITLE_BYTES + 1], s_chat_status[64];
@@ -79,7 +76,7 @@ static char *s_chat_text;
 static char s_chat_id[37];
 static uint32_t s_chat_generation, s_chat_selection;
 static agent_text_kind_t s_chat_kind;
-static bool s_chat_wait_animating, s_chat_open_bottom;
+static bool s_chat_wait_animating;
 
 // Voice page (see agent_voice.h for the layout grid).
 static lv_obj_t *s_voice_orb, *s_voice_arc, *s_voice_status, *s_voice_timer, *s_voice_side, *s_voice_side_sub;
@@ -108,6 +105,8 @@ static int64_t s_think_since;
 static agent_speech_view_t s_speech;
 // Spoken-reply follower: the newest exchange seen in this session.
 static char s_play_session[37], s_play_seen[37];
+// A failed reply retried from this device is read aloud once it runs again.
+static char s_play_rearm[37];
 static bool s_play_baseline;
 
 static void set_text(lv_obj_t *label, const char *text, bool body)
@@ -146,9 +145,9 @@ static void delete_screen(void)
     if (s_page == AGENT_PAGE_SETTINGS) memo_ui_settings_destroy();
     else if (s_page == AGENT_PAGE_PROVISION) memo_ui_provision_destroy();
     else memo_ui_screen_delete(s_screen);
-    s_screen = s_status = s_title = s_scroll = s_text = s_arc = s_clock = s_record_dot = NULL;
+    s_screen = s_status = s_title = s_scroll = NULL;
     memset(s_wave, 0, sizeof(s_wave));
-    memset(s_levels, 0, sizeof(s_levels));
+    s_level = 0;
     free(s_chat_text);
     s_chat_text = NULL;
     s_chat_card = s_chat_role = s_chat_body = s_chat_dot = NULL;
@@ -157,7 +156,7 @@ static void delete_screen(void)
     s_chat_id[0] = '\0';
     s_chat_generation = s_chat_selection = UINT32_MAX;
     s_chat_kind = AGENT_TEXT_REPLY;
-    s_chat_wait_animating = s_chat_open_bottom = false;
+    s_chat_wait_animating = false;
     s_voice_orb = s_voice_arc = s_voice_status = s_voice_timer = s_voice_side = s_voice_side_sub = NULL;
     s_voice_strip = s_voice_strip_text = s_voice_strip_spin = NULL;
     s_voice_panel = s_voice_panel_count = s_voice_panel_scroll = s_voice_panel_body = s_voice_hints = NULL;
@@ -588,10 +587,7 @@ static void render_chat(void)
             s_chat_text = text;
             lv_obj_update_layout(s_scroll);
             int32_t target = position;
-            if (different) {
-                target = s_chat_open_bottom ? position + lv_obj_get_scroll_bottom(s_scroll) : 0;
-                s_chat_open_bottom = false;
-            }
+            if (different) target = 0; // A new message always opens at its top.
             if (!input && s_chat_wait_animating) target = 0;
             if (target < 0) target = 0;
             lv_obj_scroll_to_y(s_scroll, target, LV_ANIM_OFF);
@@ -899,8 +895,8 @@ static void render_voice(void)
     static const int idle_bars[3] = {26, 44, 26};
     if (mode == AGENT_VOICE_RECORDING || mode == AGENT_VOICE_SPEAKING) {
         const uint8_t level = mode == AGENT_VOICE_RECORDING ? agent_capture_level() : s_speech.level;
-        s_levels[0] = level > s_levels[0] ? level : (uint8_t)(s_levels[0] * 3 / 4);
-        const int bars[3] = {14 + s_levels[0] * 26 / 100, 14 + s_levels[0] * 46 / 100, 14 + s_levels[0] * 26 / 100};
+        s_level = level > s_level ? level : (uint8_t)(s_level * 3 / 4);
+        const int bars[3] = {14 + s_level * 26 / 100, 14 + s_level * 46 / 100, 14 + s_level * 26 / 100};
         const uint32_t color = mode == AGENT_VOICE_RECORDING ? UI_RECORDING : UI_ACCENT;
         voice_orb(false, mode == AGENT_VOICE_RECORDING ? UI_RECORDING : UI_ACCENT_SOFT,
                   mode == AGENT_VOICE_RECORDING ? LV_OPA_20 : LV_OPA_COVER, color, true);
@@ -1180,7 +1176,9 @@ static void exit_page(void)
     } else if (s_page == AGENT_PAGE_CHAT || s_page == AGENT_PAGE_VOICE) {
         // Long Down leaves the current state: speaking, then the draft, then the session.
         agent_speech_copy(&s_speech);
-        if (s_speech.active) { agent_speech_stop(false); return; }
+        // A reply still being prepared is silent: leave the session (which
+        // stops it) rather than spend the key on an invisible stop.
+        if (s_speech.active && s_speech.audible) { agent_speech_stop(false); return; }
         if (s_page == AGENT_PAGE_VOICE && voice_has_draft()) {
             const bool cleared = agent_client_clear_draft() == ESP_OK;
             if (bsp_lvgl_lock(1000)) { ui_notice(cleared ? "草稿已清空" : "暂时无法清空草稿"); bsp_lvgl_unlock(); }
@@ -1238,7 +1236,6 @@ static void scroll_chat(bsp_btn_t button)
         } else {
             s_edge_at = 0;
             chat_hint("");
-            s_chat_open_bottom = false;
             if (direction < 0 && !input) agent_client_message_select(true);
             else if (direction > 0 && input) agent_client_message_select(false);
             else agent_client_history(direction);
@@ -1266,7 +1263,8 @@ static void voice_key(bsp_btn_t button)
                 bsp_lvgl_unlock();
             }
         } else if (mode == AGENT_VOICE_FAILED) {
-            agent_client_retry(s_view.message.id, s_view.selection);
+            if (agent_client_retry(s_view.message.id, s_view.selection) == ESP_OK)
+                agent_copy_text(s_play_rearm, sizeof(s_play_rearm), s_view.message.id);
         } else if (mode != AGENT_VOICE_TRANSCRIBING) {
             show_page(AGENT_PAGE_CHAT);
         }
@@ -1419,12 +1417,18 @@ static void follow_speech(void)
         agent_speech_stop(false);
         agent_copy_text(s_play_session, sizeof(s_play_session), s_view.session_id);
         s_play_seen[0] = '\0';
+        s_play_rearm[0] = '\0';
         s_play_baseline = true;
     }
     if (!s_view.speech || s_view.session_id[0] == '\0' || !s_view.turn.present || s_view.capture != AGENT_IDLE ||
         s_view.session_switching || s_view.chat_loading || s_view.turn.after[0] != '\0') return;
     const char *id = s_view.turn.message.id;
-    if (id[0] == '\0' || strcmp(id, s_play_seen) == 0) return;
+    if (id[0] == '\0') return;
+    if (strcmp(id, s_play_seen) == 0) {
+        // The same message plays again only after this device retried it.
+        if (strcmp(id, s_play_rearm) != 0 || !agent_message_active(s_view.turn.message.state)) return;
+        s_play_rearm[0] = '\0';
+    }
     const bool baseline = s_play_baseline;
     s_play_baseline = false;
     agent_copy_text(s_play_seen, sizeof(s_play_seen), id);

@@ -13,7 +13,7 @@ Go 服务已实现 mDNS、持久化会话、旁路式 OpenAI 实时转写、Herm
 Chat Completions、媒体过滤和消息恢复。离线上游适配测试和真实二进制烟雾
 测试覆盖服务端流程。2026-11-13 已通过真实 OpenAI 转写和 Hermes 0.23.1
 两轮会话测试。首版 AI Passport 固件已实现会话、录音、草稿和回复，设备实测通过
-服务发现、录音、追加转写、发送、回复显示及设置切换。当前迭代新增语音优先的会话界面、
+服务发现、录音、转写（当时为追加，现在重录会替换草稿）、发送、回复显示及设置切换。当前迭代新增语音优先的会话界面、
 由中转服务通过 OpenAI Realtime API 合成的回复朗读、网页聊天客户端和设备诊断报告，
 验证状态见[里程碑](docs/roadmap.zh_CN.md)。交互优化、负载内存测量及
 故障恢复验证继续进行。现有 [voice-memo](https://github.com/tf4fun/voice-memo)
@@ -97,6 +97,7 @@ ESP32-S3 与 PSRAM。首版固件采用联网 PCM16 流式传输与有界缓冲�
 ## 文档
 
 - [固件、按键与验证](docs/firmware.zh_CN.md)
+- [固件验证历史](docs/firmware-history.zh_CN.md)
 - [架构与数据归属](docs/architecture.zh_CN.md)
 - [里程碑与验收](docs/roadmap.zh_CN.md)
 - [服务端配置与接口](docs/server.zh_CN.md)

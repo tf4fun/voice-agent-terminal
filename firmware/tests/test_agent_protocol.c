@@ -67,8 +67,7 @@ static void test_navigation_and_gestures(void)
     assert(agent_page_exit(AGENT_PAGE_CHAT, false) == AGENT_PAGE_SESSIONS);
     assert(agent_page_exit(AGENT_PAGE_PROVISION, false) == AGENT_PAGE_SETTINGS);
     assert(agent_page_exit(AGENT_PAGE_SESSIONS, false) == AGENT_PAGE_SESSIONS);
-    assert(agent_page_exit(AGENT_PAGE_PREPARING, false) == AGENT_PAGE_SESSIONS);
-    assert(agent_page_exit(AGENT_PAGE_RECORD, false) == AGENT_PAGE_SESSIONS);
+    assert(agent_page_exit(AGENT_PAGE_VOICE, false) == AGENT_PAGE_SESSIONS);
     assert(agent_page_can_record(AGENT_PAGE_SESSIONS));
     assert(agent_page_can_record(AGENT_PAGE_CHAT));
     assert(!agent_page_can_record(AGENT_PAGE_SETTINGS));

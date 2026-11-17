@@ -533,27 +533,6 @@ esp_err_t bsp_audio_prepare_deep_sleep(void) {
     return first_error;
 }
 
-esp_err_t bsp_audio_wake(void) {
-    if (!s_initialized || !s_sleeping) return ESP_OK;
-
-    // 允许内部格式设置重新 open codec；失败时再次 close，避免留下半唤醒状态。
-    s_sleeping = false;
-    esp_err_t e = bsp_audio_set_format(s_hz ? s_hz : AUDIO_DEFAULT_HZ,
-                             s_bits ? s_bits : AUDIO_DEFAULT_BITS,
-                             s_ch ? s_ch : AUDIO_DEFAULT_CH);
-    if (e != ESP_OK) {
-        s_opened = false;
-        s_sleeping = true;
-        s_sleep_result = e;
-        ESP_LOGE(TAG, "ES8311 唤醒失败: %s", esp_err_to_name(e));
-        return e;
-    }
-
-    s_sleep_result = ESP_OK;
-    ESP_LOGI(TAG, "ES8311 已从低功耗状态恢复");
-    return ESP_OK;
-}
-
 esp_err_t bsp_audio_write(const void *pcm, size_t bytes) {
     if (!s_dev || !s_opened || s_sleeping) return ESP_ERR_INVALID_STATE;
     return esp_codec_dev_write(s_dev, (void *)pcm, bytes) == 0 ? ESP_OK : ESP_FAIL;
