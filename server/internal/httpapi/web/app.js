@@ -170,11 +170,13 @@ function groupName(timestamp) {
 /* ---------- API ---------- */
 
 const ERRORS = {
-  busy: "会话正忙：设备可能正在录音，或上一条消息仍在处理。",
+  busy: "会话正忙：上一条消息仍在处理或结果未确认。",
   stale_revision: "内容刚刚更新，请重新载入后再试。",
   conflict: "会话当前状态不允许此操作，请稍后再试。",
   not_found: "会话不存在或已被删除。",
-  limit_exceeded: "内容超过服务端上限（64 KiB）。",
+  limit_exceeded: "内容超过服务端上限。",
+  input_too_large: "内容超过 64 KiB 上限。",
+  empty_input: "内容不能为空。",
   request_too_large: "内容过长。",
   hermes_not_configured: "服务端未配置 Hermes。",
   hermes_session_error: "Hermes 暂时无法同步，请稍后重试。",
@@ -992,6 +994,12 @@ function lastMessageActive() {
   return !!last && ACTIVE.has(last.state);
 }
 
+// The gateway refuses a new message while any message in the session is active
+// or unconfirmed; an unconfirmed one must be retried first.
+function sessionHeld() {
+  return lastMessageActive() || state.messages.some(message => message.state === "unconfirmed");
+}
+
 function composerChanged() {
   const area = ui.input;
   area.style.height = "auto";
@@ -999,11 +1007,11 @@ function composerChanged() {
   const hasText = area.value.trim().length > 0;
   const session = currentSession();
   const last = state.messages[state.messages.length - 1];
-  const blocked = state.sending || lastMessageActive() || (session && session.state === "deleting");
+  const blocked = state.sending || sessionHeld() || (session && session.state === "deleting");
   ui.send.disabled = !hasText || blocked;
   ui.send.title = lastMessageActive()
     ? (last && last.state === "attention" ? "等待 Hermes 审批" : "等待当前回复完成")
-    : "发送";
+    : sessionHeld() ? "上一条消息结果未确认，请先重试" : "发送";
 }
 
 function failedList(key) {
@@ -1168,7 +1176,7 @@ async function retryFailedSend(entry) {
 // chat leaves nothing behind. A lost response is retried with the same IDs.
 async function send() {
   const text = ui.input.value.trim();
-  if (!text || state.sending || lastMessageActive()) return;
+  if (!text || state.sending || sessionHeld()) return;
   if (byteLength(text) > 64 * 1024) { toast("内容超过 64 KiB 上限。"); return; }
   const fresh = !state.currentId;
   const draftKey = fresh ? "" : state.currentId;

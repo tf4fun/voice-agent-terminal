@@ -191,6 +191,26 @@ func (s *Service) Reconcile(ctx context.Context, session model.Session) error {
 	return err
 }
 
+// ReconcileWithin runs Reconcile for a request on the service lifetime and
+// waits at most wait for it. A slower Hermes call finishes in the background
+// rather than being cancelled, so the request answers within the device's
+// timeout and the session still becomes ready without waiting for the loop.
+func (s *Service) ReconcileWithin(session model.Session, wait time.Duration) error {
+	ctx := s.baseContext()
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	done := make(chan error, 1)
+	s.workers.Add(1)
+	go func() { defer s.workers.Done(); done <- s.Reconcile(ctx, session) }()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(wait):
+		return context.DeadlineExceeded
+	}
+}
+
 // PrepareCapture opens the upstream transcription session for a recording
 // while the device shows its preparing animation. It waits at most
 // wait; a slower or failed handshake leaves the upload to open its own session.

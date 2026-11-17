@@ -29,6 +29,7 @@ type environment struct {
 	input      chan string
 	keys       chan string
 	abortFirst atomic.Bool
+	slowCreate atomic.Bool // The next Hermes session create takes 3 s.
 }
 
 func setup(t *testing.T) *environment {
@@ -76,6 +77,9 @@ func setup(t *testing.T) *environment {
 			fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
 			return
 		}
+		if r.Method == "POST" && env.slowCreate.Swap(false) {
+			time.Sleep(3 * time.Second)
+		}
 		id := strings.TrimPrefix(r.URL.Path, "/api/sessions/")
 		status := 201
 		if r.Method == "GET" {
@@ -104,6 +108,30 @@ func setup(t *testing.T) *environment {
 	env.server = httptest.NewServer(New(env.service))
 	t.Cleanup(func() { cancel(); env.server.Close(); env.service.Close(); st.Close(); upstream.Close() })
 	return env
+}
+
+func TestSlowHermesCreateDoesNotHoldTheSend(t *testing.T) {
+	e := setup(t)
+	e.slowCreate.Store(true)
+	session, message := model.NewID(), model.NewID()
+	base := "/api/v1/sessions/" + session
+	started := time.Now()
+	e.request(t, "POST", base+"/messages", map[string]any{"id": message, "text": "慢创建", "new_session": true}, 202)
+	if elapsed := time.Since(started); elapsed > 3500*time.Millisecond {
+		t.Fatalf("send waited %v for Hermes, over the device's request budget", elapsed)
+	}
+	deadline := time.Now().Add(8 * time.Second)
+	for {
+		var result model.Message
+		_ = json.Unmarshal(e.request(t, "GET", base+"/messages/"+message, nil, 200), &result)
+		if result.State == "completed" {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("queued message never completed: %+v", result)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }
 
 func TestConnectionRecoveryReplacesPartialReply(t *testing.T) {

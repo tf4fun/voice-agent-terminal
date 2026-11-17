@@ -136,8 +136,10 @@ because completion order across turns is not guaranteed. Each recording sends
 `input_audio_buffer.clear`, appends its audio, commits once and accepts only the
 first item after its clear. A cleanly finished session returns to the pool; a
 failed or cancelled turn discards its session, because buffered audio or an
-in-flight item may remain. A dedicated reader per connection answers keepalive
-pings sent every 20 s, detects drops at once and triggers a reconnect with
+in-flight item may remain. Every 20 s the pool pings both the idle session and
+those checked out (an upstream that sends no events while audio streams in
+would otherwise hit the 50 s read deadline); a dedicated reader per connection
+detects drops at once and triggers a reconnect with
 exponential backoff up to 60 s. Sessions are replaced after 50 minutes, inside
 the documented realtime session limit. A second concurrent recording opens its
 own session.

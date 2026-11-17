@@ -239,12 +239,16 @@ func (s *Server) deleteSession(w http.ResponseWriter, r *http.Request) {
 		storeError(w, err)
 		return
 	}
-	if !s.service.Hermes.Enabled() || s.service.Reconcile(r.Context(), session) != nil {
+	if !s.service.Hermes.Enabled() || s.service.ReconcileWithin(session, reconcileWait) != nil {
 		writeJSON(w, 202, map[string]string{"id": id, "state": "deleting"})
 		return
 	}
 	writeJSON(w, 200, map[string]string{"id": id, "state": "deleted"})
 }
+
+// reconcileWait bounds the Hermes create or delete a request tries inline,
+// below the device's 4 s request timeout; a slower call finishes in the background.
+const reconcileWait = 2500 * time.Millisecond
 
 // prepareWait bounds the transcriber handshake while the device shows its
 // preparing animation, below the device's 4 s request timeout.
@@ -465,8 +469,8 @@ func (s *Server) send(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if session.State == "creating" {
-		// A failed Hermes create leaves the message queued for the reconcile loop.
-		_ = s.service.Reconcile(r.Context(), session)
+		// A failed or slow Hermes create leaves the message queued for the reconcile loop.
+		_ = s.service.ReconcileWithin(session, reconcileWait)
 		if refreshed, err := s.service.Store.Session(r.Context(), sessionID); err == nil {
 			session = refreshed
 		}

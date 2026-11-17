@@ -121,7 +121,7 @@ type Pool[E any] struct {
 
 	mu      sync.Mutex
 	idle    *Conn[E]
-	inUse   int
+	leased  map[*Conn[E]]struct{} // Checked-out sessions; Run pings them too.
 	running bool
 	wake    chan struct{}
 }
@@ -165,7 +165,7 @@ func (p *Pool[E]) Acquire(ctx context.Context) (*Conn[E], error) {
 	s := p.idle
 	p.idle = nil
 	if s != nil && s.Healthy() {
-		p.inUse++
+		p.lease(s)
 		p.mu.Unlock()
 		return s, nil
 	}
@@ -181,9 +181,17 @@ func (p *Pool[E]) Acquire(ctx context.Context) (*Conn[E], error) {
 		return nil, err
 	}
 	p.mu.Lock()
-	p.inUse++
+	p.lease(fresh)
 	p.mu.Unlock()
 	return fresh, nil
+}
+
+// lease records s as checked out; p.mu must be held.
+func (p *Pool[E]) lease(s *Conn[E]) {
+	if p.leased == nil {
+		p.leased = make(map[*Conn[E]]struct{})
+	}
+	p.leased[s] = struct{}{}
 }
 
 // Release checks a session back in: a clean, healthy one becomes the warm
@@ -193,7 +201,7 @@ func (p *Pool[E]) Release(s *Conn[E], clean bool) {
 		return
 	}
 	p.mu.Lock()
-	p.inUse--
+	delete(p.leased, s)
 	keep := clean && s.Healthy() && p.running && p.idle == nil
 	if keep {
 		p.idle = s
@@ -206,7 +214,9 @@ func (p *Pool[E]) Release(s *Conn[E], clean bool) {
 }
 
 // Run keeps one configured session warm until ctx ends: it reconnects with
-// backoff, pings the idle session and replaces it before its maximum age.
+// backoff, pings the idle and checked-out sessions and replaces the idle one
+// before its maximum age. A checked-out session needs pings as well: upstream
+// may send no events for longer than the read deadline while audio streams in.
 func (p *Pool[E]) Run(ctx context.Context) {
 	p.mu.Lock()
 	p.running = true
@@ -235,7 +245,7 @@ func (p *Pool[E]) Run(ctx context.Context) {
 		if stale {
 			p.idle = nil
 		}
-		needed := p.idle == nil && p.inUse == 0
+		needed := p.idle == nil && len(p.leased) == 0
 		p.mu.Unlock()
 		if stale {
 			_ = current.Close()
@@ -261,7 +271,7 @@ func (p *Pool[E]) Run(ctx context.Context) {
 			backoff = time.Second
 			p.logInfo("warm "+p.Name+" session ready", "elapsed_ms", time.Since(started).Milliseconds())
 			p.mu.Lock()
-			if p.idle == nil && p.inUse == 0 {
+			if p.idle == nil && len(p.leased) == 0 {
 				p.idle, fresh = fresh, nil
 			}
 			p.mu.Unlock()
@@ -282,10 +292,18 @@ func (p *Pool[E]) Run(ctx context.Context) {
 		case <-wake:
 		case <-ticker.C:
 			p.mu.Lock()
-			idle := p.idle
+			live := make([]*Conn[E], 0, 1+len(p.leased))
+			if p.idle != nil {
+				live = append(live, p.idle)
+			}
+			for s := range p.leased {
+				live = append(live, s)
+			}
 			p.mu.Unlock()
-			if idle != nil && idle.Ping() != nil {
-				_ = idle.Close()
+			for _, s := range live {
+				if s.Ping() != nil {
+					_ = s.Close()
+				}
 			}
 		}
 	}
