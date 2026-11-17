@@ -6,8 +6,9 @@
 typedef enum {
     AGENT_PAGE_SESSIONS, AGENT_PAGE_CHAT,
     AGENT_PAGE_SETTINGS, AGENT_PAGE_PROVISION,
-    AGENT_PAGE_PREPARING, AGENT_PAGE_RECORD,
-    AGENT_PAGE_VOICE, // A session's default view; recording happens here too.
+    // 4 and 5 were the retired preparing and record pages; the value stays so
+    // page numbers in traces keep their meaning.
+    AGENT_PAGE_VOICE = 6, // A session's default view; recording happens here too.
 } agent_page_t;
 
 static const agent_page_t agent_root_pages[] = {AGENT_PAGE_SESSIONS, AGENT_PAGE_SETTINGS};

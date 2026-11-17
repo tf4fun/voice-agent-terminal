@@ -38,7 +38,6 @@ static bool s_wifi_stopped;
 static bool s_release_pending;
 static uint32_t s_session; // Protected with s_info.lock, including event publication.
 static bool s_wifi_handler_registered, s_ip_handler_registered;
-static atomic_bool s_time_synced;
 /* Running and synchronised are different: an unreachable NTP server can leave
  * the client running across many Wi-Fi reconnects without ever syncing. */
 static bool s_sntp_started;
@@ -89,7 +88,7 @@ static void retry_cb(void *arg)
 
 static void start_sntp(void)
 {
-    if (s_time_synced || s_sntp_started) return;
+    if (s_sntp_started) return;
     s_sntp_started = true; // Also covers init queued to lwIP but not executed yet.
     esp_sntp_setoperatingmode(ESP_SNTP_OPMODE_POLL);
     esp_sntp_setservername(0, "pool.ntp.org");
@@ -292,17 +291,6 @@ void memo_net_info(memo_network_info_t *out)
 bool memo_net_has_ip(void)
 {
     return s_state == MEMO_NET_CONNECTED;
-}
-
-bool memo_net_time_synced(void)
-{
-    if (!s_time_synced) {
-        /* 轮询一次：SNTP 同步成功后 sntp_get_sync_status 会变成 COMPLETED。 */
-        if (esp_sntp_get_sync_status() == SNTP_SYNC_STATUS_COMPLETED) {
-            s_time_synced = true;
-        }
-    }
-    return s_time_synced;
 }
 
 uint64_t memo_net_now(void)

@@ -1,7 +1,7 @@
 /*******************************************************************************
  * Size: 16 px
  * Bpp: 4
- * Opts: --font /Users/xiaxilin/Projects/voice-memo/bin/fonts/NotoSansSC-Regular.otf --range 0x20-0x7E --size 16 --bpp 4 --format lvgl --no-compress --lv-include lvgl.h -o /private/tmp/voice-agent-fonts-20261113/memo_font_meta_16.c
+ * Opts: --font build/font-sources/NotoSansSC-Regular.otf --symbols  !"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\]^_`abcdefghijklmnopqrstuvwxyz{|}~ --size 16 --bpp 4 --format lvgl --no-compress --lv-include lvgl.h -o memo_font_meta_16.c
  ******************************************************************************/
 
 #ifdef LV_LVGL_H_INCLUDE_SIMPLE

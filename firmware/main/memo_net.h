@@ -34,8 +34,5 @@ bool memo_net_has_ip(void);
 // Keeps the radio out of modem sleep while held (nested holds are counted).
 void memo_net_hold_awake(bool hold);
 
-/* SNTP 是否已经同步过（决定 recorded_at 能不能用真实时间）。 */
-bool memo_net_time_synced(void);
-
 /* 把时间戳规整成"可信的 Unix 秒"，未对时返回 0。 */
 uint64_t memo_net_now(void);

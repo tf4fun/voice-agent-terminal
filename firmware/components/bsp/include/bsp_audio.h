@@ -34,10 +34,6 @@ esp_err_t bsp_audio_sleep(void);
 // 进入 deep sleep 或重启；不得用于 light sleep。
 esp_err_t bsp_audio_prepare_deep_sleep(void);
 
-// 从 light sleep 返回后恢复 ES8311 和休眠前的采样格式。函数幂等；deep sleep
-// 唤醒会重启应用，应由 bsp_audio_init() 按正常启动流程重新初始化。
-esp_err_t bsp_audio_wake(void);
-
 // 播放 / 录音。bytes 为字节数(16bit 单声道时 = 采样数 x 2)。
 esp_err_t bsp_audio_write(const void *pcm, size_t bytes);
 esp_err_t bsp_audio_read(void *pcm, size_t bytes);

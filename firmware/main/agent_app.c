@@ -65,13 +65,10 @@ static lv_obj_t *s_transition, *s_screen, *s_status, *s_title;
 static lv_obj_t *s_rows[4], *s_row_titles[4], *s_row_details[4];
 static lv_obj_t *s_row_badges[4], *s_row_initials[4];
 static bool s_row_selected[4];
-static lv_obj_t *s_scroll, *s_text, *s_arc, *s_clock, *s_record_dot;
+static lv_obj_t *s_scroll;
 #define AGENT_WAVE_BARS 3
-#define AGENT_WAVE_WIDTH 10
-#define AGENT_WAVE_PITCH 18
-#define AGENT_WAVE_CENTER 166
 static lv_obj_t *s_wave[AGENT_WAVE_BARS];
-static uint8_t s_levels[AGENT_WAVE_BARS];
+static uint8_t s_level; // Smoothed loudness driving the wave bars.
 static lv_obj_t *s_chat_card, *s_chat_role, *s_chat_body, *s_chat_dot;
 static lv_obj_t *s_chat_wait, *s_chat_wait_arc;
 static char s_chat_title[AGENT_TITLE_BYTES + 1], s_chat_status[64];
@@ -79,7 +76,7 @@ static char *s_chat_text;
 static char s_chat_id[37];
 static uint32_t s_chat_generation, s_chat_selection;
 static agent_text_kind_t s_chat_kind;
-static bool s_chat_wait_animating, s_chat_open_bottom;
+static bool s_chat_wait_animating;
 
 // Voice page (see agent_voice.h for the layout grid).
 static lv_obj_t *s_voice_orb, *s_voice_arc, *s_voice_status, *s_voice_timer, *s_voice_side, *s_voice_side_sub;
@@ -148,9 +145,9 @@ static void delete_screen(void)
     if (s_page == AGENT_PAGE_SETTINGS) memo_ui_settings_destroy();
     else if (s_page == AGENT_PAGE_PROVISION) memo_ui_provision_destroy();
     else memo_ui_screen_delete(s_screen);
-    s_screen = s_status = s_title = s_scroll = s_text = s_arc = s_clock = s_record_dot = NULL;
+    s_screen = s_status = s_title = s_scroll = NULL;
     memset(s_wave, 0, sizeof(s_wave));
-    memset(s_levels, 0, sizeof(s_levels));
+    s_level = 0;
     free(s_chat_text);
     s_chat_text = NULL;
     s_chat_card = s_chat_role = s_chat_body = s_chat_dot = NULL;
@@ -159,7 +156,7 @@ static void delete_screen(void)
     s_chat_id[0] = '\0';
     s_chat_generation = s_chat_selection = UINT32_MAX;
     s_chat_kind = AGENT_TEXT_REPLY;
-    s_chat_wait_animating = s_chat_open_bottom = false;
+    s_chat_wait_animating = false;
     s_voice_orb = s_voice_arc = s_voice_status = s_voice_timer = s_voice_side = s_voice_side_sub = NULL;
     s_voice_strip = s_voice_strip_text = s_voice_strip_spin = NULL;
     s_voice_panel = s_voice_panel_count = s_voice_panel_scroll = s_voice_panel_body = s_voice_hints = NULL;
@@ -590,10 +587,7 @@ static void render_chat(void)
             s_chat_text = text;
             lv_obj_update_layout(s_scroll);
             int32_t target = position;
-            if (different) {
-                target = s_chat_open_bottom ? position + lv_obj_get_scroll_bottom(s_scroll) : 0;
-                s_chat_open_bottom = false;
-            }
+            if (different) target = 0; // A new message always opens at its top.
             if (!input && s_chat_wait_animating) target = 0;
             if (target < 0) target = 0;
             lv_obj_scroll_to_y(s_scroll, target, LV_ANIM_OFF);
@@ -901,8 +895,8 @@ static void render_voice(void)
     static const int idle_bars[3] = {26, 44, 26};
     if (mode == AGENT_VOICE_RECORDING || mode == AGENT_VOICE_SPEAKING) {
         const uint8_t level = mode == AGENT_VOICE_RECORDING ? agent_capture_level() : s_speech.level;
-        s_levels[0] = level > s_levels[0] ? level : (uint8_t)(s_levels[0] * 3 / 4);
-        const int bars[3] = {14 + s_levels[0] * 26 / 100, 14 + s_levels[0] * 46 / 100, 14 + s_levels[0] * 26 / 100};
+        s_level = level > s_level ? level : (uint8_t)(s_level * 3 / 4);
+        const int bars[3] = {14 + s_level * 26 / 100, 14 + s_level * 46 / 100, 14 + s_level * 26 / 100};
         const uint32_t color = mode == AGENT_VOICE_RECORDING ? UI_RECORDING : UI_ACCENT;
         voice_orb(false, mode == AGENT_VOICE_RECORDING ? UI_RECORDING : UI_ACCENT_SOFT,
                   mode == AGENT_VOICE_RECORDING ? LV_OPA_20 : LV_OPA_COVER, color, true);
@@ -1242,7 +1236,6 @@ static void scroll_chat(bsp_btn_t button)
         } else {
             s_edge_at = 0;
             chat_hint("");
-            s_chat_open_bottom = false;
             if (direction < 0 && !input) agent_client_message_select(true);
             else if (direction > 0 && input) agent_client_message_select(false);
             else agent_client_history(direction);
