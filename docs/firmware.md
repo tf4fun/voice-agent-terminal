@@ -52,7 +52,14 @@ reads into a 16 KiB buffer (about 512 ms) shared with recording
 (`agent_pcm_pool.c`; the two never run together, since recording ends
 playback), and a writer task at the capture task's priority feeds the codec
 after 400 ms of prebuffer, refilling 200 ms after running dry, with short fades
-around each dry spell so it does not click. A dropped connection resumes at the
+around each dry spell so it does not click. Reply audio arrives already
+shaped for the speaker by the gateway (high-pass and limiter, see the server
+guide). The speech stream is flow-controlled by that buffer, so the TCP
+window sits in Wi-Fi RX buffers while playback catches up: the firmware keeps
+12 dynamic RX buffers, an A-MPDU window of 6, an 8-segment (11520-byte) TCP
+window and SACK. With 6 buffers and a 4-segment window, frames were dropped
+and each loss waited 0.24-0.54 s for a retransmission timeout on the gateway,
+which outlasted the buffer (measured in November 2026). A dropped connection resumes at the
 exact stream byte it stopped at (`?offset=<bytes>&stream=<id>` using the
 `X-Speech-Stream` response header, up to three times, keepalives not
 counted), with the frame parser carried over. If the gateway would have to

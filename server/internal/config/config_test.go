@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -48,5 +49,29 @@ func TestCaptureRequestBudgetPreservesAudioLimit(t *testing.T) {
 	}
 	if cfg.CaptureTimeout != 5*time.Minute || cfg.CaptureRequestTimeout() != 6*time.Minute {
 		t.Fatalf("audio=%v request=%v", cfg.CaptureTimeout, cfg.CaptureRequestTimeout())
+	}
+}
+
+func TestSpeechShapingSettings(t *testing.T) {
+	env := func(values map[string]string) func(string) string {
+		return func(key string) string { return values[key] }
+	}
+	cfg, err := Load(env(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SpeechHighPassHz != 200 || cfg.SpeechGainDB != 0 || cfg.SpeechCeilingDB != -10 {
+		t.Fatalf("defaults %v %v %v", cfg.SpeechHighPassHz, cfg.SpeechGainDB, cfg.SpeechCeilingDB)
+	}
+	cfg, err = Load(env(map[string]string{"VOICE_SPEECH_HIGHPASS_HZ": "0", "VOICE_SPEECH_GAIN_DB": "4.5", "VOICE_SPEECH_CEILING_DB": "-10"}))
+	if err != nil || cfg.SpeechHighPassHz != 0 || cfg.SpeechGainDB != 4.5 || cfg.SpeechCeilingDB != -10 {
+		t.Fatalf("parsed %+v %v", cfg, err)
+	}
+	for key, bad := range map[string]string{
+		"VOICE_SPEECH_HIGHPASS_HZ": "-1", "VOICE_SPEECH_GAIN_DB": "21", "VOICE_SPEECH_CEILING_DB": "1", "VOICE_SPEECH_GAIN_DB ": "x",
+	} {
+		if _, err := Load(env(map[string]string{strings.TrimSpace(key): bad})); err == nil {
+			t.Fatalf("%s=%s accepted", key, bad)
+		}
 	}
 }
