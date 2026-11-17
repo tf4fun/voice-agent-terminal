@@ -60,7 +60,7 @@ func TestSpeechShapingSettings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.SpeechHighPassHz != 200 || cfg.SpeechGainDB != 0 || cfg.SpeechCeilingDB != -13.5 {
+	if cfg.SpeechHighPassHz != 200 || cfg.SpeechGainDB != 0 || cfg.SpeechCeilingDB != -10 {
 		t.Fatalf("defaults %v %v %v", cfg.SpeechHighPassHz, cfg.SpeechGainDB, cfg.SpeechCeilingDB)
 	}
 	cfg, err = Load(env(map[string]string{"VOICE_SPEECH_HIGHPASS_HZ": "0", "VOICE_SPEECH_GAIN_DB": "4.5", "VOICE_SPEECH_CEILING_DB": "-10"}))

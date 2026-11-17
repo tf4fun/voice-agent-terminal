@@ -28,7 +28,7 @@
 | `OPENAI_REALTIME_URL` | 默认 `wss://api.openai.com/v1/realtime?intent=transcription` |
 | `VOICE_TTS_PROVIDER` | 回复朗读：默认 `openai`（使用 `OPENAI_API_KEY`），也可为 `fake` 或 `off` |
 | `OPENAI_TTS_MODEL`、`OPENAI_TTS_VOICE`、`OPENAI_TTS_URL` | 默认 `gpt-realtime-2.1-mini`、`marin` 和 `wss://api.openai.com/v1/realtime`，见[语音回复](#语音回复) |
-| `VOICE_SPEECH_HIGHPASS_HZ`、`VOICE_SPEECH_GAIN_DB`、`VOICE_SPEECH_CEILING_DB` | 朗读音频的喇叭适配：高通截止频率（默认 `200`，`0` 关闭，最高 1000）、增益（默认 `0`，±20 dB）和限幅上限（默认 `-13.5` dBFS，-40 到 0），见[语音回复](#语音回复) |
+| `VOICE_SPEECH_HIGHPASS_HZ`、`VOICE_SPEECH_GAIN_DB`、`VOICE_SPEECH_CEILING_DB` | 朗读音频的喇叭适配：高通截止频率（默认 `200`，`0` 关闭，最高 1000）、增益（默认 `0`，±20 dB）和限幅上限（默认 `-10` dBFS，-40 到 0），见[语音回复](#语音回复) |
 
 本地数据与环境文件由 Git 忽略。网络暴露范围和设备凭据按预期的局域网部署配置。
 Hermes API 服务应已启用，并提供对应的 `HERMES_API_KEY` 与 API 会话能力。
@@ -215,7 +215,7 @@ SSE 投递本身是临时的。审批以待处理状态呈现，详细审批控�
 音频缓存前先针对设备喇叭处理：200 Hz 二阶高通去掉小喇叭放不出的低频（合成语音约三分之一能量在 250 Hz
 以下），再经增益和前瞻限幅（前瞻 5 ms、恢复约 60 ms）把峰值压在上限以内，响亮的字被压低而不是削波。
 默认上限来自设备 100% 音量下的试听：ES8311 此时会额外放大 +3.6 dB，未处理的峰值约 -3.5 dBFS 会发破；
-同样的音频在 80%（-6.4 dB，编解码器处峰值约 -9.9 dB）不破，-13.5 dBFS 让 100% 时的峰值落在这个水平。
+同样的音频在 80%（-6.4 dB，编解码器处峰值约 -9.9 dB）不破。在 100% 下把上限从 -13.5 dBFS 逐步调高，-10 dBFS 是仍然清楚、将破未破的最响档（编解码器处峰值约 -6.4 dB）。
 重音仍发破就调低上限，想更响就调高上限或增益；重启后对新合成的朗读生效。响应附带 `X-Speech-Stream` 流标识响应头，正文为分帧二进制：一个类型字节、
 一个小端 uint16 长度，然后是载荷。类型 1 表示朗读开始（uint16 序号 0 加正文前 240 字节；
 设备显示它自己取回的回复全文），类型 2 是 16 kHz 单声道 PCM16LE 音频（每帧 128 ms），

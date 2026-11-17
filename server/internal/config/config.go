@@ -108,7 +108,7 @@ func Load(getenv func(string) string) (Config, error) {
 	}{
 		{"VOICE_SPEECH_HIGHPASS_HZ", "200", 0, 1000, &cfg.SpeechHighPassHz},
 		{"VOICE_SPEECH_GAIN_DB", "0", -20, 20, &cfg.SpeechGainDB},
-		{"VOICE_SPEECH_CEILING_DB", "-13.5", -40, 0, &cfg.SpeechCeilingDB},
+		{"VOICE_SPEECH_CEILING_DB", "-10", -40, 0, &cfg.SpeechCeilingDB},
 	} {
 		parsed, err := strconv.ParseFloat(value(setting.name, setting.fallback), 64)
 		if err != nil || math.IsNaN(parsed) || parsed < setting.low || parsed > setting.high {

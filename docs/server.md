@@ -29,7 +29,7 @@ Existing process variables take precedence.
 | `OPENAI_REALTIME_URL` | Default `wss://api.openai.com/v1/realtime?intent=transcription` |
 | `VOICE_TTS_PROVIDER` | Spoken replies: `openai` by default (uses `OPENAI_API_KEY`), `fake` or `off` |
 | `OPENAI_TTS_MODEL`, `OPENAI_TTS_VOICE`, `OPENAI_TTS_URL` | Defaults `gpt-realtime-2.1-mini`, `marin` and `wss://api.openai.com/v1/realtime`; see [Spoken replies](#spoken-replies) |
-| `VOICE_SPEECH_HIGHPASS_HZ`, `VOICE_SPEECH_GAIN_DB`, `VOICE_SPEECH_CEILING_DB` | Speaker shaping of spoken replies: high-pass cutoff (default `200`, `0` off, up to 1000), gain (default `0`, ±20 dB) and limiter ceiling (default `-13.5` dBFS, -40 to 0); see [Spoken replies](#spoken-replies) |
+| `VOICE_SPEECH_HIGHPASS_HZ`, `VOICE_SPEECH_GAIN_DB`, `VOICE_SPEECH_CEILING_DB` | Speaker shaping of spoken replies: high-pass cutoff (default `200`, `0` off, up to 1000), gain (default `0`, ±20 dB) and limiter ceiling (default `-10` dBFS, -40 to 0); see [Spoken replies](#spoken-replies) |
 
 Local data and environment files are ignored by Git. Bind network exposure and
 device credentials to the intended LAN deployment. A configured Hermes API
@@ -286,8 +286,9 @@ a look-ahead limiter (5 ms look-ahead, about 60 ms release) hold every peak at
 the ceiling, so loud syllables are turned down instead of clipped. The ceiling
 default comes from listening at the device's 100% volume, where the ES8311 adds
 +3.6 dB: unshaped peaks near -3.5 dBFS crackled, while the same audio at 80%
-(-6.4 dB, peaks about -9.9 dB at the codec) stayed clean; -13.5 dBFS at 100%
-puts peaks at that clean level. Lower the ceiling if loud syllables still
+(-6.4 dB, peaks about -9.9 dB at the codec) stayed clean. Stepping the ceiling
+up from -13.5 dBFS at 100%, -10 dBFS was the loudest setting that stayed clear,
+just short of crackling (peaks about -6.4 dB at the codec). Lower the ceiling if loud syllables still
 crackle, raise it or the gain for more loudness; a restart applies the change
 to new syntheses. The response is framed binary with an `X-Speech-Stream` stream identity
 header: one kind byte, a little-endian uint16 length, then the payload.

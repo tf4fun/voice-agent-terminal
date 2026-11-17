@@ -67,6 +67,16 @@ the per-sentence splitter that only tests still used, and stopped the device's
 `X-Speech-Stream` header callback from reading a pointer into a returned stack
 frame on later body events.
 
+Reply speech dropouts and distortion: a gateway TCP trace showed the device
+stalling for 0.3–0.7 s while losses waited for retransmission timeouts, so the
+firmware now has 12 dynamic Wi-Fi RX buffers, a 6-frame block-ack window, an
+11,520-byte TCP window and SACK. Distortion at 100% volume came from the ES8311
+adding +3.6 dB; the gateway now applies a 200 Hz high-pass and a look-ahead
+limiter (`VOICE_SPEECH_*`, default ceiling -10 dBFS, set by listening).
+Firmware `cae95e4e` was flashed on 2026-11-17: 8 replies had 0 underruns and
+0 resumes, minimum free heap 31,184 bytes; the user judged -10 dBFS at 100%
+volume clear and just short of crackling.
+
 Sessions open on a voice-first view (orb, status line, one-line strip and key
 hints) with the text card as a second view; the firmware guide describes it.
 The gateway synthesizes each completed reply in one OpenAI Realtime request and
