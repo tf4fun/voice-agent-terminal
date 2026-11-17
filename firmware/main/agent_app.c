@@ -108,6 +108,8 @@ static int64_t s_think_since;
 static agent_speech_view_t s_speech;
 // Spoken-reply follower: the newest exchange seen in this session.
 static char s_play_session[37], s_play_seen[37];
+// A failed reply retried from this device is read aloud once it runs again.
+static char s_play_rearm[37];
 static bool s_play_baseline;
 
 static void set_text(lv_obj_t *label, const char *text, bool body)
@@ -1180,7 +1182,9 @@ static void exit_page(void)
     } else if (s_page == AGENT_PAGE_CHAT || s_page == AGENT_PAGE_VOICE) {
         // Long Down leaves the current state: speaking, then the draft, then the session.
         agent_speech_copy(&s_speech);
-        if (s_speech.active) { agent_speech_stop(false); return; }
+        // A reply still being prepared is silent: leave the session (which
+        // stops it) rather than spend the key on an invisible stop.
+        if (s_speech.active && s_speech.audible) { agent_speech_stop(false); return; }
         if (s_page == AGENT_PAGE_VOICE && voice_has_draft()) {
             const bool cleared = agent_client_clear_draft() == ESP_OK;
             if (bsp_lvgl_lock(1000)) { ui_notice(cleared ? "草稿已清空" : "暂时无法清空草稿"); bsp_lvgl_unlock(); }
@@ -1266,7 +1270,8 @@ static void voice_key(bsp_btn_t button)
                 bsp_lvgl_unlock();
             }
         } else if (mode == AGENT_VOICE_FAILED) {
-            agent_client_retry(s_view.message.id, s_view.selection);
+            if (agent_client_retry(s_view.message.id, s_view.selection) == ESP_OK)
+                agent_copy_text(s_play_rearm, sizeof(s_play_rearm), s_view.message.id);
         } else if (mode != AGENT_VOICE_TRANSCRIBING) {
             show_page(AGENT_PAGE_CHAT);
         }
@@ -1379,6 +1384,8 @@ static bool sleep_device(void)
     int level = 0;
     if (bsp_button_prepare_deep_sleep(&level) != ESP_OK) { esp_restart(); return false; }
     bsp_battery_sleep();
+    // The playback task may still be writing to the codec bsp_audio_sleep removes.
+    agent_speech_stop(true);
     bsp_audio_sleep();
     bsp_audio_prepare_deep_sleep();
     bsp_i2c_prepare_deep_sleep();
@@ -1419,12 +1426,18 @@ static void follow_speech(void)
         agent_speech_stop(false);
         agent_copy_text(s_play_session, sizeof(s_play_session), s_view.session_id);
         s_play_seen[0] = '\0';
+        s_play_rearm[0] = '\0';
         s_play_baseline = true;
     }
     if (!s_view.speech || s_view.session_id[0] == '\0' || !s_view.turn.present || s_view.capture != AGENT_IDLE ||
         s_view.session_switching || s_view.chat_loading || s_view.turn.after[0] != '\0') return;
     const char *id = s_view.turn.message.id;
-    if (id[0] == '\0' || strcmp(id, s_play_seen) == 0) return;
+    if (id[0] == '\0') return;
+    if (strcmp(id, s_play_seen) == 0) {
+        // The same message plays again only after this device retried it.
+        if (strcmp(id, s_play_rearm) != 0 || !agent_message_active(s_view.turn.message.state)) return;
+        s_play_rearm[0] = '\0';
+    }
     const bool baseline = s_play_baseline;
     s_play_baseline = false;
     agent_copy_text(s_play_seen, sizeof(s_play_seen), id);

@@ -108,7 +108,7 @@ static void writer_task(void *arg)
     (void)arg;
     for (;;) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-        bool primed = false, fade_in = true;
+        bool primed = false, fade_in = true, ran_dry = false;
         size_t carry = 0; // A received odd byte waits for the rest of its sample.
         for (;;) {
             if (atomic_load(&s_stop)) break;
@@ -116,7 +116,8 @@ static void writer_task(void *arg)
             const bool ended = atomic_load(&s_ended);
             if (!primed) {
                 // Wait for enough audio to ride out network and UI jitter.
-                if (queued >= (size_t)PLAY_START || (ended && queued > 0)) primed = true;
+                const size_t need = ran_dry ? (size_t)PLAY_RESUME : (size_t)PLAY_START;
+                if (queued >= need || (ended && queued > 0)) primed = true;
                 else if (ended) break;
                 else { vTaskDelay(pdMS_TO_TICKS(10)); continue; }
             }
@@ -126,6 +127,7 @@ static void writer_task(void *arg)
                 // Ran dry: refill a little before speaking again rather than stutter.
                 if (xStreamBufferBytesAvailable(s_pcm) < (size_t)PLAY_RESUME) {
                     primed = false;
+                    ran_dry = true;
                     fade_in = true;
                     publish_level(0);
                     // Record whether the network went quiet, to tell a stalled

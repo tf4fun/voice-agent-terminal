@@ -46,7 +46,8 @@ PCM and keepalives every 5 s while Hermes thinks), writes audio to the ES8311 at
 the capture format and publishes whether speech is audible, its loudness for the
 orb and the audio played so far.
 Recording stops speech before the microphone starts; long Down stops it in
-either view; leaving the session stops it. The I2S DMA ring holds only 90 ms,
+either view once it is audible (while the reply is still being prepared, long
+Down leaves the session instead); leaving the session stops it. The I2S DMA ring holds only 90 ms,
 so playback is split: the stream reader passes audio straight from the HTTP
 reads into a 16 KiB buffer (about 512 ms) shared with recording
 (`agent_pcm_pool.c`; the two never run together, since recording ends
@@ -101,16 +102,16 @@ sync task reads the session's newest turn metadata every 3 s. When the web page
 (or another client) has sent a newer message, the device switches to it, waits
 for its reply as described above and reads it aloud. When the newest message is
 the one shown but its state or revision has changed (another client retried it
-under the same ID), the device reloads that exchange; a retry is not read aloud
-again. Reading an older exchange is not interrupted.
+under the same ID), the device reloads that exchange; a retry from another
+client is not read aloud again, while one retried on the device is. Reading an older exchange is not interrupted.
 
 ## Screens and controls
 
 | Screen | Short press | Long press |
 | --- | --- | --- |
 | Sessions | Up/down select, crossing a page boundary loads four more sessions. OK opens the selected session. | OK creates a session and records while held. Up cycles to the next top-level page. Down sleeps. |
-| Voice (default in a session) | Without a draft: OK opens the text card; the strip shows the last reply one line at a time and advances on its own; the first up/down press holds the line in view, then each press moves one line; past the last line, or after 15 s without a key, it advances on its own again. With a draft: OK sends it; up/down scroll it. On a failed or unconfirmed reply OK retries. | OK records (and interrupts speech). Down leaves the current state: stops speech, else clears the draft, else returns to sessions. |
-| Text card | Up/down scroll about 70 % of the visible text per press, in whole lines. At an edge a double press (second press within 0.5 s, hinted on the first) opens the previous/next message (input/reply, then neighbouring exchanges), always at its top; at the first or last message it says so. The status shows the exchange position, e.g. 第 3/7 轮. OK returns to the voice view on the newest exchange. | OK records. Down stops speech, else returns to sessions. |
+| Voice (default in a session) | Without a draft: OK opens the text card; the strip shows the last reply one line at a time and advances on its own; the first up/down press holds the line in view, then each press moves one line; past the last line, or after 15 s without a key, it advances on its own again. With a draft: OK sends it; up/down scroll it. On a failed or unconfirmed reply OK retries. | OK records (and interrupts speech). Down leaves the current state: stops audible speech, else clears the draft, else returns to sessions. |
+| Text card | Up/down scroll about 70 % of the visible text per press, in whole lines. At an edge a double press (second press within 0.5 s, hinted on the first) opens the previous/next message (input/reply, then neighbouring exchanges), always at its top; at the first or last message it says so. The status shows the exchange position, e.g. 第 3/7 轮. OK returns to the voice view on the newest exchange. | OK records. Down stops audible speech, else returns to sessions. |
 | Recording | Release OK to finish. There is no cancel while recording or transcribing. | Keep OK held to record. |
 | Settings | Up/down select, OK enters an editor or saves it. Up increases and down decreases a numeric value. | In the settings list, Up cycles to the next top-level page and Down sleeps. In an editor, Down cancels the unsaved edit and returns to settings. |
 | Provisioning | OK finishes provisioning and restores station networking. | Down finishes provisioning and returns to settings. |
