@@ -214,6 +214,17 @@ func (e *environment) upload(t *testing.T, id string, pcm []byte) (int, string) 
 	return response.StatusCode, string(data)
 }
 
+func TestMalformedAudioIsAClientError(t *testing.T) {
+	e := setup(t)
+	for _, pcm := range [][]byte{{}, make([]byte, 6401)} {
+		recording := model.NewID()
+		e.request(t, "POST", "/api/v1/transcriptions", map[string]string{"id": recording}, 201)
+		if status, body := e.upload(t, recording, pcm); status != 400 || !strings.Contains(body, "invalid_audio") {
+			t.Fatalf("%d bytes: %d %s, want 400 invalid_audio", len(pcm), status, body)
+		}
+	}
+}
+
 func TestTranscribeThenFirstSendCreatesTitledSession(t *testing.T) {
 	e := setup(t)
 	recording := model.NewID()

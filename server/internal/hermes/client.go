@@ -30,7 +30,6 @@ type Update struct {
 }
 
 type UpstreamError struct {
-	Status    int
 	Code      string
 	Reason    string
 	Uncertain bool
@@ -90,7 +89,7 @@ func (c *Client) sessionRequest(ctx context.Context, method, path string, payloa
 		}
 		_ = json.NewDecoder(io.LimitReader(response.Body, 64<<10)).Decode(&body)
 		return response.StatusCode, &UpstreamError{
-			Status: response.StatusCode, Code: "hermes_session_error", Reason: body.Error.Code,
+			Code: "hermes_session_error", Reason: body.Error.Code,
 		}
 	}
 	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 64<<10))
@@ -152,7 +151,7 @@ func (c *Client) ownedSession(parent context.Context, id string) (int, error) {
 	}
 	defer response.Body.Close()
 	if response.StatusCode != 200 {
-		return response.StatusCode, &UpstreamError{Status: response.StatusCode, Code: "hermes_session_error"}
+		return response.StatusCode, &UpstreamError{Code: "hermes_session_error"}
 	}
 	var body struct {
 		Session struct {
@@ -194,7 +193,7 @@ func (c *Client) Chat(ctx context.Context, message model.Message, emit func(Upda
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return "", &UpstreamError{Status: response.StatusCode, Code: fmt.Sprintf("hermes_http_%d", response.StatusCode), Uncertain: response.StatusCode >= 500}
+		return "", &UpstreamError{Code: fmt.Sprintf("hermes_http_%d", response.StatusCode), Uncertain: response.StatusCode >= 500}
 	}
 	if message.Attempts > 0 {
 		return recoverReply(response.Body, emit)

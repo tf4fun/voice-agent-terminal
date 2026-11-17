@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"mime"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/tf4fun/voice-agent-terminal/server/internal/asr"
+	"github.com/tf4fun/voice-agent-terminal/server/internal/audio"
 	"github.com/tf4fun/voice-agent-terminal/server/internal/events"
 	"github.com/tf4fun/voice-agent-terminal/server/internal/gateway"
 	"github.com/tf4fun/voice-agent-terminal/server/internal/hermes"
@@ -68,8 +70,11 @@ func New(service *gateway.Service) http.Handler {
 	protected := http.NewCrossOriginProtection().Handler(mux)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
-			if recover() != nil {
-				service.Log.Error("request handler failed")
+			if value := recover(); value != nil {
+				if value == http.ErrAbortHandler {
+					panic(value) // net/http's own signal to abort the response.
+				}
+				service.Log.Error("request handler failed", "path", r.URL.Path, "panic", fmt.Sprintf("%T", value))
 				writeError(w, 500, "internal_error")
 			}
 		}()
@@ -380,7 +385,8 @@ func (s *Server) audio(w http.ResponseWriter, r *http.Request) {
 	controller := http.NewResponseController(w)
 	_ = controller.SetReadDeadline(time.Now().Add(s.service.Config.CaptureRequestTimeout()))
 	_ = controller.EnableFullDuplex()
-	maximum := min(s.service.Config.MaxAudioBytes, int64(rate)*2*int64(s.service.Config.CaptureTimeout/time.Second))
+	// PCM16 mono for the longest recording the gateway accepts.
+	maximum := int64(rate) * 2 * int64(s.service.Config.CaptureTimeout/time.Second)
 	input := &audioBody{ReadCloser: http.MaxBytesReader(w, r.Body, maximum), controller: controller}
 	text, err := s.service.Transcribe(r.Context(), r.PathValue("transcription"), input, rate)
 	if err != nil {
@@ -390,6 +396,8 @@ func (s *Server) audio(w http.ResponseWriter, r *http.Request) {
 			writeError(w, 413, "audio_too_large")
 		case errors.Is(err, gateway.ErrNoSpeech):
 			writeError(w, 422, "no_speech")
+		case errors.Is(err, audio.ErrPCM):
+			writeError(w, 400, "invalid_audio") // Empty or a split final sample.
 		case errors.Is(err, asr.ErrLimit):
 			writeError(w, 413, "limit_exceeded")
 		case errors.Is(err, store.ErrBusy) || errors.Is(err, store.ErrConflict) || errors.Is(err, store.ErrLimit):

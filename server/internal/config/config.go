@@ -39,7 +39,6 @@ type Config struct {
 	Workers          int
 	ChatTimeout      time.Duration
 	CaptureTimeout   time.Duration
-	MaxAudioBytes    int64
 }
 
 // CaptureTimeout bounds audio duration. Setup, upload drain and final recognition
@@ -71,7 +70,7 @@ func Load(getenv func(string) string) (Config, error) {
 		OpenAIModel: value("OPENAI_TRANSCRIBE_MODEL", "gpt-live-transcribe"),
 		TTSProvider: value("VOICE_TTS_PROVIDER", "openai"), TTSURL: value("OPENAI_TTS_URL", "wss://api.openai.com/v1/realtime"),
 		TTSModel: value("OPENAI_TTS_MODEL", "gpt-realtime-2.1-mini"), TTSVoice: value("OPENAI_TTS_VOICE", "marin"),
-		ChatTimeout: 10 * time.Minute, CaptureTimeout: 5 * time.Minute, MaxAudioBytes: 15 << 20,
+		ChatTimeout: 10 * time.Minute, CaptureTimeout: 5 * time.Minute,
 	}
 	var err error
 	if cfg.MDNS, err = strconv.ParseBool(value("VOICE_MDNS", "true")); err != nil {
