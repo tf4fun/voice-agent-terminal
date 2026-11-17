@@ -1377,8 +1377,6 @@ static bool sleep_device(void)
     int level = 0;
     if (bsp_button_prepare_deep_sleep(&level) != ESP_OK) { esp_restart(); return false; }
     bsp_battery_sleep();
-    // The playback task may still be writing to the codec bsp_audio_sleep removes.
-    agent_speech_stop(true);
     bsp_audio_sleep();
     bsp_audio_prepare_deep_sleep();
     bsp_i2c_prepare_deep_sleep();
