@@ -55,7 +55,7 @@ static agent_view_t s_view;
 static uint32_t s_seen_capture;
 static int s_selected, s_setting_selected;
 static int s_session_offset = -1;
-static bool s_sleep_requested, s_manual_sleep;
+static bool s_sleep_requested;
 static bool s_record_requested, s_record_dismissed;
 static bool s_wake_ok;
 static char s_local_notice[64];
@@ -1158,7 +1158,9 @@ static void settings_key(bsp_btn_t button, bool hold)
 static void exit_page(void)
 {
     if (agent_page_is_root(s_page, s_edit.active)) {
-        s_manual_sleep = true;
+        // Screen off only: the network, open session and draft survive, and
+        // the deep-sleep delay starts now like an idle screen-off.
+        memo_power_blank(&s_power, esp_timer_get_time() / 1000);
         return;
     }
     const agent_page_t target = agent_page_exit(s_page, s_edit.active);
@@ -1394,17 +1396,17 @@ static void power_tick(int64_t now)
     agent_speech_copy(&speech);
     const bool active = s_view.capture != AGENT_IDLE || (s_view.busy && !s_sleep_requested) || s_edit.active || s_page == AGENT_PAGE_PROVISION ||
         agent_message_active(s_view.message.state) || speech.active || bsp_button_read_mv() < BSP_BTN_MV_RELEASED_MIN;
-    const memo_power_action_t action = s_manual_sleep ? MEMO_POWER_SLEEP : memo_power_poll(&s_power, now / 1000, settings->screen_timeout_s,
+    const memo_power_action_t action = memo_power_poll(&s_power, now / 1000, settings->screen_timeout_s,
                                                       settings->sleep_min, active, s_view.busy && !s_sleep_requested);
     const int brightness = action == MEMO_POWER_ON ? (s_edit.active ? s_edit.value.brightness : settings->brightness) : 0;
     if (brightness != s_backlight) { bsp_display_backlight(brightness); s_backlight = brightness; }
     if (action == MEMO_POWER_SLEEP && !s_sleep_requested) s_sleep_requested = agent_client_pause() == ESP_OK;
     if (s_sleep_requested && action != MEMO_POWER_SLEEP) {
-        s_sleep_requested = s_manual_sleep = false;
+        s_sleep_requested = false;
         agent_client_provision(false);
     } else if (s_sleep_requested && agent_sleep_ready(s_view.paused, s_view.busy,
                bsp_button_read_mv() >= BSP_BTN_MV_RELEASED_MIN) && !sleep_device()) {
-        s_sleep_requested = s_manual_sleep = false;
+        s_sleep_requested = false;
         agent_client_provision(false);
     }
 }

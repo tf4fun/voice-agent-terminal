@@ -109,11 +109,11 @@ client is not read aloud again, while one retried on the device is. Reading an o
 
 | Screen | Short press | Long press |
 | --- | --- | --- |
-| Sessions | Up/down select, crossing a page boundary loads four more sessions. OK opens the selected session. | OK opens a new local chat and records while held; the gateway creates the session on its first send. Up cycles to the next top-level page. Down sleeps. |
+| Sessions | Up/down select, crossing a page boundary loads four more sessions. OK opens the selected session. | OK opens a new local chat and records while held; the gateway creates the session on its first send. Up cycles to the next top-level page. Down turns the screen off. |
 | Voice (default in a session) | Without a draft: OK opens the text card; the strip shows the last reply one line at a time and advances on its own; the first up/down press holds the line in view, then each press moves one line; past the last line, or after 15 s without a key, it advances on its own again. With a draft: OK sends it; up/down scroll it. On a failed or unconfirmed reply OK retries. | OK records (and interrupts speech). Down leaves the current state: stops audible speech, else clears the draft, else returns to sessions. |
 | Text card | Up/down scroll about 70 % of the visible text per press, in whole lines. At an edge a double press (second press within 0.5 s, hinted on the first) opens the previous/next message (input/reply, then neighbouring exchanges), always at its top; at the first or last message it says so. The status shows the exchange position, e.g. 第 3/7 轮. OK returns to the voice view on the newest exchange. | OK records. Down stops audible speech, else returns to sessions. |
 | Recording | Release OK to finish. There is no cancel while recording or transcribing. | Keep OK held to record. |
-| Settings | Up/down select, OK enters an editor or saves it. Up increases and down decreases a numeric value. | In the settings list, Up cycles to the next top-level page and Down sleeps. In an editor, Down cancels the unsaved edit and returns to settings. |
+| Settings | Up/down select, OK enters an editor or saves it. Up increases and down decreases a numeric value. | In the settings list, Up cycles to the next top-level page and Down turns the screen off. In an editor, Down cancels the unsaved edit and returns to settings. |
 | Provisioning | OK finishes provisioning and restores station networking. | Down finishes provisioning and returns to settings. |
 
 The conversation displays the pending text for review. It lives only in device
@@ -129,9 +129,11 @@ agree. Longer content keeps a UTF-8 prefix, leaves the rest unread on the server
 and ends with a notice that only the beginning is shown and the web page has it
 in full. Sessions and settings share a
 registered top-level page cycle. Long Up advances and wraps that cycle. Additional
-top-level pages use the same registry. Long Down sleeps at the top level and exits
-one level from detail screens. Manual sleep first pauses networking and waits for
-the held key to be released. Gateway
+top-level pages use the same registry. Long Down turns the screen off at the top level and exits
+one level from detail screens. Turning the screen off keeps networking, the open
+session and any draft; the next key press lights it again and only wakes, except
+that holding OK records at once. The deep-sleep delay then runs as after an idle
+screen-off, counted from when recording, thinking or speech ends. Gateway
 rediscovery is available by confirming the server row in settings. Each short
 press is handled independently of the driver's multi-click events.
 

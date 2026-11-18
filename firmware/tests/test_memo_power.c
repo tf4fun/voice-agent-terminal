@@ -49,6 +49,26 @@ int main(void)
     assert(memo_power_poll(&p,1051000,30,1,false,false)==MEMO_POWER_SLEEP);
     assert(memo_power_poll(&p,1051000,0,1,false,false)==MEMO_POWER_ON);
     assert(memo_power_poll(&p,9999999,0,1,false,false)==MEMO_POWER_ON);
-    puts("PASS: idle blanking, sleep delay after blanking and complete wake gestures");
+    // A requested blank darkens at once, ignores the releasing key, outlasts
+    // activity and starts the sleep delay when that activity ends.
+    p=(memo_power_t){.activity_ms=1000};
+    assert(memo_power_poll(&p,2000,30,1,true,false)==MEMO_POWER_ON);
+    memo_power_blank(&p,2000);
+    assert(memo_power_poll(&p,2040,30,1,true,false)==MEMO_POWER_BLANK);
+    assert(memo_power_key(&p,2100,false,true) && p.blank); // Release of the requesting key.
+    assert(memo_power_poll(&p,5000,30,1,true,true)==MEMO_POWER_BLANK);
+    assert(p.blank_since_ms==5000);
+    assert(memo_power_poll(&p,64999,30,1,false,false)==MEMO_POWER_BLANK);
+    assert(memo_power_poll(&p,65000,30,1,false,false)==MEMO_POWER_SLEEP);
+    assert(memo_power_key(&p,66000,true,false) && !p.blank && !p.forced);
+    assert(memo_power_poll(&p,66040,30,1,false,false)==MEMO_POWER_ON);
+    assert(memo_power_key(&p,66100,false,true)); // Wake gesture still consumed.
+    assert(!memo_power_key(&p,67000,true,false));
+    // Requested blank works with screen-off and sleep both disabled.
+    memo_power_blank(&p,70000);
+    assert(memo_power_poll(&p,9999999,0,0,false,false)==MEMO_POWER_BLANK);
+    assert(memo_power_key(&p,9999999,true,false));
+    assert(memo_power_poll(&p,9999999,0,0,false,false)==MEMO_POWER_ON);
+    puts("PASS: idle and requested blanking, sleep delay after blanking and complete wake gestures");
     return 0;
 }
