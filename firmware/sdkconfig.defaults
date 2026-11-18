@@ -75,3 +75,7 @@ CONFIG_FREERTOS_IDLE_TASK_STACKSIZE=768
 CONFIG_LV_USE_CLIB_MALLOC=y
 # The expanded GB2312 chat font needs large glyph bitmap offsets and maps.
 CONFIG_LV_FONT_FMT_TXT_LARGE=y
+# Deep-sleep wake trusts the image validated at the last boot instead of
+# hashing the whole 6 MB app (mostly fonts) again: about 0.7 s faster to the
+# first screen. Power-on and other resets still validate the full image.
+CONFIG_BOOTLOADER_SKIP_VALIDATE_IN_DEEP_SLEEP=y

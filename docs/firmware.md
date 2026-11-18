@@ -140,6 +140,8 @@ press is handled independently of the driver's multi-click events.
 Settings contain network, server, volume, brightness, screen-off delay,
 deep-sleep delay, theme, time zone and version. The sleep delay starts when the display goes dark;
 the screen stays on while recording, while Hermes thinks and while a reply is read aloud.
+A key wake from deep sleep skips the bootloader's full-image check, which the
+last boot already passed; power-on and other resets still validate the image.
 Selected session titles scroll horizontally. Dates and unselected rows have
 bounded single-line layouts. Active pages own their widgets and animations.
 Switching pages deletes the inactive page after loading a fixed transition screen.
